@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.2.0] - 2026-05-06
+
+### Performance
+- Sharded `s_pUniqueBoards` and `s_pMoves` B+ trees into 16 independent shards each, routed by a hash of canonical key fields — reduces per-tree lock contention by ~16× under high thread counts
+- Added bit-folding hash mix (four XOR-shifts) so shard distribution is uniform across all 16 shards
+- Added per-thread local BTP write staging buffer (up to 64 boards): flushes once per played board instead of once per legal move, cutting BTP write-lock acquisitions by ~8–16×
+
+### Added
+- Shard distribution display: multiline edit shows per-shard unique board counts and total, updated every stat cycle
+
+---
+
 ## [v1.1.0] - 2026-05-06
 
 ### Performance

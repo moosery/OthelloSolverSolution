@@ -23,8 +23,11 @@ BOARD             g_currentBoard{};
 
 // Module-level solver state — persist across Stop/Restart cycles within a session.
 // On fresh Start: freed and recreated. On Restart: BTP is reopened, B+ trees reused.
-static PBPTree s_pUniqueBoards = nullptr;
-static PBPTree s_pMoves        = nullptr;
+static const int NUM_BOARD_SHARDS = 16;  // must be a power of 2
+static const int NUM_MOVE_SHARDS  = 16;
+
+static PBPTree s_pUniqueBoards[NUM_BOARD_SHARDS] = {};
+static PBPTree s_pMoves[NUM_MOVE_SHARDS]         = {};
 static PBTP    s_pBtp          = nullptr;
 static char    s_btpDir[MAX_PATH] = {};
 static int     s_boardSize     = 0;
@@ -35,6 +38,42 @@ static int              s_numRotations  = 8;
 
 static const size_t BTP_MAX_FILE_SIZE   = 1ULL * 1024 * 1024 * 1024; // 1 GB per BTP file segment
 static const size_t WORKER_BATCH_SIZE   = 256;                        // boards dequeued per lock acquisition
+static const size_t TL_BTP_BATCH_MAX    = 64;                         // max child boards per played board
+
+// Per-thread staging buffer: AddBoardAndMove enqueues here; flushed to BTP after each board is played.
+thread_local static BOARD  tl_btpBatch[TL_BTP_BATCH_MAX];
+thread_local static size_t tl_btpBatchCount = 0;
+
+// ---- Shard selectors ----
+
+static inline int BoardShard(const BOARD* p)
+{
+    size_t h = p->ullCellsInUse ^ p->ullCellColors ^ (size_t)p->usBoardInfo;
+    h ^= h >> 32;
+    h ^= h >> 16;
+    h ^= h >> 8;
+    h ^= h >> 4;
+    return (int)(h & (NUM_BOARD_SHARDS - 1));
+}
+
+static inline int MoveShard(const MOVE* p)
+{
+    size_t h = p->ullCellsInUseParent ^ p->ullCellColorsParent ^ (size_t)p->usBoardInfoParent;
+    h ^= h >> 32;
+    h ^= h >> 16;
+    h ^= h >> 8;
+    h ^= h >> 4;
+    return (int)(h & (NUM_MOVE_SHARDS - 1));
+}
+
+// ---- Public shard inspection ----
+
+void GetBoardShardCounts(size_t* counts, int* pNumShards)
+{
+    *pNumShards = NUM_BOARD_SHARDS;
+    for (int i = 0; i < NUM_BOARD_SHARDS; i++)
+        counts[i] = s_pUniqueBoards[i] ? BPGetDataCnt(s_pUniqueBoards[i]) : 0;
+}
 
 // ---- Checkpoint helpers ----
 
@@ -131,7 +170,7 @@ static void ComputeResultBoardKeyFromMove(PMOVE pMove, PBOARD pBoard)
 
 static BPRc LookupMove(PMOVE pKey, PMOVE pResult)
 {
-    BPRc rc = BPFindEqualKey(s_pMoves, pKey, pResult);
+    BPRc rc = BPFindEqualKey(s_pMoves[MoveShard(pKey)], pKey, pResult);
     if (rc != BP_RC_Success && rc != BP_RC_Not_Found)
         Fatal(FATAL_BP_FIND, "LookupMove failed: %zu\n", rc);
     return rc;
@@ -139,7 +178,7 @@ static BPRc LookupMove(PMOVE pKey, PMOVE pResult)
 
 static BPRc LookupBoardFromBoardKey(PBOARD pKey, PBOARD pResult)
 {
-    BPRc rc = BPFindEqualKey(s_pUniqueBoards, pKey, pResult);
+    BPRc rc = BPFindEqualKey(s_pUniqueBoards[BoardShard(pKey)], pKey, pResult);
     if (rc != BP_RC_Success && rc != BP_RC_Not_Found)
         Fatal(FATAL_BP_FIND, "LookupBoardFromBoardKey failed: %zu\n", rc);
     return rc;
@@ -243,7 +282,7 @@ static void CalculateWins(PBOARD pBoard, int startIdx, int endIdx)
         Fatal(FATAL_BOARD_NOT_PLAYED, "CalculateWins: board in unexpected state %hd!\n", pBoard->usBoardState);
     }
 
-    rc = BPUpdate(s_pUniqueBoards, pBoard);
+    rc = BPUpdate(s_pUniqueBoards[BoardShard(pBoard)], pBoard);
     if (rc != BP_RC_Success)
         Fatal(FATAL_BOARD_UPDATE_FAILED, "CalculateWins: BPUpdate failed!\n");
 }
@@ -258,22 +297,28 @@ static void AddBoardAndMove(PBOARD pParent, PBOARD pResult, unsigned short usMov
         pResult, &uniqueBoard, &flipped, s_numRotations);
     MoveSet(&move, pParent, &uniqueBoard, usMoveIdx);
 
-    BPRc rc = BPInsertCopy(s_pUniqueBoards, &uniqueBoard);
+    BPRc rc = BPInsertCopy(s_pUniqueBoards[BoardShard(&uniqueBoard)], &uniqueBoard);
     if (rc != BP_RC_Success && rc != BP_RC_Duplicate_Found)
         Fatal(FATAL_BP_INSERT, "AddBoardAndMove: unique boards insert failed: %zu\n", rc);
     else if (rc == BP_RC_Duplicate_Found)
         g_stats.boardsDuplicate.fetch_add(1, std::memory_order_relaxed);
-    else // BP_RC_Success
+    else // BP_RC_Success — stage for batched BTP write
     {
-        BTPRc btpRc = BTPAddRecord(s_pBtp, &uniqueBoard);
-        if (btpRc != BTP_RC_Success)
+        if (tl_btpBatchCount < TL_BTP_BATCH_MAX)
+            tl_btpBatch[tl_btpBatchCount++] = uniqueBoard;
+        else
         {
-            ErrorPrint(stderr);
-            Fatal(FATAL_BOARDS_TO_PROCESS_FAILED, "AddBoardAndMove: BTPAddRecord failed!\n");
+            // Batch full (shouldn't happen in practice) — fall back to immediate write
+            BTPRc btpRc = BTPAddRecord(s_pBtp, &uniqueBoard);
+            if (btpRc != BTP_RC_Success)
+            {
+                ErrorPrint(stderr);
+                Fatal(FATAL_BOARDS_TO_PROCESS_FAILED, "AddBoardAndMove: BTPAddRecord failed!\n");
+            }
         }
     }
 
-    rc = BPInsertCopy(s_pMoves, &move);
+    rc = BPInsertCopy(s_pMoves[MoveShard(&move)], &move);
     if (rc != BP_RC_Success)
         Fatal(FATAL_BP_INSERT, "AddBoardAndMove: moves insert failed: %zu\n", rc);
 }
@@ -395,12 +440,24 @@ static void WorkerThreadFunc(int /*threadIndex*/)
 
         PlayTheBoard(&theBoard);
 
-        bpRc = BPUpdate(s_pUniqueBoards, &theBoard);
+        bpRc = BPUpdate(s_pUniqueBoards[BoardShard(&theBoard)], &theBoard);
         if (bpRc != BP_RC_Success)
         {
             BoardPrint(stderr, 1, &theBoard);
             ErrorPrint(stderr);
             Fatal(FATAL_BOARD_UPDATE_FAILED, "WorkerThreadFunc: BPUpdate failed!\n");
+        }
+
+        // Flush child boards staged by AddBoardAndMove to BTP in one lock acquisition
+        if (tl_btpBatchCount > 0)
+        {
+            BTPRc btpRc = BTPAddRecordBatch(s_pBtp, tl_btpBatch, tl_btpBatchCount);
+            tl_btpBatchCount = 0;
+            if (btpRc != BTP_RC_Success)
+            {
+                ErrorPrint(stderr);
+                Fatal(FATAL_BOARDS_TO_PROCESS_FAILED, "WorkerThreadFunc: BTPAddRecordBatch failed!\n");
+            }
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -428,6 +485,7 @@ static void ResetStats()
 {
     g_stats.boardsProcessed.store(0);
     g_stats.boardsEnqueued.store(0);
+    g_stats.boardsDuplicate.store(0);
     g_stats.totalNanos.store(0);
     g_stats.activeCount.store(0);
     g_stats.idleCount.store(0);
@@ -440,6 +498,14 @@ static void ResetStats()
         std::lock_guard<std::mutex> lk(g_currentBoardMutex);
         memset(&g_currentBoard, 0, sizeof(g_currentBoard));
     }
+}
+
+static void FreeAllTrees()
+{
+    for (int i = 0; i < NUM_BOARD_SHARDS; i++)
+        if (s_pUniqueBoards[i]) { BPFreeTree(s_pUniqueBoards[i], false); s_pUniqueBoards[i] = nullptr; }
+    for (int i = 0; i < NUM_MOVE_SHARDS; i++)
+        if (s_pMoves[i]) { BPFreeTree(s_pMoves[i], false); s_pMoves[i] = nullptr; }
 }
 
 UINT ControllerThread(LPVOID pArgs)
@@ -467,39 +533,45 @@ UINT ControllerThread(LPVOID pArgs)
     if (!isRestart)
     {
         // Fresh start: release any previous run's resources
-        if (s_pUniqueBoards) { BPFreeTree(s_pUniqueBoards, false); s_pUniqueBoards = nullptr; }
-        if (s_pMoves)        { BPFreeTree(s_pMoves, false);        s_pMoves = nullptr; }
-        if (s_pBtp)          { BTPFree(&s_pBtp);                   s_pBtp = nullptr; }
+        FreeAllTrees();
+        if (s_pBtp) { BTPFree(&s_pBtp); s_pBtp = nullptr; }
 
         // Wipe old BTP data files so BTPCreate starts clean
         DeleteDirectoryRecursively(s_btpDir);
 
-        // Create in-memory B+ trees
+        // Create sharded B+ trees for unique boards
         BPIdxFld boardFields[] = { { 0, offsetof(BOARD, ullPossibleMoves), BP_IDX_DATATYPE_BYTE } };
-        BPRc bpRc = BPCreateTree(&s_pUniqueBoards, 256, BP_IDX_MAX_DATA_DEFAULT, 0, 1, boardFields, sizeof(BOARD));
-        if (bpRc != BP_RC_Success)
+        for (int i = 0; i < NUM_BOARD_SHARDS; i++)
         {
-            ErrorPrint(stderr);
-            PostMessage(hwnd, WM_CUSTOM_SOLVER_DONE, 0, 0);
-            return 1;
+            BPRc bpRc = BPCreateTree(&s_pUniqueBoards[i], 256, BP_IDX_MAX_DATA_DEFAULT, 0, 1, boardFields, sizeof(BOARD));
+            if (bpRc != BP_RC_Success)
+            {
+                FreeAllTrees();
+                ErrorPrint(stderr);
+                PostMessage(hwnd, WM_CUSTOM_SOLVER_DONE, 0, 0);
+                return 1;
+            }
         }
 
+        // Create sharded B+ trees for moves
         BPIdxFld moveFields[] = { { 0, offsetof(MOVE, ullCellsInUseResult), BP_IDX_DATATYPE_BYTE } };
-        bpRc = BPCreateTree(&s_pMoves, 256, BP_IDX_MAX_DATA_DEFAULT, 0, 1, moveFields, sizeof(MOVE));
-        if (bpRc != BP_RC_Success)
+        for (int i = 0; i < NUM_MOVE_SHARDS; i++)
         {
-            BPFreeTree(s_pUniqueBoards, false); s_pUniqueBoards = nullptr;
-            ErrorPrint(stderr);
-            PostMessage(hwnd, WM_CUSTOM_SOLVER_DONE, 0, 0);
-            return 1;
+            BPRc bpRc = BPCreateTree(&s_pMoves[i], 256, BP_IDX_MAX_DATA_DEFAULT, 0, 1, moveFields, sizeof(MOVE));
+            if (bpRc != BP_RC_Success)
+            {
+                FreeAllTrees();
+                ErrorPrint(stderr);
+                PostMessage(hwnd, WM_CUSTOM_SOLVER_DONE, 0, 0);
+                return 1;
+            }
         }
 
         // Create file-backed BTP queue
         s_pBtp = BTPCreate(s_btpDir, sizeof(BOARD), BTP_MAX_FILE_SIZE);
         if (!s_pBtp)
         {
-            BPFreeTree(s_pUniqueBoards, false); s_pUniqueBoards = nullptr;
-            BPFreeTree(s_pMoves, false);        s_pMoves = nullptr;
+            FreeAllTrees();
             ErrorPrint(stderr);
             PostMessage(hwnd, WM_CUSTOM_SOLVER_DONE, 0, 0);
             return 1;
@@ -517,7 +589,7 @@ UINT ControllerThread(LPVOID pArgs)
             return 1;
         }
 
-        bpRc = BPInsertCopy(s_pUniqueBoards, pRoot);
+        BPRc bpRc = BPInsertCopy(s_pUniqueBoards[BoardShard(pRoot)], pRoot);
         if (bpRc != BP_RC_Success)
         {
             MemFree(pRoot);
@@ -617,22 +689,27 @@ UINT ControllerThread(LPVOID pArgs)
                 int ei = GETBOARDENDIDX(&rootBoard);
                 CalculateWins(&rootBoard, si, ei);
 
-                size_t played    = g_stats.boardsProcessed.load();
-                size_t unique    = BPGetDataCnt(s_pUniqueBoards);
-                long long nanos  = g_stats.totalNanos.load();
+                size_t played = g_stats.boardsProcessed.load();
+                size_t unique = 0;
+                for (int i = 0; i < NUM_BOARD_SHARDS; i++)
+                    unique += BPGetDataCnt(s_pUniqueBoards[i]);
+                size_t moveCount = 0;
+                for (int i = 0; i < NUM_MOVE_SHARDS; i++)
+                    moveCount += BPGetDataCnt(s_pMoves[i]);
+                long long nanos = g_stats.totalNanos.load();
 
                 FinalStats* pFinal = new FinalStats();
-                pFinal->blackWins      = rootBoard.ullBlackWins;
-                pFinal->whiteWins      = rootBoard.ullWhiteWins;
-                pFinal->ties           = rootBoard.ullTies;
-                pFinal->endBoards      = s_numFirstWins;
-                pFinal->boardsPlayed   = played;
-                pFinal->uniqueBoards   = unique;
-                pFinal->duplicateBoards= g_stats.boardsDuplicate.load();
-                pFinal->moveCount      = BPGetDataCnt(s_pMoves);
-                pFinal->wallClockMs    = wallMs;
-                pFinal->totalNanos     = nanos;
-                pFinal->numRotations   = s_numRotations;
+                pFinal->blackWins       = rootBoard.ullBlackWins;
+                pFinal->whiteWins       = rootBoard.ullWhiteWins;
+                pFinal->ties            = rootBoard.ullTies;
+                pFinal->endBoards       = s_numFirstWins;
+                pFinal->boardsPlayed    = played;
+                pFinal->uniqueBoards    = unique;
+                pFinal->duplicateBoards = g_stats.boardsDuplicate.load();
+                pFinal->moveCount       = moveCount;
+                pFinal->wallClockMs     = wallMs;
+                pFinal->totalNanos      = nanos;
+                pFinal->numRotations    = s_numRotations;
                 lParam = (LPARAM)pFinal;
             }
             MemFree(pRootKey);

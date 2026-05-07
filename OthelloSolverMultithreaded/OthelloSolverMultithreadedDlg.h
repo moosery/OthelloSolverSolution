@@ -68,6 +68,7 @@ public:
     CEdit            m_editCurrentBoard;
     CEdit            m_editMaxBoard;
     CEdit            m_editStatus;
+    CEdit            m_editShardDist;
 
 private:
     CFont  m_boardFont;             // fixed-pitch font for ASCII art edits

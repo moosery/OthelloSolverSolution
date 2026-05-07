@@ -86,6 +86,59 @@ BTPRc BTPAddRecord(PBTP pBtp, void* pData)
 	return rc;
 }
 
+// Writes count records in a single write-lock acquisition.
+BTPRc BTPAddRecordBatch(PBTP pBtp, const void* pBuffer, size_t count)
+{
+	if (count == 0) return BTP_RC_Success;
+
+	const char* pData = static_cast<const char*>(pBuffer);
+	BTPRc rc = BTP_RC_Success;
+
+	RWLockWriteLock("BTPAddRecordBatch", &(pBtp->writeCursor.cursorLock));
+
+	for (size_t i = 0; i < count && rc == BTP_RC_Success; i++)
+	{
+		if (pBtp->writeCursor.fp == NULL)
+		{
+			char szFileName[BTP_FULLPATH_SZ];
+			sprintf_s(szFileName, BTP_DATAFILE_NAME_FORMAT,
+				pBtp->szBaseDirectoryName, pBtp->writeCursor.currFileNumber);
+			pBtp->writeCursor.fp = fopen(szFileName, "wb+");
+			if (pBtp->writeCursor.fp == NULL)
+			{
+				rc = BTP_RC_Could_Not_Open_File_For_Write;
+				Error(rc, "Could not open %s for writing", szFileName);
+				break;
+			}
+			pBtp->writeCursor.currRecordNumber = 0;
+		}
+
+		if (fwrite(pData + i * pBtp->recordSize, pBtp->recordSize, 1, pBtp->writeCursor.fp) != 1)
+		{
+			char szFileName[BTP_FULLPATH_SZ];
+			sprintf_s(szFileName, BTP_DATAFILE_NAME_FORMAT,
+				pBtp->szBaseDirectoryName, pBtp->writeCursor.currFileNumber);
+			rc = BTP_RC_Could_Not_Write_To_File;
+			Error(rc, "Could not write to file %s", szFileName);
+			break;
+		}
+
+		(pBtp->writeCursor.currRecordNumber)++;
+
+		if (pBtp->writeCursor.currRecordNumber >= pBtp->maxRecordsPerFile)
+		{
+			fclose(pBtp->writeCursor.fp);
+			pBtp->writeCursor.fp = NULL;
+			pBtp->writeCursor.currRecordNumber = 0;
+			(pBtp->writeCursor.currFileNumber)++;
+		}
+	}
+
+	RWLockWriteUnlock("BTPAddRecordBatch", &(pBtp->writeCursor.cursorLock));
+
+	return rc;
+}
+
 // Must be called with readCursor.cursorLock write-held.
 // Ensures readCursor.fp is open and numRecsInFile is valid.
 // Sets *pTakeCheckpt if the caller should call BTPTakeChkPt after releasing all locks.

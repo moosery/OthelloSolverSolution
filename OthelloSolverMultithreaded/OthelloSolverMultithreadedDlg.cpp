@@ -71,6 +71,7 @@ void COthelloSolverMultithreadedDlg::DoDataExchange(CDataExchange* pDX)
     DDX_Control(pDX, IDC_EDIT_CURRENT_BOARD,     m_editCurrentBoard);
     DDX_Control(pDX, IDC_EDIT_MAX_BOARD,         m_editMaxBoard);
     DDX_Control(pDX, IDC_EDIT_STATUS,            m_editStatus);
+    DDX_Control(pDX, IDC_EDIT_SHARD_DIST,       m_editShardDist);
 }
 
 BEGIN_MESSAGE_MAP(COthelloSolverMultithreadedDlg, CDialogEx)
@@ -477,6 +478,24 @@ LRESULT COthelloSolverMultithreadedDlg::OnUpdateStatus(WPARAM, LPARAM)
         m_editMaxBoard.SetWindowTextA(BoardToAscii(g_maxBoard));
     }
 
+    {
+        size_t shardCounts[16];
+        int    numShards = 0;
+        GetBoardShardCounts(shardCounts, &numShards);
+        CString shardText;
+        char    line[64];
+        size_t  total = 0;
+        for (int i = 0; i < numShards; i++)
+        {
+            total += shardCounts[i];
+            sprintf_s(line, "Shard %2d: %zu\r\n", i, shardCounts[i]);
+            shardText += line;
+        }
+        sprintf_s(line, "Total   : %zu", total);
+        shardText += line;
+        m_editShardDist.SetWindowTextA(shardText);
+    }
+
     return 0;
 }
 
@@ -501,6 +520,8 @@ LRESULT COthelloSolverMultithreadedDlg::OnSolverDone(WPARAM wParam, LPARAM lPara
     long long totalOutcomes = (long long)(pF->blackWins + pF->whiteWins + pF->ties);
     long long nanosPerBoard = (pF->boardsPlayed > 0)
         ? (pF->totalNanos / (long long)pF->boardsPlayed) : 0;
+    long long throughputNanosPerBoard = (pF->boardsPlayed > 0 && pF->wallClockMs > 0)
+        ? (pF->wallClockMs * 1000000LL / (long long)pF->boardsPlayed) : 0;
     long long wallSec  = pF->wallClockMs / 1000;
     long long wallMs   = pF->wallClockMs % 1000;
 
@@ -528,13 +549,15 @@ LRESULT COthelloSolverMultithreadedDlg::OnSolverDone(WPARAM wParam, LPARAM lPara
             "Move Count             : %zu\n"
             "\n"
             "Total Time             : %lld.%03lld seconds\n"
-            "Total Nanos Per Board  : %lld\n",
+            "ns/Board (CPU)         : %lld\n"
+            "ns/Board (Throughput)  : %lld\n",
             pF->numRotations,
             pF->blackWins, pF->whiteWins, pF->ties,
             totalOutcomes,
             pF->boardsPlayed, pF->uniqueBoards, pF->duplicateBoards, pF->moveCount,
             wallSec, wallMs,
-            nanosPerBoard);
+            nanosPerBoard,
+            throughputNanosPerBoard);
         fclose(fp);
         ShellExecuteA(GetSafeHwnd(), "open", "notepad.exe", tmpPath, nullptr, SW_SHOW);
     }

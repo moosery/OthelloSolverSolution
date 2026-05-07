@@ -29,9 +29,10 @@
 #define IDC_EDIT_CURRENT_BOARD          1019
 #define IDC_EDIT_MAX_BOARD              1020
 #define IDC_EDIT_STATUS                 1021
-#define IDC_EDIT_MAX_MOVES2             1022
 #define IDC_EDIT_THROUGHPUT_NANOS       1022
 #define IDC_COMBO_ROTATIONS             1041
+#define IDC_EDIT1                       1042
+#define IDC_EDIT_SHARD_DIST             1042
 
 // Next default values for new objects
 // 
@@ -39,7 +40,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        130
 #define _APS_NEXT_COMMAND_VALUE         32771
-#define _APS_NEXT_CONTROL_VALUE         1042
+#define _APS_NEXT_CONTROL_VALUE         1043
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

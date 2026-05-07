@@ -36,6 +36,7 @@ PBTP BTPRestartFromLastChkPt(const char* pszDirName);
 BTPRc BTPAddRecord(PBTP pBTP, void* pData);
 BTPRc BTPGetNextRecord(PBTP pBTP, void* ppData);
 BTPRc BTPGetNextRecordBatch(PBTP pBtp, void* pBuffer, size_t maxRecords, size_t* pGot);
+BTPRc BTPAddRecordBatch(PBTP pBtp, const void* pBuffer, size_t count);
 void BTPFree(PBTP* ppBTP);
 
 /* Checkpt only records the file we are reading from, not the record we read.    */

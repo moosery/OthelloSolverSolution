@@ -50,3 +50,4 @@ struct ControllerArgs
 
 UINT ControllerThread(LPVOID pArgs);
 bool CheckpointExists(const char* dataDir);
+void GetBoardShardCounts(size_t* counts, int* pNumShards);
