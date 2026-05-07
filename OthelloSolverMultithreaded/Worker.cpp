@@ -33,6 +33,8 @@ static size_t  s_numFirstWins  = 0;
 static std::atomic<int> s_workersRunning{ 0 };
 static int              s_numRotations  = 8;
 
+static const size_t BTP_MAX_FILE_SIZE = 1ULL * 1024 * 1024 * 1024; // 1 GB per BTP file segment
+
 // ---- Checkpoint helpers ----
 
 bool CheckpointExists(const char* dataDir)
@@ -363,6 +365,11 @@ static void WorkerThreadFunc(int /*threadIndex*/)
             Fatal(FATAL_BOARD_FIND_FAILED, "WorkerThreadFunc: board not found in unique boards!\n");
         }
 
+        // On restart the BTP replays any boards that were in-flight at checkpoint time.
+        // Those boards may already be in a played state in the B+ tree — skip them.
+        if (theBoard.usBoardState != BOARD_STATE_NOT_PLAYED)
+            continue;
+
         g_stats.boardsEnqueued.fetch_add(1, std::memory_order_relaxed);
         g_stats.activeCount.fetch_add(1, std::memory_order_acq_rel);
 
@@ -477,7 +484,7 @@ UINT ControllerThread(LPVOID pArgs)
         }
 
         // Create file-backed BTP queue
-        s_pBtp = BTPCreate(s_btpDir, sizeof(BOARD), 1000000);
+        s_pBtp = BTPCreate(s_btpDir, sizeof(BOARD), BTP_MAX_FILE_SIZE);
         if (!s_pBtp)
         {
             BPFreeTree(s_pUniqueBoards, false); s_pUniqueBoards = nullptr;

@@ -60,6 +60,7 @@ public:
     CEdit            m_editBoardsProcessed;
     CEdit            m_editBoardsSec;
     CEdit            m_editNanosPerBoard;
+    CEdit            m_editThroughputNanosPerBoard;
     CEdit            m_editActiveThreads;
     CEdit            m_editIdleThreads;
     CEdit            m_editQueueDepth;

@@ -30,7 +30,7 @@ typedef struct _BTP
 	BTPCursor writeCursor;
 }BTP, * PBTP;
 
-PBTP BTPCreate(const char* pszDirName, size_t recordSize, size_t maxRecordsPerFile);
+PBTP BTPCreate(const char* pszDirName, size_t recordSize, size_t maxFileSize);
 PBTP BTPRestartFromLastChkPt(const char* pszDirName);
 
 BTPRc BTPAddRecord(PBTP pBTP, void* pData);

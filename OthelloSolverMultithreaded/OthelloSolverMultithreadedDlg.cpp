@@ -62,7 +62,8 @@ void COthelloSolverMultithreadedDlg::DoDataExchange(CDataExchange* pDX)
     DDX_Control(pDX, IDC_BTN_RESTART,            m_btnRestart);
     DDX_Control(pDX, IDC_EDIT_BOARDS_PROCESSED,  m_editBoardsProcessed);
     DDX_Control(pDX, IDC_EDIT_BOARDS_SEC,        m_editBoardsSec);
-    DDX_Control(pDX, IDC_EDIT_NANOS_PER_BOARD,   m_editNanosPerBoard);
+    DDX_Control(pDX, IDC_EDIT_NANOS_PER_BOARD,        m_editNanosPerBoard);
+    DDX_Control(pDX, IDC_EDIT_THROUGHPUT_NANOS,       m_editThroughputNanosPerBoard);
     DDX_Control(pDX, IDC_EDIT_ACTIVE_THREADS,    m_editActiveThreads);
     DDX_Control(pDX, IDC_EDIT_IDLE_THREADS,      m_editIdleThreads);
     DDX_Control(pDX, IDC_EDIT_QUEUE_DEPTH,       m_editQueueDepth);
@@ -114,6 +115,7 @@ BOOL COthelloSolverMultithreadedDlg::OnInitDialog()
     }
     SetIcon(m_hIcon, TRUE);
     SetIcon(m_hIcon, FALSE);
+    SetWindowTextA("Othello Solver v" APP_VERSION);
 
     // Data directory default
     m_editDataDir.SetWindowTextA("D:\\OthelloDataDir");
@@ -457,7 +459,10 @@ LRESULT COthelloSolverMultithreadedDlg::OnUpdateStatus(WPARAM, LPARAM)
 
     sprintf_s(buf, "%zu", proc);              m_editBoardsProcessed.SetWindowTextA(buf);
     sprintf_s(buf, "%zu", boardsPerSec);      m_editBoardsSec.SetWindowTextA(buf);
-    sprintf_s(buf, "%lld", nanosPerBoard);    m_editNanosPerBoard.SetWindowTextA(buf);
+    long long throughputNanosPerBoard = (boardsPerSec > 0) ? (1000000000LL / (long long)boardsPerSec) : 0;
+
+    sprintf_s(buf, "%lld", nanosPerBoard);          m_editNanosPerBoard.SetWindowTextA(buf);
+    sprintf_s(buf, "%lld", throughputNanosPerBoard); m_editThroughputNanosPerBoard.SetWindowTextA(buf);
     sprintf_s(buf, "%d",  active);            m_editActiveThreads.SetWindowTextA(buf);
     sprintf_s(buf, "%d",  idle);              m_editIdleThreads.SetWindowTextA(buf);
     sprintf_s(buf, "%zu", queueDepth);        m_editQueueDepth.SetWindowTextA(buf);

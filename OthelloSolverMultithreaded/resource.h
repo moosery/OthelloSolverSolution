@@ -29,7 +29,8 @@
 #define IDC_EDIT_CURRENT_BOARD          1019
 #define IDC_EDIT_MAX_BOARD              1020
 #define IDC_EDIT_STATUS                 1021
-#define IDC_COMBO1                      1041
+#define IDC_EDIT_MAX_MOVES2             1022
+#define IDC_EDIT_THROUGHPUT_NANOS       1022
 #define IDC_COMBO_ROTATIONS             1041
 
 // Next default values for new objects
