@@ -1,5 +1,19 @@
 # Changelog
 
+## [v1.1.0] - 2026-05-06
+
+### Performance
+- Removed BTP file sort (`BTPSortFile` eliminated): sort was redundant since B+ tree already deduplicates; with 1 GB files the sort would have frozen all workers for minutes
+- Batch dequeue from BTP: workers now pull 256 boards per lock acquisition (`BTPGetNextRecordBatch`) instead of one, reducing read-lock contention 256×
+
+### Fixed
+- `CopyFile` → `CopyFileA` in BTP.cpp to suppress IntelliSense Unicode warning
+
+### Refactored
+- Extracted `EnsureReadFileOpen` helper in BTP.cpp so `BTPGetNextRecord` and `BTPGetNextRecordBatch` share the file-open/checkpoint logic without duplication
+
+---
+
 ## [v1.0.0] - 2026-05-06
 
 ### Added

@@ -33,7 +33,8 @@ static size_t  s_numFirstWins  = 0;
 static std::atomic<int> s_workersRunning{ 0 };
 static int              s_numRotations  = 8;
 
-static const size_t BTP_MAX_FILE_SIZE = 1ULL * 1024 * 1024 * 1024; // 1 GB per BTP file segment
+static const size_t BTP_MAX_FILE_SIZE   = 1ULL * 1024 * 1024 * 1024; // 1 GB per BTP file segment
+static const size_t WORKER_BATCH_SIZE   = 256;                        // boards dequeued per lock acquisition
 
 // ---- Checkpoint helpers ----
 
@@ -332,30 +333,40 @@ static void PlayTheBoard(PBOARD pBoard)
 
 static void WorkerThreadFunc(int /*threadIndex*/)
 {
-    BOARD tempBoard, theBoard;
+    BOARD batchBuf[WORKER_BATCH_SIZE];
+    size_t batchCount = 0;
+    size_t batchIdx   = 0;
+    BOARD theBoard;
 
     while (true)
     {
         if (g_stop.load(std::memory_order_relaxed)) break;
 
-        g_stats.idleCount.fetch_add(1, std::memory_order_relaxed);
-        BTPRc rc = BTPGetNextRecord(s_pBtp, &tempBoard);
-        g_stats.idleCount.fetch_sub(1, std::memory_order_relaxed);
-
-        if (rc == BTP_RC_No_More_Data)
+        // Refill local batch when empty
+        if (batchIdx >= batchCount)
         {
-            if (g_stats.activeCount.load(std::memory_order_acquire) == 0)
-                break;
-            Sleep(1);
-            continue;
+            batchIdx = batchCount = 0;
+            g_stats.idleCount.fetch_add(1, std::memory_order_relaxed);
+            BTPRc rc = BTPGetNextRecordBatch(s_pBtp, batchBuf, WORKER_BATCH_SIZE, &batchCount);
+            g_stats.idleCount.fetch_sub(1, std::memory_order_relaxed);
+
+            if (rc == BTP_RC_No_More_Data || batchCount == 0)
+            {
+                if (g_stats.activeCount.load(std::memory_order_acquire) == 0)
+                    break;
+                Sleep(1);
+                continue;
+            }
+
+            if (rc != BTP_RC_Success)
+            {
+                if (g_stop.load(std::memory_order_relaxed)) break;
+                ErrorPrint(stderr);
+                Fatal(FATAL_BOARDS_TO_PROCESS_FAILED, "WorkerThreadFunc: BTPGetNextRecordBatch failed: %zu\n", rc);
+            }
         }
 
-        if (rc != BTP_RC_Success)
-        {
-            if (g_stop.load(std::memory_order_relaxed)) break;
-            ErrorPrint(stderr);
-            Fatal(FATAL_BOARDS_TO_PROCESS_FAILED, "WorkerThreadFunc: unexpected BTPGetNextRecord rc: %zu\n", rc);
-        }
+        BOARD tempBoard = batchBuf[batchIdx++];
 
         BPRc bpRc = LookupBoardFromBoardKey(&tempBoard, &theBoard);
         if (bpRc != BP_RC_Success)
