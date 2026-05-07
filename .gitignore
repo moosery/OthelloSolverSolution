@@ -1,0 +1,25 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.aps
+
+# Build output
+x64/
+Debug/
+Release/
+ipch/
+
+# Compiled files
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+
+# Log and tlog files
+*.log
+*.tlog
