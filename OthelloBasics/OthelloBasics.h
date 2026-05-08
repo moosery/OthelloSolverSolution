@@ -92,7 +92,7 @@ typedef struct _Move
 #define SETCOLOR(pBoard,row,col,color)     if(color == BLACK) {SETBLACK(pBoard,row,col);} else { SETWHITE(pBoard,row,col);}
 #define GETCOLOR(pBoard,row,col)           (ISBLACK(pBoard,row,col) ? BLACK : WHITE)
 #define GETNUMBLACK(pBoard)                (int) (__popcnt64((((pBoard)->ullCellColors) & (pBoard)->ullCellsInUse)))
-#define GETNUMWHITE(pBoard)                (int) (__popcnt64((~((pBoard)->ullCellColors)) & (pBoard)->ullCellsInUse)))
+#define GETNUMWHITE(pBoard)                (int) (__popcnt64((~((pBoard)->ullCellColors)) & (pBoard)->ullCellsInUse))
 
 /* Next Player Macros */
 #define GETBOARDNEXTPLAYERSHORT(val)       (((val) & 0x01) ? BLACK : WHITE)
