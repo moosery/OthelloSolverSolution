@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.5.0] - 2026-05-07
+
+### Added
+- `OthelloSolverCuda`: new CUDA hybrid solver project — CPU DFS enumerates the game tree down to a configurable open-spaces threshold, then dispatches batches of frontier boards to the GPU; each GPU thread runs an iterative DFS to exhaustively enumerate all terminal positions from that frontier
+- GPU kernel uses a thread-local explicit DFS stack (`DfsFrame stack[MAX_DFS_DEPTH]`) to avoid GPU call-stack overflow
+- Flip logic (`d_flipit`) is fully iterative: walks each direction counting opponent cells, flips on anchor found — no recursion
+- Validated correct on 4×4 board: Black=24,632, White=30,116, Ties=5,312, Total=60,060
+
+---
+
 ## [v1.4.0] - 2026-05-07
 
 ### Performance

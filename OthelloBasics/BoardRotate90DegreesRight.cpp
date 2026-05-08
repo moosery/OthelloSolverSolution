@@ -1,4 +1,5 @@
 #include "OthelloBasics.h"
+#include <stdlib.h>
 
 #ifndef USE_ORIGINAL_ROTATION
 
