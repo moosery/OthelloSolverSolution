@@ -1,5 +1,27 @@
 # Changelog
 
+## [v1.4.0] - 2026-05-07
+
+### Performance
+- Replaced O(N²) cell-by-cell loop in `BoardRotate90DegreesRight` with a bitwise implementation: reverse row order (`_byteswap_uint64`) then transpose via the diagonal-flip algorithm (`flipDiagA1H8`) — ~15 operations vs ~256–384 for an 8×8 board
+- Correct for all board sizes (4×4, 6×6, 8×8): centered sub-boards are self-contained under full-word rotation
+- Original loop preserved under `#define USE_ORIGINAL_ROTATION` for reference/fallback
+
+---
+
+## [v1.3.0] - 2026-05-07
+
+### Added
+- `OthelloEnumerator`: new MFC GUI sub-project that exhaustively enumerates all possible Othello game positions for 4×4, 6×6, and 8×8 boards
+- Start/Stop/Restart controls with live status display (every second or every N boards)
+- Checkpoint/restore: saves progress to a binary file, can resume from interruption
+- Writes a `Status.txt` results report on completion (black wins, white wins, ties, total boards, moves, ns/board, max moves per board)
+
+### Fixed
+- Extra closing parenthesis removed from `GETNUMWHITE` macro in `OthelloBasics.h`
+
+---
+
 ## [v1.2.0] - 2026-05-06
 
 ### Performance
