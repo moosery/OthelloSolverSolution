@@ -1,7 +1,5 @@
-#include "pch.h"
-#include "framework.h"
-#include "Worker.h"
 #include "OthelloSolverMultithreaded.h"
+#include "Worker.h"
 #include "BTP.h"
 #include "BP.h"
 #include "Mem.h"

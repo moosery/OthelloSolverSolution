@@ -20,9 +20,9 @@
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
-    <ProjectGuid>{F135045F-5D68-9E04-F127-121914D27798}</ProjectGuid>
+    <ProjectGuid>{4087433E-4E19-374B-21EE-3424A5DB8438}</ProjectGuid>
     <Keyword>MFCProj</Keyword>
-    <RootNamespace>OthelloSolverMultithreaded</RootNamespace>
+    <RootNamespace>OthelloSolverMFCandCUDA</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -45,7 +45,7 @@
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
-    <CharacterSet>MultiByte</CharacterSet>
+    <CharacterSet>Unicode</CharacterSet>
     <UseOfMfc>Dynamic</UseOfMfc>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
@@ -53,11 +53,12 @@
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>MultiByte</CharacterSet>
+    <CharacterSet>Unicode</CharacterSet>
     <UseOfMfc>Dynamic</UseOfMfc>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.2.props" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -95,7 +96,6 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_WINDOWS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..\Utility;..\BoardsToProcess;..\BPlusTree;..\OthelloBasics;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -142,7 +142,6 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_WINDOWS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..\Utility;..\BoardsToProcess;..\BPlusTree;..\OthelloBasics;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -185,41 +184,26 @@
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="OthelloSolverMultithreaded.h" />
-    <ClInclude Include="OthelloSolverMultithreadedDlg.h" />
+    <ClInclude Include="OthelloSolverMFCandCUDA.h" />
+    <ClInclude Include="OthelloSolverMFCandCUDADlg.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
-    <ClInclude Include="Worker.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="OthelloSolverMultithreaded.cpp" />
-    <ClCompile Include="OthelloSolverMultithreadedDlg.cpp" />
-    <ClCompile Include="Worker.cpp" />
+    <ClCompile Include="OthelloSolverMFCandCUDA.cpp" />
+    <ClCompile Include="OthelloSolverMFCandCUDADlg.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="OthelloSolverMultithreaded.rc" />
+    <ResourceCompile Include="OthelloSolverMFCandCUDA.rc" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="res\OthelloSolverMultithreaded.rc2" />
+    <None Include="res\OthelloSolverMFCandCUDA.rc2" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="res\OthelloSolverMultithreaded.ico" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\BoardsToProcess\BoardsToProcess.vcxproj">
-      <Project>{dee9fce2-2b64-4335-868d-42162868edbd}</Project>
-    </ProjectReference>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
-    </ProjectReference>
-    <ProjectReference Include="..\OthelloBasics\OthelloBasics.vcxproj">
-      <Project>{2cc52c70-80f3-4700-9e46-0f6b1c077667}</Project>
-    </ProjectReference>
-    <ProjectReference Include="..\Utility\Utility.vcxproj">
-      <Project>{1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1}</Project>
-    </ProjectReference>
+    <Image Include="res\OthelloSolverMFCandCUDA.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.2.targets" />
   </ImportGroup>
 </Project>

@@ -15,10 +15,10 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="OthelloSolverMultithreaded.h">
+    <ClInclude Include="OthelloSolverMFCandCUDA.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="OthelloSolverMultithreadedDlg.h">
+    <ClInclude Include="OthelloSolverMFCandCUDADlg.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="targetver.h">
@@ -27,33 +27,27 @@
     <ClInclude Include="Resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Worker.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="OthelloSolverMultithreaded.cpp">
+    <ClCompile Include="OthelloSolverMFCandCUDA.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="OthelloSolverMultithreadedDlg.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Worker.cpp">
+    <ClCompile Include="OthelloSolverMFCandCUDADlg.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="OthelloSolverMultithreaded.rc">
+    <ResourceCompile Include="OthelloSolverMFCandCUDA.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="res\OthelloSolverMultithreaded.rc2">
+    <None Include="res\OthelloSolverMFCandCUDA.rc2">
       <Filter>Resource Files</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="res\OthelloSolverMultithreaded.ico">
+    <Image Include="res\OthelloSolverMFCandCUDA.ico">
       <Filter>Resource Files</Filter>
     </Image>
   </ItemGroup>

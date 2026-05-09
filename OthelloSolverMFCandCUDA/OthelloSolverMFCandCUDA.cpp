@@ -1,9 +1,9 @@
 
-// OthelloSolverMultithreaded.cpp : Defines the class behaviors for the application.
+// OthelloSolverMFCandCUDA.cpp : Defines the class behaviors for the application.
 //
 
-#include "OthelloSolverMultithreaded.h"
-#include "OthelloSolverMultithreadedDlg.h"
+#include "OthelloSolverMFCandCUDA.h"
+#include "OthelloSolverMFCandCUDADlg.h"
 #include <afxshellmanager.h>
 #include <afxvisualmanagerwindows.h>
 
@@ -12,16 +12,16 @@
 #endif
 
 
-// COthelloSolverMultithreadedApp
+// COthelloSolverMFCandCUDAApp
 
-BEGIN_MESSAGE_MAP(COthelloSolverMultithreadedApp, CWinApp)
+BEGIN_MESSAGE_MAP(COthelloSolverMFCandCUDAApp, CWinApp)
 	ON_COMMAND(ID_HELP, &CWinApp::OnHelp)
 END_MESSAGE_MAP()
 
 
-// COthelloSolverMultithreadedApp construction
+// COthelloSolverMFCandCUDAApp construction
 
-COthelloSolverMultithreadedApp::COthelloSolverMultithreadedApp()
+COthelloSolverMFCandCUDAApp::COthelloSolverMFCandCUDAApp()
 {
 	// support Restart Manager
 	m_dwRestartManagerSupportFlags = AFX_RESTART_MANAGER_SUPPORT_RESTART;
@@ -31,14 +31,14 @@ COthelloSolverMultithreadedApp::COthelloSolverMultithreadedApp()
 }
 
 
-// The one and only COthelloSolverMultithreadedApp object
+// The one and only COthelloSolverMFCandCUDAApp object
 
-COthelloSolverMultithreadedApp theApp;
+COthelloSolverMFCandCUDAApp theApp;
 
 
-// COthelloSolverMultithreadedApp initialization
+// COthelloSolverMFCandCUDAApp initialization
 
-BOOL COthelloSolverMultithreadedApp::InitInstance()
+BOOL COthelloSolverMFCandCUDAApp::InitInstance()
 {
 	// InitCommonControlsEx() is required on Windows XP if an application
 	// manifest specifies use of ComCtl32.dll version 6 or later to enable
@@ -69,7 +69,7 @@ BOOL COthelloSolverMultithreadedApp::InitInstance()
 	// such as the name of your company or organization
 	SetRegistryKey(_T("Local AppWizard-Generated Applications"));
 
-	COthelloSolverMultithreadedDlg dlg;
+	COthelloSolverMFCandCUDADlg dlg;
 	m_pMainWnd = &dlg;
 	INT_PTR nResponse = dlg.DoModal();
 	if (nResponse == IDOK)

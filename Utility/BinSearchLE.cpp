@@ -4,92 +4,63 @@ size_t BinSearchLE(char cSortDirection, bool duplicates, bool* pEqualFound, void
 {
     char* pDataToSearchAsChar = (char*)pDataToSearch;
     char* pDataToFindAsChar = (char*)pDataToFind;
-    size_t   low;
-    size_t   high;
-    size_t   mid;
-    char* pRec;
-    size_t   result = BINSEARCH_NOT_FOUND;
-    int      cmpResult;
-    int      direction = (cSortDirection == BINSEARCH_DATASORTED_ASCENDING ? 1 : -1);
-    size_t   lastLessThan = BINSEARCH_NOT_FOUND;
+    size_t low = 0;
+    size_t high = numEntries;
+    size_t result = BINSEARCH_NOT_FOUND;
+    int direction = (cSortDirection == BINSEARCH_DATASORTED_ASCENDING ? 1 : -1);
     *pEqualFound = false;
 
     if (numEntries == 0)
-        return (result);
+        return result;
 
-    low = 0;
-    high = numEntries - 1;
-
-    while (low <= high)
+    if (direction == 1)
     {
-        mid = (high + low) / 2;
-
-        pRec = (mid * entrySize) + pDataToSearchAsChar;
-
-        cmpResult = pCmpRtn(pDataToFindAsChar, pRec + offsetInEntryOfDataToSendToComparisonRoutine, sizeOfDataToCompare);
-
-        if (cmpResult == 0)
+        while (low < high)
         {
-            result = mid;
-            *pEqualFound = true;
-            break;
-        }
-
-
-        if (direction == 1)
-        {
-            if (cmpResult < 0)
-            {
-                if (mid == 0)
-                    break;
-
-                high = mid - 1;
-            }
-            else
-            {
-                lastLessThan = mid;
+            size_t mid = low + ((high - low) >> 1);
+            int cmpResult = pCmpRtn(pDataToFindAsChar, pDataToSearchAsChar + mid * entrySize + offsetInEntryOfDataToSendToComparisonRoutine, sizeOfDataToCompare);
+            if (cmpResult >= 0)
                 low = mid + 1;
-            }
-        }
-        else
-        {
-            if (cmpResult < 0)
-            {
-                low = mid + 1;
-            }
             else
-            {
-                lastLessThan = mid;
-
-                if (mid == 0)
-                    break;
-
-                high = mid - 1;
-            }
+                high = mid;
         }
+        result = (low > 0) ? low - 1 : BINSEARCH_NOT_FOUND;
+    }
+    else
+    {
+        while (low < high)
+        {
+            size_t mid = low + ((high - low) >> 1);
+            int cmpResult = pCmpRtn(pDataToFindAsChar, pDataToSearchAsChar + mid * entrySize + offsetInEntryOfDataToSendToComparisonRoutine, sizeOfDataToCompare);
+            if (cmpResult < 0)
+                low = mid + 1;
+            else
+                high = mid;
+        }
+        result = (low < numEntries) ? low : BINSEARCH_NOT_FOUND;
     }
 
-    if (result == BINSEARCH_NOT_FOUND)
+    if (result != BINSEARCH_NOT_FOUND)
     {
-        result = lastLessThan;
+        if (pCmpRtn(pDataToFindAsChar, pDataToSearchAsChar + result * entrySize + offsetInEntryOfDataToSendToComparisonRoutine, sizeOfDataToCompare) == 0)
+            *pEqualFound = true;
     }
 
     /* Back up over duplicates if there */
     if (result != BINSEARCH_NOT_FOUND && duplicates && !(direction == 1 && result == 0))
     {
-        char* rowOrigVal = (result * entrySize) + pDataToSearchAsChar + offsetInEntryOfDataToSendToComparisonRoutine;
+        char* rowOrigVal = pDataToSearchAsChar + result * entrySize + offsetInEntryOfDataToSendToComparisonRoutine;
         size_t pos = result - direction;
-        pRec = (pos * entrySize) + pDataToSearchAsChar;
+        char* pRec = pDataToSearchAsChar + pos * entrySize;
         while (pRec >= pDataToSearchAsChar && pos < numEntries)
         {
             if (pCmpRtn(rowOrigVal, pRec + offsetInEntryOfDataToSendToComparisonRoutine, sizeOfDataToCompare) != 0)
                 break;
             result = pos;
             pos -= direction;
-            pRec = (pos * entrySize) + pDataToSearchAsChar;
+            pRec = pDataToSearchAsChar + pos * entrySize;
         }
     }
 
-    return (result);
+    return result;
 }
-

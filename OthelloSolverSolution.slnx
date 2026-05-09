@@ -12,7 +12,10 @@
   <Project Path="OthelloSolverCuda/OthelloSolverCuda.vcxproj">
     <Platform Project="x64" />
   </Project>
+  <Project Path="OthelloSolverMFCandCUDA/OthelloSolverMFCandCUDA.vcxproj" />
   <Project Path="OthelloSolverMultithreaded/OthelloSolverMultithreaded.vcxproj" />
   <Project Path="OthelloSolverUsingBplusOnly/OthelloSolverUsingBplusOnly.vcxproj" Id="c044278e-6eb6-4713-a49a-9c77db194d36" />
+  <Project Path="TieredStore/TieredStore.vcxproj" Id="b3dba222-f8f9-421c-9bad-0a6d4cadcbd5" />
+  <Project Path="TieredStoreTester/TieredStoreTester.vcxproj" Id="a7594965-78af-4873-a5af-0458ad653e9d" />
   <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
 </Solution>

@@ -1,5 +1,22 @@
 # Changelog
 
+## [v1.6.0] - 2026-05-09
+
+### Added
+- `TieredStore`: new LSM-tree-style external storage library — in-memory B+ tree tier flushes to sorted on-disk `.tsf` files; a meta-store (itself a TieredStore) persists the file registry; supports insert, find, delete, enumerate, checkpoint/restart, and multi-directory round-robin file placement
+- `TieredStoreTester`: 15-test suite covering all TieredStore operations including insert/find/delete, checkpoint+reopen, multi-directory distribution, and a full stress test (1 000 inserts, checkpoint, reopen, verify)
+- `OthelloSolverMFCandCUDA`: new MFC+CUDA dialog project skeleton
+
+### Changed
+- `OthelloSolverCuda` — major `CpuEnumerator` rewrite: CPU phase is now multi-threaded (LIFO work queue, DFS order); sharded B+ trees (16 shards) deduplicate canonical boards; each board accumulates a `pathCount` (distinct game paths); terminal boards are collected for separate GPU processing; producer-consumer coordination via condition variable
+- `Utility` — `BinarySearch` and `BinSearchLE` rewritten to the half-open interval (lower_bound) pattern: cleaner branch structure, eliminates the `mid == 0` underflow special case in `BinSearchLE`, ascending/descending branches made explicit
+- `OthelloSolverMultithreaded` — removed precompiled headers; replaced with explicit MFC includes (`targetver.h`, `afxwin.h`, `afxdialogex.h`, `afxshellmanager.h`, `afxvisualmanagerwindows.h`, `afxdlgs.h`) in the appropriate headers and source files; deleted `pch.h`, `pch.cpp`, `framework.h`
+
+### Build
+- `OthelloSolverCuda`: added `/LTCG` to Release linker settings — eliminates the "restarting link" message and avoids the redundant link-pass restart caused by `/GL`-compiled objects
+
+---
+
 ## [v1.5.0] - 2026-05-07
 
 ### Added

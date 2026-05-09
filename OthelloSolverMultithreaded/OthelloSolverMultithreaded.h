@@ -4,10 +4,8 @@
 
 #pragma once
 
-#ifndef __AFXWIN_H__
-	#error "include 'pch.h' before including this file for PCH"
-#endif
-
+#include "targetver.h"
+#include <afxwin.h>
 #include "resource.h"		// main symbols
 
 
@@ -34,4 +32,4 @@ extern COthelloSolverMultithreadedApp theApp;
 #define WM_CUSTOM_UPDATE_STATUS  (WM_USER + 1)
 #define WM_CUSTOM_SOLVER_DONE    (WM_USER + 2)
 
-#define APP_VERSION              "1.2.0"
+#define APP_VERSION              "1.6.0"

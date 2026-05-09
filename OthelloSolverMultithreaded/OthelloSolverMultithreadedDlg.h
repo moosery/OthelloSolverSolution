@@ -3,6 +3,7 @@
 //
 
 #pragma once
+#include <afxdialogex.h>
 #include "Worker.h"
 
 class COthelloSolverMultithreadedDlg : public CDialogEx

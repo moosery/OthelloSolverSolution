@@ -3,6 +3,11 @@
 #include "CpuEnumerator.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #define CUDA_CHECK(call)                                                        \
     do {                                                                        \
@@ -44,7 +49,9 @@ struct DfsFrame
     bool               tryNextPlayer;
 };
 
-#define MAX_DFS_DEPTH 24
+// Two pass frames per move (one for each player) + one for the initial board.
+// Sized for threshold up to 28 open spaces safely.
+#define MAX_DFS_DEPTH 64
 
 // ==================== Device: move logic ====================
 
@@ -202,94 +209,224 @@ __global__ void solveFrontierKernel(
     atomicAdd(d_ties,      localTie   * pc);
 }
 
-// ==================== CPU-side dispatch ====================
+// ==================== Concurrent CPU+GPU pipeline ====================
 
 #define THREADS_PER_BLOCK 256
+#define MAX_BATCH         65536
+#define QUEUE_DEPTH       4
 
-struct DispatchCtx
+using Clock     = std::chrono::steady_clock;
+using TimePoint = std::chrono::steady_clock::time_point;
+
+struct BatchSlot
 {
+    FrontierBoard boards[MAX_BATCH];
+    int           count;
+};
+
+struct HybridCtx
+{
+    // GPU device memory
     FrontierBoard*      d_frontier;
     unsigned long long* d_blackWins;
     unsigned long long* d_whiteWins;
     unsigned long long* d_ties;
-    unsigned long long  totalBlack;
-    unsigned long long  totalWhite;
-    unsigned long long  totalTies;
-    unsigned long long  batchesDispatched;
+
+    // Results (written only by GPU thread; read by main after join)
+    unsigned long long  totalBlack            = 0;
+    unsigned long long  totalWhite            = 0;
+    unsigned long long  totalTies             = 0;
+    unsigned long long  totalFrontier         = 0;
+    unsigned long long  totalFrontierExpected = 0;  // set by main after Phase 1
+    unsigned long long  batchesDispatched     = 0;
+
+    // Timing
+    TimePoint           startTime;
+    TimePoint           lastPrintTime;
+
+    // Producer-consumer queue (CPU produces, GPU thread consumes)
+    BatchSlot*              slots;   // heap-allocated: QUEUE_DEPTH slots
+    int                     head  = 0;
+    int                     tail  = 0;
+    int                     count = 0;
+    std::mutex              mtx;
+    std::condition_variable cvNotEmpty;
+    std::condition_variable cvNotFull;
+    bool                    cpuDone = false;
 };
 
-static void dispatchBatch(const FrontierBoard* boards, int count, void* ctx)
+// Run one batch on the GPU (called from the GPU dispatch thread only).
+static void runGpuBatch(HybridCtx* hc, const FrontierBoard* boards, int count)
 {
-    DispatchCtx* dc = (DispatchCtx*)ctx;
-
-    CUDA_CHECK(cudaMemcpy(dc->d_frontier, boards, count * sizeof(FrontierBoard), cudaMemcpyHostToDevice));
-
-    CUDA_CHECK(cudaMemset(dc->d_blackWins, 0, sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMemset(dc->d_whiteWins, 0, sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMemset(dc->d_ties,      0, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemcpy(hc->d_frontier, boards, count * sizeof(FrontierBoard), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(hc->d_blackWins, 0, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(hc->d_whiteWins, 0, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(hc->d_ties,      0, sizeof(unsigned long long)));
 
     int blocks = (count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     solveFrontierKernel<<<blocks, THREADS_PER_BLOCK>>>(
-        dc->d_frontier, count, dc->d_blackWins, dc->d_whiteWins, dc->d_ties);
+        hc->d_frontier, count, hc->d_blackWins, hc->d_whiteWins, hc->d_ties);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     unsigned long long hBlack = 0, hWhite = 0, hTies = 0;
-    CUDA_CHECK(cudaMemcpy(&hBlack, dc->d_blackWins, sizeof(unsigned long long), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&hWhite, dc->d_whiteWins, sizeof(unsigned long long), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&hTies,  dc->d_ties,      sizeof(unsigned long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&hBlack, hc->d_blackWins, sizeof(unsigned long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&hWhite, hc->d_whiteWins, sizeof(unsigned long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&hTies,  hc->d_ties,      sizeof(unsigned long long), cudaMemcpyDeviceToHost));
 
-    dc->totalBlack += hBlack;
-    dc->totalWhite += hWhite;
-    dc->totalTies  += hTies;
-    dc->batchesDispatched++;
+    hc->totalBlack     += hBlack;
+    hc->totalWhite     += hWhite;
+    hc->totalTies      += hTies;
+    hc->totalFrontier  += (unsigned long long)count;
+    hc->batchesDispatched++;
 
-    printf("  Batch %llu: %d boards  black=%llu  white=%llu  ties=%llu\n",
-           dc->batchesDispatched, count, hBlack, hWhite, hTies);
+    auto   now            = Clock::now();
+    double elapsed        = std::chrono::duration<double>(now - hc->startTime).count();
+    double secsSincePrint = std::chrono::duration<double>(now - hc->lastPrintTime).count();
+
+    // Print on the first batch so the user sees GPU work has started,
+    // then every 5 seconds thereafter.
+    if (hc->batchesDispatched == 1 || secsSincePrint >= 5.0)
+    {
+        hc->lastPrintTime = now;
+        unsigned long long total = hc->totalBlack + hc->totalWhite + hc->totalTies;
+        double pathsPerSec    = (elapsed > 0) ? (double)total             / elapsed : 0.0;
+        double frontierPerSec = (elapsed > 0) ? (double)hc->totalFrontier / elapsed : 0.0;
+        double nsPerPath      = (total   > 0) ? elapsed * 1e9 / (double)total       : 0.0;
+        printf("[GPU %6.1fs] batch=%llu  frontier=%llu/%llu  paths=%llu  B=%llu  W=%llu  T=%llu"
+               "  |  %.2fM paths/s  %.1f ns/path  %.1fK frontier/s\n",
+               elapsed,
+               hc->batchesDispatched,
+               hc->totalFrontier, hc->totalFrontierExpected,
+               total,
+               hc->totalBlack, hc->totalWhite, hc->totalTies,
+               pathsPerSec / 1.0e6, nsPerPath, frontierPerSec / 1.0e3);
+        fflush(stdout);
+    }
+}
+
+// GPU dispatch thread: drains the queue and runs GPU batches.
+static void gpuDispatchThread(HybridCtx* hc)
+{
+    while (true)
+    {
+        int slot;
+        {
+            std::unique_lock<std::mutex> lk(hc->mtx);
+            hc->cvNotEmpty.wait(lk, [hc]{ return hc->count > 0 || hc->cpuDone; });
+            if (hc->count == 0)
+                break;  // cpuDone and queue empty
+            slot     = hc->head;
+            hc->head = (hc->head + 1) % QUEUE_DEPTH;
+            hc->count--;
+        }
+        hc->cvNotFull.notify_one();
+
+        BatchSlot* bs = &hc->slots[slot];
+        runGpuBatch(hc, bs->boards, bs->count);
+    }
+}
+
+// CPU callback: copies batch into the queue and returns immediately
+// so the CPU DFS thread continues while the GPU thread works.
+static void enqueueBatch(const FrontierBoard* boards, int count, void* ctx)
+{
+    HybridCtx* hc = (HybridCtx*)ctx;
+    {
+        std::unique_lock<std::mutex> lk(hc->mtx);
+        hc->cvNotFull.wait(lk, [hc]{ return hc->count < QUEUE_DEPTH; });
+
+        BatchSlot* bs = &hc->slots[hc->tail];
+        memcpy(bs->boards, boards, count * sizeof(FrontierBoard));
+        bs->count = count;
+        hc->tail  = (hc->tail + 1) % QUEUE_DEPTH;
+        hc->count++;
+    }
+    hc->cvNotEmpty.notify_one();
 }
 
 // ==================== Main ====================
 
 int main(int argc, char* argv[])
 {
-    int boardSize = 4;
-    int threshold = 12;
+    int boardSize       = 6;
+    int threshold       = 16;   // open spaces at which CPU hands off to GPU
+    int numWorkers      = 4;
+    int numRotations    = 8;
 
-    if (argc >= 2) boardSize = atoi(argv[1]);
-    if (argc >= 3) threshold = atoi(argv[2]);
+    if (argc >= 2) boardSize    = atoi(argv[1]);
+    if (argc >= 3) threshold    = atoi(argv[2]);
+    if (argc >= 4) numWorkers   = atoi(argv[3]);
+    if (argc >= 5) numRotations = atoi(argv[4]);
 
-    printf("OthelloSolverCuda  boardSize=%d  threshold=%d\n\n", boardSize, threshold);
+    printf("OthelloSolverCuda  boardSize=%d  threshold=%d"
+           "  workers=%d  rotations=%d\n\n",
+           boardSize, threshold, numWorkers, numRotations);
 
     CUDA_CHECK(cudaSetDevice(0));
 
-    const int MAX_BATCH = 65536;
+    HybridCtx* hc = new HybridCtx();
+    hc->slots     = new BatchSlot[QUEUE_DEPTH];
 
-    DispatchCtx dc = {};
-    CUDA_CHECK(cudaMalloc(&dc.d_frontier,  MAX_BATCH * sizeof(FrontierBoard)));
-    CUDA_CHECK(cudaMalloc(&dc.d_blackWins, sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMalloc(&dc.d_whiteWins, sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMalloc(&dc.d_ties,      sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMalloc(&hc->d_frontier,  MAX_BATCH * sizeof(FrontierBoard)));
+    CUDA_CHECK(cudaMalloc(&hc->d_blackWins, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMalloc(&hc->d_whiteWins, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMalloc(&hc->d_ties,      sizeof(unsigned long long)));
+
+    // ---- Phase 1: CPU B+ tree + BTP ----
+    // RunCpuEnumeratorFull drives everything above the threshold,
+    // then calls enqueueBatch for each frontier board batch.
+    // The GPU dispatch thread runs concurrently during the push phase.
+
+    hc->startTime     = Clock::now();
+    hc->lastPrintTime = hc->startTime;
+
+    // Start GPU thread before the frontier push so it can consume immediately.
+    std::thread gpuThread(gpuDispatchThread, hc);
 
     CpuEnumeratorResults cpuResults;
-    RunCpuEnumerator(boardSize, threshold, dispatchBatch, &dc, &cpuResults);
+    RunCpuEnumeratorFull(boardSize, threshold, numWorkers, numRotations,
+                         enqueueBatch, hc, &cpuResults);
 
-    cudaFree(dc.d_frontier);
-    cudaFree(dc.d_blackWins);
-    cudaFree(dc.d_whiteWins);
-    cudaFree(dc.d_ties);
+    hc->totalFrontierExpected = cpuResults.frontierCount;
 
-    unsigned long long totalBlack  = dc.totalBlack  + cpuResults.blackWins;
-    unsigned long long totalWhite  = dc.totalWhite  + cpuResults.whiteWins;
-    unsigned long long totalTies   = dc.totalTies   + cpuResults.ties;
+    // Signal GPU thread: no more batches coming.
+    {
+        std::unique_lock<std::mutex> lk(hc->mtx);
+        hc->cpuDone = true;
+    }
+    hc->cvNotEmpty.notify_one();
+    gpuThread.join();
+
+    cudaFree(hc->d_frontier);
+    cudaFree(hc->d_blackWins);
+    cudaFree(hc->d_whiteWins);
+    cudaFree(hc->d_ties);
+
+    unsigned long long totalBlack  = hc->totalBlack  + cpuResults.blackWins;
+    unsigned long long totalWhite  = hc->totalWhite  + cpuResults.whiteWins;
+    unsigned long long totalTies   = hc->totalTies   + cpuResults.ties;
     unsigned long long totalBoards = totalBlack + totalWhite + totalTies;
 
+    double totalElapsed       = std::chrono::duration<double>(Clock::now() - hc->startTime).count();
+    double overallNsPerPath   = (totalBoards > 0) ? totalElapsed * 1e9 / (double)totalBoards : 0.0;
+    double overallPathsPerSec = (totalElapsed > 0) ? (double)totalBoards / totalElapsed : 0.0;
+
     printf("\n=== Results ===\n");
-    printf("Black Wins   : %llu\n", totalBlack);
-    printf("White Wins   : %llu\n", totalWhite);
-    printf("Ties         : %llu\n", totalTies);
-    printf("Total Boards : %llu\n", totalBoards);
-    printf("GPU Batches  : %llu  (%llu frontier boards)\n",
-           dc.batchesDispatched, cpuResults.frontierCount);
+    printf("Black Wins      : %llu\n", totalBlack);
+    printf("White Wins      : %llu\n", totalWhite);
+    printf("Ties            : %llu\n", totalTies);
+    printf("Total Paths     : %llu\n", totalBoards);
+    printf("Elapsed         : %.2f s\n", totalElapsed);
+    printf("Throughput      : %.2f M paths/s  (%.1f ns/path)\n",
+           overallPathsPerSec / 1.0e6, overallNsPerPath);
+    printf("GPU Batches     : %llu  (%llu frontier boards)\n",
+           hc->batchesDispatched, cpuResults.frontierCount);
+    printf("Unique Boards   : %llu  (duplicates: %llu)\n",
+           cpuResults.uniqueBoards, cpuResults.duplicateBoards);
+
+    delete[] hc->slots;
+    delete hc;
 
     cudaDeviceReset();
     return 0;

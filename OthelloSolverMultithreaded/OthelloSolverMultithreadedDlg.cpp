@@ -2,11 +2,10 @@
 // OthelloSolverMultithreadedDlg.cpp : implementation file
 //
 
-#include "pch.h"
-#include "framework.h"
 #include "OthelloSolverMultithreaded.h"
 #include "OthelloSolverMultithreadedDlg.h"
 #include "afxdialogex.h"
+#include <afxdlgs.h>
 #include <thread>
 #include <ShellAPI.h>
 
