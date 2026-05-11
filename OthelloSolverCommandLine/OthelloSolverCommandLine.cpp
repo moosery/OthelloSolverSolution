@@ -57,7 +57,9 @@ void doStartProcess(PSolverConfig pConfig)
         exit(1);
     }
 
-    PBOARD pBoard = CreateBoard(pConfig->boardSize);
+    SetBoardSizeForRun(pConfig->boardSize);
+
+    PBOARD firstBoard = BoardAllocate();
 
     // Placeholder for start logic.
     printf("Start process not implemented yet.\n");

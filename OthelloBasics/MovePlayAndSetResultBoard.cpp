@@ -1,7 +1,126 @@
 #include "OthelloBasics.h"
 #include <memory.h>
 
-static bool moveCheckDir(PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
+#define BITBOARD_FLIP
+
+#ifdef BITBOARD_FLIP
+
+// Column masks for wrap prevention (full 8x8 grid)
+static const unsigned long long NOT_LEFT_COL  = ~0x8080808080808080ULL; // ~col 0
+static const unsigned long long NOT_RIGHT_COL = ~0x0101010101010101ULL; // ~col 7
+
+static unsigned long long computeFlips(unsigned long long moveBit,
+                                       unsigned long long player,
+                                       unsigned long long opponent)
+{
+    unsigned long long flips = 0, x;
+
+    // Up (<<8)
+    x  = (moveBit << 8) & opponent;
+    x |= (x      << 8) & opponent;
+    x |= (x      << 8) & opponent;
+    x |= (x      << 8) & opponent;
+    x |= (x      << 8) & opponent;
+    x |= (x      << 8) & opponent;
+    if ((x       << 8) & player) flips |= x;
+
+    // Down (>>8)
+    x  = (moveBit >> 8) & opponent;
+    x |= (x      >> 8) & opponent;
+    x |= (x      >> 8) & opponent;
+    x |= (x      >> 8) & opponent;
+    x |= (x      >> 8) & opponent;
+    x |= (x      >> 8) & opponent;
+    if ((x       >> 8) & player) flips |= x;
+
+    // Right (>>1) — mask col 7 before each shift to prevent row wrap
+    x  = ((moveBit & NOT_RIGHT_COL) >> 1) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 1) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 1) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 1) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 1) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 1) & opponent;
+    if   ((x       & NOT_RIGHT_COL) >> 1  & player) flips |= x;
+
+    // Left (<<1) — mask col 0 before each shift to prevent row wrap
+    x  = ((moveBit & NOT_LEFT_COL) << 1) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 1) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 1) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 1) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 1) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 1) & opponent;
+    if   ((x       & NOT_LEFT_COL) << 1  & player) flips |= x;
+
+    // Down-Right (>>9) — mask col 7
+    x  = ((moveBit & NOT_RIGHT_COL) >> 9) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 9) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 9) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 9) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 9) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) >> 9) & opponent;
+    if   ((x       & NOT_RIGHT_COL) >> 9  & player) flips |= x;
+
+    // Down-Left (>>7) — mask col 0
+    x  = ((moveBit & NOT_LEFT_COL) >> 7) & opponent;
+    x |= ((x       & NOT_LEFT_COL) >> 7) & opponent;
+    x |= ((x       & NOT_LEFT_COL) >> 7) & opponent;
+    x |= ((x       & NOT_LEFT_COL) >> 7) & opponent;
+    x |= ((x       & NOT_LEFT_COL) >> 7) & opponent;
+    x |= ((x       & NOT_LEFT_COL) >> 7) & opponent;
+    if   ((x       & NOT_LEFT_COL) >> 7  & player) flips |= x;
+
+    // Up-Right (<<7) — mask col 7
+    x  = ((moveBit & NOT_RIGHT_COL) << 7) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) << 7) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) << 7) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) << 7) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) << 7) & opponent;
+    x |= ((x       & NOT_RIGHT_COL) << 7) & opponent;
+    if   ((x       & NOT_RIGHT_COL) << 7  & player) flips |= x;
+
+    // Up-Left (<<9) — mask col 0
+    x  = ((moveBit & NOT_LEFT_COL) << 9) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 9) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 9) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 9) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 9) & opponent;
+    x |= ((x       & NOT_LEFT_COL) << 9) & opponent;
+    if   ((x       & NOT_LEFT_COL) << 9  & player) flips |= x;
+
+    return flips;
+}
+
+static void applyMove(PBOARD pBoard, char color, int row, int col)
+{
+    unsigned long long moveBit  = FIRSTBIT >> GETINDEX(row, col);
+    unsigned long long occupied = pBoard->ullCellsInUse;
+    unsigned long long colors   = pBoard->ullCellColors;
+
+    unsigned long long player, opponent;
+    if (color == BLACK)
+    {
+        player   = occupied & colors;
+        opponent = occupied & ~colors;
+    }
+    else
+    {
+        player   = occupied & ~colors;
+        opponent = occupied & colors;
+    }
+
+    unsigned long long flips = computeFlips(moveBit, player, opponent);
+
+    pBoard->ullCellsInUse |= moveBit;
+    if (color == BLACK)
+        pBoard->ullCellColors |= (moveBit | flips);
+    else
+        pBoard->ullCellColors &= ~(moveBit | flips);
+}
+
+#else // !BITBOARD_FLIP
+
+static bool moveCheckDir(PBOARD pBoard, char color, int row, int col,
+                         int rowDir, int colDir, int si, int ei)
 {
     int foundOppositeColor = 0;
     int foundSameColor = 0;
@@ -12,11 +131,10 @@ static bool moveCheckDir(PBOARD pBoard, char color, int row, int col, int rowDir
         row += rowDir;
         col += colDir;
 
-        if (row >= g_boardSi && row < g_boardEi)
+        if (row >= si && row < ei)
         {
-            if (col >= g_boardSi && col < g_boardEi)
+            if (col >= si && col < ei)
             {
-
                 if (!ISOCCUPIED(pBoard, row, col))
                 {
                     break;
@@ -55,16 +173,17 @@ static bool moveCheckDir(PBOARD pBoard, char color, int row, int col, int rowDir
     return false;
 }
 
-static void moveDir(PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
+static void moveDir(PBOARD pBoard, char color, int row, int col,
+                    int rowDir, int colDir, int si, int ei)
 {
     while (true)
     {
         row += rowDir;
         col += colDir;
 
-        if (row >= g_boardSi && row < g_boardEi)
+        if (row >= si && row < ei)
         {
-            if (col >= g_boardSi && col < g_boardEi)
+            if (col >= si && col < ei)
             {
                 if (GETCOLOR(pBoard, row, col) == color)
                 {
@@ -81,60 +200,43 @@ static void moveDir(PBOARD pBoard, char color, int row, int col, int rowDir, int
 
 static void applyMove(PBOARD pBoard, char color, int row, int col)
 {
-    /* Set the color into the position */
+    const int si = g_boardSi;
+    const int ei = g_boardEi;
+
     SETOCCUPIED(pBoard, row, col);
     SETCOLOR(pBoard, row, col, color);
 
-    /* Flip the opponents stuff */
-
-    /* Check Up */
-    if (moveCheckDir(pBoard, color, row, col, -1, 0))
-        moveDir(pBoard, color, row, col, -1, 0);
-
-    /* Check Up/Right Diag */
-    if (moveCheckDir(pBoard, color, row, col, -1, 1))
-        moveDir(pBoard, color, row, col, -1, 1);
-
-    /* Check Right */
-    if (moveCheckDir(pBoard, color, row, col, 0, 1))
-        moveDir(pBoard, color, row, col, 0, 1);
-
-    /* Check Down/Right */
-    if (moveCheckDir(pBoard, color, row, col, 1, 1))
-        moveDir(pBoard, color, row, col, 1, 1);
-
-    /* Check Down */
-    if (moveCheckDir(pBoard, color, row, col, 1, 0))
-        moveDir(pBoard, color, row, col, 1, 0);
-
-    /* Check Down/Left */
-    if (moveCheckDir(pBoard, color, row, col, 1, -1))
-        moveDir(pBoard, color, row, col, 1, -1);
-
-    /* Check Left */
-    if (moveCheckDir(pBoard, color, row, col, 0, -1))
-        moveDir(pBoard, color, row, col, 0, -1);
-
-    /* Check Up/Left */
-    if (moveCheckDir(pBoard, color, row, col, -1, -1))
-        moveDir(pBoard, color, row, col, -1, -1);
+    if (moveCheckDir(pBoard, color, row, col, -1,  0, si, ei))
+        moveDir(pBoard, color, row, col, -1,  0, si, ei);
+    if (moveCheckDir(pBoard, color, row, col, -1,  1, si, ei))
+        moveDir(pBoard, color, row, col, -1,  1, si, ei);
+    if (moveCheckDir(pBoard, color, row, col,  0,  1, si, ei))
+        moveDir(pBoard, color, row, col,  0,  1, si, ei);
+    if (moveCheckDir(pBoard, color, row, col,  1,  1, si, ei))
+        moveDir(pBoard, color, row, col,  1,  1, si, ei);
+    if (moveCheckDir(pBoard, color, row, col,  1,  0, si, ei))
+        moveDir(pBoard, color, row, col,  1,  0, si, ei);
+    if (moveCheckDir(pBoard, color, row, col,  1, -1, si, ei))
+        moveDir(pBoard, color, row, col,  1, -1, si, ei);
+    if (moveCheckDir(pBoard, color, row, col,  0, -1, si, ei))
+        moveDir(pBoard, color, row, col,  0, -1, si, ei);
+    if (moveCheckDir(pBoard, color, row, col, -1, -1, si, ei))
+        moveDir(pBoard, color, row, col, -1, -1, si, ei);
 }
+
+#endif // BITBOARD_FLIP
 
 void MovePlayAndSetResultBoard(PBOARD pBoard, PBOARD pResultBoard, int row, int col)
 {
 	memset(pResultBoard, 0, sizeof(BOARD));
 
-	/* Copy over all of the board junk*/
 	pResultBoard->ullCellsInUse = pBoard->ullCellsInUse;
 	pResultBoard->ullCellColors = pBoard->ullCellColors;
-	pResultBoard->usBoardInfo = pBoard->usBoardInfo;
+	pResultBoard->usBoardInfo   = pBoard->usBoardInfo;
 
-	/* Flip the player */
 	SETBOARDNEXTPLAYERFLIP(pResultBoard);
 
-    /* Get the new player color */
     char color = GETBOARDNEXTPLAYER(pBoard);
 
-	/* Now play the move on the result board */
     applyMove(pResultBoard, color, row, col);
 }

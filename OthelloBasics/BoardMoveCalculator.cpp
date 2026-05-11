@@ -40,29 +40,32 @@ void BoardMoveCalculator(PBOARD pBoard)
         oppPieces = pBoard->ullCellsInUse &  pBoard->ullCellColors;
     }
 
+    const unsigned long long notRight = ~g_boardRightEdge;
+    const unsigned long long notLeft  = ~g_boardLeftEdge;
+
     unsigned long long empty      = g_boardMask & ~(myPieces | oppPieces);
     unsigned long long validMoves = 0;
     unsigned long long gen, candidates;
 
     /* RIGHT (+col): integer >> 1; mask right edge to prevent col-7 -> col-0 wrap */
-    candidates = oppPieces & ~g_boardRightEdge;
-    gen  = (myPieces               & ~g_boardRightEdge) >> 1; gen &= candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
-    validMoves |= ((gen & ~g_boardRightEdge) >> 1) & empty;
+    candidates = oppPieces & notRight;
+    gen  = (myPieces      & notRight) >> 1; gen &= candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    validMoves |= ((gen & notRight) >> 1) & empty;
 
     /* LEFT (-col): integer << 1; mask left edge */
-    candidates = oppPieces & ~g_boardLeftEdge;
-    gen  = (myPieces              & ~g_boardLeftEdge) << 1; gen &= candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
-    validMoves |= ((gen & ~g_boardLeftEdge) << 1) & empty;
+    candidates = oppPieces & notLeft;
+    gen  = (myPieces      & notLeft) << 1; gen &= candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    validMoves |= ((gen & notLeft) << 1) & empty;
 
     /* DOWN (+row): integer >> 8; no column wrap possible */
     candidates = oppPieces;
@@ -85,44 +88,44 @@ void BoardMoveCalculator(PBOARD pBoard)
     validMoves |= (gen << 8) & empty;
 
     /* DOWN-RIGHT (+row,+col): integer >> 9; mask right edge */
-    candidates = oppPieces & ~g_boardRightEdge;
-    gen  = (myPieces               & ~g_boardRightEdge) >> 9; gen &= candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
-    validMoves |= ((gen & ~g_boardRightEdge) >> 9) & empty;
+    candidates = oppPieces & notRight;
+    gen  = (myPieces      & notRight) >> 9; gen &= candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    validMoves |= ((gen & notRight) >> 9) & empty;
 
     /* DOWN-LEFT (+row,-col): integer >> 7; mask left edge */
-    candidates = oppPieces & ~g_boardLeftEdge;
-    gen  = (myPieces              & ~g_boardLeftEdge) >> 7; gen &= candidates;
-    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
-    validMoves |= ((gen & ~g_boardLeftEdge) >> 7) & empty;
+    candidates = oppPieces & notLeft;
+    gen  = (myPieces      & notLeft) >> 7; gen &= candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    validMoves |= ((gen & notLeft) >> 7) & empty;
 
     /* UP-RIGHT (-row,+col): integer << 7; mask right edge */
-    candidates = oppPieces & ~g_boardRightEdge;
-    gen  = (myPieces               & ~g_boardRightEdge) << 7; gen &= candidates;
-    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
-    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
-    validMoves |= ((gen & ~g_boardRightEdge) << 7) & empty;
+    candidates = oppPieces & notRight;
+    gen  = (myPieces      & notRight) << 7; gen &= candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    validMoves |= ((gen & notRight) << 7) & empty;
 
     /* UP-LEFT (-row,-col): integer << 9; mask left edge */
-    candidates = oppPieces & ~g_boardLeftEdge;
-    gen  = (myPieces              & ~g_boardLeftEdge) << 9; gen &= candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
-    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
-    validMoves |= ((gen & ~g_boardLeftEdge) << 9) & empty;
+    candidates = oppPieces & notLeft;
+    gen  = (myPieces      & notLeft) << 9; gen &= candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    validMoves |= ((gen & notLeft) << 9) & empty;
 
     pBoard->ullPossibleMoves = validMoves;
 }
