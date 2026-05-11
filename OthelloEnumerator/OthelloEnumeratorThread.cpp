@@ -676,7 +676,8 @@ unsigned int OthelloEnumeratorThread(void* pParam)
 
 	CheckPtInit(pGlobalOptions->doRestart);
 
-	PBOARD pBoard = BoardAllocateFirstBoard(pGlobalOptions->boardSize);
+	SetBoardSizeForRun(pGlobalOptions->boardSize);
+	PBOARD pBoard = BoardAllocateFirstBoard();
     boardSize = pGlobalOptions->boardSize;
     startIdx = GETBOARDSTARTIDX(pBoard);
     endIdx = GETBOARDENDIDX(pBoard);

@@ -1,5 +1,30 @@
 # Changelog
 
+## [v1.7.0] - 2026-05-11
+
+### Refactored
+- `OthelloBasics`: removed `startIdx`/`endIdx` parameters from `BoardMoveCalculator`, `MovePlayAndSetResultBoard`, and `BoardCreateUniqueBoard`; these values are now derived from the board-size globals and never recomputed per-call
+- `OthelloBasics`: added six `inline` globals (`g_boardSize`, `g_boardSi`, `g_boardEi`, `g_boardLeftEdge`, `g_boardRightEdge`, `g_boardMask`) declared in `OthelloBasics.h` and pre-initialized to the 4×4 defaults so no explicit init call is required for that size
+- `OthelloBasics`: added `SetBoardSizeForRun(boardSize)` — call once at startup to set all six globals; `BoardMoveCalculator` now uses the precomputed edge/mask values directly instead of rebuilding them on every call (potential billions of calls per solve)
+- `OthelloBasics`: `BoardAllocateFirstBoard()` takes no parameters; callers call `SetBoardSizeForRun(size)` first, then `BoardAllocateFirstBoard()` — board size is read from `g_boardSize`
+- All projects updated to the new parameter-free API: `OthelloSolverCuda`, `OthelloSolverMFCandCUDA`, `OthelloSolverMultithreaded`, `OthelloSolverUsingBplusOnly`, `OthelloEnumerator`
+
+### Added
+- `OthelloSolverMFCandCUDA`: new MFC+CUDA solver — `Solver`, `SolverController`, `SolverGpu` (CUDA kernel) modules; wave-BFS CPU phase feeds frontier boards to GPU DFS kernel; results reported on completion
+- `OthelloSolverCommandLine`: new console project skeleton added to solution
+
+### Fixed
+- `OthelloSolverMFCandCUDA`: removed `.detach()` from controller thread; added `JoinSolverThread()` so the process exits cleanly when the dialog closes
+- `OthelloSolverMFCandCUDA`: joining the old thread before reassigning `s_controllerThread` prevents `std::terminate()` (and downstream BSOD) on second run
+- `OthelloSolverMFCandCUDA`: capped `s_openThresh` at 8 open spaces to prevent GPU DFS kernel from running exponential work (O(b^n), n≤8 is safe); without the cap a 6×6 board with small `cpuDepth` would hang `cudaDeviceSynchronize()` indefinitely
+- `OthelloSolverMFCandCUDA`: `OnClose()` pumps messages while waiting for the solver to stop; 15-second `ExitProcess(0)` failsafe handles the case where the GPU is truly hung
+- `OthelloSolverMFCandCUDA`: added CUDA error checking after `cudaMemcpy`, kernel launch, and `cudaDeviceSynchronize`
+
+### Build
+- Added `<LanguageStandard>stdcpp17</LanguageStandard>` to all configurations of `OthelloBasics`, `OthelloEnumerator`, `OthelloSolverMFCandCUDA`, `OthelloSolverMultithreaded`, `OthelloSolverUsingBplusOnly`, and `OthelloSolverCuda` — required for `inline` variable support
+
+---
+
 ## [v1.6.0] - 2026-05-09
 
 ### Added

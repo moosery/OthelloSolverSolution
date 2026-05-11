@@ -24,7 +24,7 @@
      Left/right-edge masks prevent horizontal shifts from wrapping across
      row boundaries in the 64-bit representation.
 **/
-void BoardMoveCalculator(int startIdx, int endIdx, PBOARD pBoard)
+void BoardMoveCalculator(PBOARD pBoard)
 {
     char color = GETBOARDNEXTPLAYER(pBoard);
 
@@ -40,45 +40,29 @@ void BoardMoveCalculator(int startIdx, int endIdx, PBOARD pBoard)
         oppPieces = pBoard->ullCellsInUse &  pBoard->ullCellColors;
     }
 
-    /* Build column-edge masks for the active board area.
-    ** These prevent horizontal shifts from wrapping a bit in the last
-    ** active column into the first cell of the next row (and vice versa).
-    */
-    unsigned long long leftEdgeMask  = 0;
-    unsigned long long rightEdgeMask = 0;
-    unsigned long long boardMask     = 0;
-
-    for (int r = startIdx; r < endIdx; r++)
-    {
-        leftEdgeMask  |= (FIRSTBIT >> GETINDEX(r, startIdx));
-        rightEdgeMask |= (FIRSTBIT >> GETINDEX(r, endIdx - 1));
-        for (int c = startIdx; c < endIdx; c++)
-            boardMask |= (FIRSTBIT >> GETINDEX(r, c));
-    }
-
-    unsigned long long empty      = boardMask & ~(myPieces | oppPieces);
+    unsigned long long empty      = g_boardMask & ~(myPieces | oppPieces);
     unsigned long long validMoves = 0;
     unsigned long long gen, candidates;
 
     /* RIGHT (+col): integer >> 1; mask right edge to prevent col-7 -> col-0 wrap */
-    candidates = oppPieces & ~rightEdgeMask;
-    gen  = (myPieces              & ~rightEdgeMask) >> 1; gen &= candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 1) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 1) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 1) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 1) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 1) & candidates;
-    validMoves |= ((gen & ~rightEdgeMask) >> 1) & empty;
+    candidates = oppPieces & ~g_boardRightEdge;
+    gen  = (myPieces               & ~g_boardRightEdge) >> 1; gen &= candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 1) & candidates;
+    validMoves |= ((gen & ~g_boardRightEdge) >> 1) & empty;
 
     /* LEFT (-col): integer << 1; mask left edge */
-    candidates = oppPieces & ~leftEdgeMask;
-    gen  = (myPieces             & ~leftEdgeMask) << 1; gen &= candidates;
-    gen |= ((gen & ~leftEdgeMask) << 1) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 1) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 1) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 1) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 1) & candidates;
-    validMoves |= ((gen & ~leftEdgeMask) << 1) & empty;
+    candidates = oppPieces & ~g_boardLeftEdge;
+    gen  = (myPieces              & ~g_boardLeftEdge) << 1; gen &= candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 1) & candidates;
+    validMoves |= ((gen & ~g_boardLeftEdge) << 1) & empty;
 
     /* DOWN (+row): integer >> 8; no column wrap possible */
     candidates = oppPieces;
@@ -101,44 +85,44 @@ void BoardMoveCalculator(int startIdx, int endIdx, PBOARD pBoard)
     validMoves |= (gen << 8) & empty;
 
     /* DOWN-RIGHT (+row,+col): integer >> 9; mask right edge */
-    candidates = oppPieces & ~rightEdgeMask;
-    gen  = (myPieces              & ~rightEdgeMask) >> 9; gen &= candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 9) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 9) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 9) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 9) & candidates;
-    gen |= ((gen & ~rightEdgeMask) >> 9) & candidates;
-    validMoves |= ((gen & ~rightEdgeMask) >> 9) & empty;
+    candidates = oppPieces & ~g_boardRightEdge;
+    gen  = (myPieces               & ~g_boardRightEdge) >> 9; gen &= candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) >> 9) & candidates;
+    validMoves |= ((gen & ~g_boardRightEdge) >> 9) & empty;
 
     /* DOWN-LEFT (+row,-col): integer >> 7; mask left edge */
-    candidates = oppPieces & ~leftEdgeMask;
-    gen  = (myPieces             & ~leftEdgeMask) >> 7; gen &= candidates;
-    gen |= ((gen & ~leftEdgeMask) >> 7) & candidates;
-    gen |= ((gen & ~leftEdgeMask) >> 7) & candidates;
-    gen |= ((gen & ~leftEdgeMask) >> 7) & candidates;
-    gen |= ((gen & ~leftEdgeMask) >> 7) & candidates;
-    gen |= ((gen & ~leftEdgeMask) >> 7) & candidates;
-    validMoves |= ((gen & ~leftEdgeMask) >> 7) & empty;
+    candidates = oppPieces & ~g_boardLeftEdge;
+    gen  = (myPieces              & ~g_boardLeftEdge) >> 7; gen &= candidates;
+    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) >> 7) & candidates;
+    validMoves |= ((gen & ~g_boardLeftEdge) >> 7) & empty;
 
     /* UP-RIGHT (-row,+col): integer << 7; mask right edge */
-    candidates = oppPieces & ~rightEdgeMask;
-    gen  = (myPieces              & ~rightEdgeMask) << 7; gen &= candidates;
-    gen |= ((gen & ~rightEdgeMask) << 7) & candidates;
-    gen |= ((gen & ~rightEdgeMask) << 7) & candidates;
-    gen |= ((gen & ~rightEdgeMask) << 7) & candidates;
-    gen |= ((gen & ~rightEdgeMask) << 7) & candidates;
-    gen |= ((gen & ~rightEdgeMask) << 7) & candidates;
-    validMoves |= ((gen & ~rightEdgeMask) << 7) & empty;
+    candidates = oppPieces & ~g_boardRightEdge;
+    gen  = (myPieces               & ~g_boardRightEdge) << 7; gen &= candidates;
+    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
+    gen |= ((gen & ~g_boardRightEdge) << 7) & candidates;
+    validMoves |= ((gen & ~g_boardRightEdge) << 7) & empty;
 
     /* UP-LEFT (-row,-col): integer << 9; mask left edge */
-    candidates = oppPieces & ~leftEdgeMask;
-    gen  = (myPieces             & ~leftEdgeMask) << 9; gen &= candidates;
-    gen |= ((gen & ~leftEdgeMask) << 9) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 9) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 9) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 9) & candidates;
-    gen |= ((gen & ~leftEdgeMask) << 9) & candidates;
-    validMoves |= ((gen & ~leftEdgeMask) << 9) & empty;
+    candidates = oppPieces & ~g_boardLeftEdge;
+    gen  = (myPieces              & ~g_boardLeftEdge) << 9; gen &= candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
+    gen |= ((gen & ~g_boardLeftEdge) << 9) & candidates;
+    validMoves |= ((gen & ~g_boardLeftEdge) << 9) & empty;
 
     pBoard->ullPossibleMoves = validMoves;
 }
@@ -161,7 +145,7 @@ void BoardMoveCalculator(int startIdx, int endIdx, PBOARD pBoard)
       int - 0 => This is not a playable direction
             1 => This is a playable direction
 **/
-static bool moveCalcCheckDir(int startIdx, int endIdx, PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
+static bool moveCalcCheckDir(PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
 {
     int foundOppositeColor = 0;
     int foundSameColor = 0;
@@ -172,9 +156,9 @@ static bool moveCalcCheckDir(int startIdx, int endIdx, PBOARD pBoard, char color
         row += rowDir;
         col += colDir;
 
-        if (row >= startIdx && row < endIdx)
+        if (row >= g_boardSi && row < g_boardEi)
         {
-            if (col >= startIdx && col < endIdx)
+            if (col >= g_boardSi && col < g_boardEi)
             {
 
                 if (!ISOCCUPIED(pBoard, row, col))
@@ -229,17 +213,17 @@ static bool moveCalcCheckDir(int startIdx, int endIdx, PBOARD pBoard, char color
       int - 0 => This is not a playable cell
             1 => This is a playable cell
 **/
-static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, char color, int row, int col)
+static bool moveCalcHasPossibleMove(PBOARD pBoard, char color, int row, int col)
 {
     bool result = false;
 
     /* Check Up */
-    result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, -1, 0);
+    result = moveCalcCheckDir(pBoard, color, row, col, -1, 0);
 
     /* Check Up/Right Diag */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, -1, 1);
+        result = moveCalcCheckDir(pBoard, color, row, col, -1, 1);
     }
     else
         return result;
@@ -247,7 +231,7 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     /* Check Right */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, 0, 1);
+        result = moveCalcCheckDir(pBoard, color, row, col, 0, 1);
     }
     else
         return result;
@@ -255,7 +239,7 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     /* Check Down/Right */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, 1, 1);
+        result = moveCalcCheckDir(pBoard, color, row, col, 1, 1);
     }
     else
         return result;
@@ -263,7 +247,7 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     /* Check Down */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, 1, 0);
+        result = moveCalcCheckDir(pBoard, color, row, col, 1, 0);
     }
     else
         return result;
@@ -271,7 +255,7 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     /* Check Down/Left */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, 1, -1);
+        result = moveCalcCheckDir(pBoard, color, row, col, 1, -1);
     }
     else
         return result;
@@ -279,7 +263,7 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     /* Check Left */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, 0, -1);
+        result = moveCalcCheckDir(pBoard, color, row, col, 0, -1);
     }
     else
         return result;
@@ -287,7 +271,7 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     /* Check Up/Left */
     if (!result)
     {
-        result = moveCalcCheckDir(startIdx, endIdx, pBoard, color, row, col, -1, -1);
+        result = moveCalcCheckDir(pBoard, color, row, col, -1, -1);
     }
 
     return result;
@@ -303,17 +287,17 @@ static bool moveCalcHasPossibleMove(int startIdx, int endIdx, PBOARD pBoard, cha
     Returns:
       PBOARDSTATS - the newly allocated board.  Free with MemFree()!
 **/
-void BoardMoveCalculator(int startIdx, int endIdx, PBOARD pBoard)
+void BoardMoveCalculator(PBOARD pBoard)
 {
     char color = GETBOARDNEXTPLAYER(pBoard);
 
-    for (int row = startIdx; row < endIdx; row++)
+    for (int row = g_boardSi; row < g_boardEi; row++)
     {
-        for (int col = startIdx; col < endIdx; col++)
+        for (int col = g_boardSi; col < g_boardEi; col++)
         {
             if (!ISOCCUPIED(pBoard, row, col))
             {
-                if (moveCalcHasPossibleMove(startIdx, endIdx, pBoard, color, row, col))
+                if (moveCalcHasPossibleMove(pBoard, color, row, col))
                 {
                     SETPOSSIBLE(pBoard, row, col);
                 }

@@ -147,6 +147,7 @@
     <ClInclude Include="Mem.h" />
     <ClInclude Include="RWLock.h" />
     <ClInclude Include="ThreadPool.h" />
+    <ClInclude Include="Utility.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BinSearch.cpp" />

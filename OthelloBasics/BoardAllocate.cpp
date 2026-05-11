@@ -29,12 +29,13 @@ PBOARD BoardAllocateClone(PBOARD pOrigBoard)
     return pBoard;
 }
 
-static void BoardSetUpNewBoard(int boardSize, PBOARD pBoard)
+static void BoardSetUpNewBoard(PBOARD pBoard)
 {
     /* Set up the board - White upper left and lower right */
     /*                  - Black upper right and lower left */
     /*                  - Black always goes first          */
-    SETBOARDSIZE(pBoard, boardSize);
+    SetBoardSizeForRun(g_boardSize);
+    SETBOARDSIZE(pBoard, g_boardSize);
 
     SETOCCUPIED(pBoard, 3, 3);
     SETWHITE(pBoard, 3, 3);
@@ -50,7 +51,7 @@ static void BoardSetUpNewBoard(int boardSize, PBOARD pBoard)
 
     SETBOARDNEXTPLAYER(pBoard, BLACK);
 
-    BoardMoveCalculator(GETBOARDSTARTIDX(pBoard),GETBOARDENDIDX(pBoard), pBoard);
+    BoardMoveCalculator(pBoard);
 }
 
 /**
@@ -63,17 +64,17 @@ static void BoardSetUpNewBoard(int boardSize, PBOARD pBoard)
     Returns:
       PBOARDSTATS - the newly allocated board.  Free with MemFree()!
 **/
-PBOARD BoardAllocateFirstBoard(int boardSize)
+PBOARD BoardAllocateFirstBoard()
 {
     /* Validate the size of the board */
-    switch (boardSize)
+    switch (g_boardSize)
     {
         case(4):
         case(6):
         case(8):
             break;
         default:
-            Error(RC_BOARD_INVALID_SIZE,"BoardAllocateFirstBoard: invalid size specified(%d)\n", boardSize);
+            Error(RC_BOARD_INVALID_SIZE,"BoardAllocateFirstBoard: invalid size specified(%d)\n", g_boardSize);
             return NULL;
     }
 
@@ -86,7 +87,7 @@ PBOARD BoardAllocateFirstBoard(int boardSize)
     }
 
     /* Set it up */
-    BoardSetUpNewBoard(boardSize, pBoard);
+    BoardSetUpNewBoard(pBoard);
 
     return(pBoard);
 }

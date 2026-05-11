@@ -303,7 +303,7 @@ static void addBoardAndMove(PBOARD pParentBoard, PBOARD pResultBoard, unsigned s
 	PMOVE pMove = &move;
 	bool flippedBoard;
 
-	BoardCreateUniqueBoard(GETBOARDSTARTIDX(pResultBoard), GETBOARDENDIDX(pResultBoard), pResultBoard, pUniqueBoard,&flippedBoard);
+	BoardCreateUniqueBoard(pResultBoard, pUniqueBoard, &flippedBoard);
 
 	MoveSet(pMove, pParentBoard, pUniqueBoard, usMoveIdx);
 
@@ -356,7 +356,7 @@ static void playTheBoard(PBOARD pBoard)
 			pBoardForNextPlayer->usBoardInfo = pBoard->usBoardInfo;
 
 			SETBOARDNEXTPLAYERFLIP(pBoardForNextPlayer);
-			BoardMoveCalculator(GETBOARDSTARTIDX(pBoardForNextPlayer),GETBOARDENDIDX(pBoardForNextPlayer), pBoardForNextPlayer);
+			BoardMoveCalculator(pBoardForNextPlayer);
 
 			if (pBoardForNextPlayer->ullPossibleMoves == 0)
 			{
@@ -375,19 +375,15 @@ static void playTheBoard(PBOARD pBoard)
 	}
 	else
 	{
-		int startIdx = GETBOARDSTARTIDX(pBoard);
-		int endIdx = GETBOARDENDIDX(pBoard);
-
-		for (int row = startIdx; row < endIdx; row++)
+		for (int row = g_boardSi; row < g_boardEi; row++)
 		{
-			for (int col = startIdx; col < endIdx; col++)
+			for (int col = g_boardSi; col < g_boardEi; col++)
 			{
 				if (ISPOSSIBLE(pBoard, row, col))
 				{
 					BOARD nextBoard;
 					memset(&nextBoard, 0, sizeof(nextBoard));
-					//printf("Playing move: (%d,%d): %d\n", row, col, (unsigned short)GETINDEX(row, col));
-					MovePlayAndSetResultBoard(GETBOARDSTARTIDX(pBoard), GETBOARDENDIDX(pBoard), pBoard, &nextBoard, row, col);
+					MovePlayAndSetResultBoard(pBoard, &nextBoard, row, col);
 
 					addBoardAndMove(pBoard, &nextBoard, (unsigned short)GETINDEX(row, col));
 				}
@@ -502,10 +498,10 @@ void showMoveStatsForBoard(PBOARD pBoard)
 		{
 			if (ISPOSSIBLE(pBoard, row, col))
 			{
-				MovePlayAndSetResultBoard(GETBOARDSTARTIDX(pBoard), GETBOARDENDIDX(pBoard), pBoard, &tempBoard, row, col);
+				MovePlayAndSetResultBoard(pBoard, &tempBoard, row, col);
 				BOARD tempUniqueBoard;
 
-				BoardCreateUniqueBoard(GETBOARDSTARTIDX(&tempBoard),GETBOARDENDIDX(&tempBoard), & tempBoard, &tempUniqueBoard, &flippedBoard);
+				BoardCreateUniqueBoard(&tempBoard, &tempUniqueBoard, &flippedBoard);
 				rc = lookupBoardFromBoardKey(&tempUniqueBoard, &foundBoard);
 
 				if (rc != BP_RC_Success)
@@ -583,7 +579,7 @@ void PlayGame(PBOARD pBoard)
 
 	while (!winnerBoard)
 	{
-		BoardCreateUniqueBoard(GETBOARDSTARTIDX(&boardInPlay),GETBOARDENDIDX(&boardInPlay), & boardInPlay, &uniqueBoard, &flippedBoard);
+		BoardCreateUniqueBoard(&boardInPlay, &uniqueBoard, &flippedBoard);
 		rc = lookupBoardFromBoardKey(&uniqueBoard, &foundBoard);
 
 		if (rc != BP_RC_Success)
@@ -619,8 +615,8 @@ void PlayGame(PBOARD pBoard)
 			showMoveStatsForBoard(&boardInPlay);
 			usMove = getMoveForBoard(&boardInPlay);
 			BOARD resultBoard;
-			MovePlayAndSetResultBoard(GETBOARDSTARTIDX(pBoard), GETBOARDENDIDX(pBoard), &boardInPlay, &resultBoard, GETROWFROMINDEX(usMove), GETCOLFROMINDEX(usMove));
-			BoardMoveCalculator(GETBOARDSTARTIDX(&resultBoard),GETBOARDENDIDX(&resultBoard), & resultBoard);
+			MovePlayAndSetResultBoard(&boardInPlay, &resultBoard, GETROWFROMINDEX(usMove), GETCOLFROMINDEX(usMove));
+			BoardMoveCalculator(&resultBoard);
 			memcpy(&boardInPlay, &resultBoard, sizeof(BOARD));
 			break;
 		case BOARD_STATE_PLAYED_TERMINAL:
@@ -631,7 +627,7 @@ void PlayGame(PBOARD pBoard)
 			printf("Unfortunately, no moves are possible for that player.  So we switch players!\n");
 			SETBOARDNEXTPLAYERFLIP(&boardInPlay);
 			boardInPlay.ullPossibleMoves = 0;
-			BoardMoveCalculator(GETBOARDSTARTIDX(&boardInPlay),GETBOARDENDIDX(&boardInPlay), & boardInPlay);
+			BoardMoveCalculator(&boardInPlay);
 			break;
 		default:
 			Fatal(FATAL_BAD_BOARD_STATE, "The board state is bad: %hd\n", boardInPlay.usBoardState);
@@ -642,7 +638,8 @@ void PlayGame(PBOARD pBoard)
 
 int main(int argc, char* argv[])
 {
-	PBOARD pBoard = BoardAllocateFirstBoard(6);
+	SetBoardSizeForRun(6);
+	PBOARD pBoard = BoardAllocateFirstBoard();
 	system("rmdir D:\\Othello\\Boards /s /q");
 	system("rmdir D:\\Othello\\Moves /s /q");
 	system("rmdir D:\\Othello\\BoardsToProcess /s /q");

@@ -122,21 +122,52 @@ typedef struct _Move
 constexpr auto MOVE_PLAYERCHANGEONLY = 100;
 
 
+// ── Board-size globals ────────────────────────────────────────────────────────
+// Call SetBoardSizeForRun(boardSize) once before any board operations.
+// Masks are precomputed here so BoardMoveCalculator avoids rebuilding them
+// on every call (which can be billions of times for a full solve).
+// Defaults match boardSize=4 so a SetBoardSizeForRun call is not strictly
+// required when the board size is 4.
+inline int                g_boardSize      = 4;
+inline int                g_boardSi        = 2;                    // (8-4)/2
+inline int                g_boardEi        = 6;                    // 8-2
+inline unsigned long long g_boardLeftEdge  = 0x0000202020200000ULL;
+inline unsigned long long g_boardRightEdge = 0x0000040404040000ULL;
+inline unsigned long long g_boardMask      = 0x00003C3C3C3C0000ULL;
+
+inline void SetBoardSizeForRun(int boardSize)
+{
+    g_boardSize      = boardSize;
+    g_boardSi        = (8 - boardSize) / 2;
+    g_boardEi        = 8 - g_boardSi;
+    g_boardLeftEdge  = 0;
+    g_boardRightEdge = 0;
+    g_boardMask      = 0;
+    for (int r = g_boardSi; r < g_boardEi; r++)
+    {
+        g_boardLeftEdge  |= (FIRSTBIT >> GETINDEX(r, g_boardSi));
+        g_boardRightEdge |= (FIRSTBIT >> GETINDEX(r, g_boardEi - 1));
+        for (int c = g_boardSi; c < g_boardEi; c++)
+            g_boardMask |= (FIRSTBIT >> GETINDEX(r, c));
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 int BoardCompare(const void* arg1, const void* arg2);
 int BoardCompareBinSearchLE(const void* arg1, const void* arg2, const size_t size);
 void BoardFlip(PBOARD pBoard, PBOARD pResult);
 void BoardRotate90DegreesRight(PBOARD pBoard, PBOARD pResult);
 void BoardMirrorVerticalAxis(PBOARD pBoard, PBOARD pResult);
 void BoardPrint(FILE* fpOut, int boardCount, ...);
-PBOARD BoardAllocateFirstBoard(int boardSize);
+PBOARD BoardAllocateFirstBoard();
 PBOARD BoardAllocate();
 PBOARD BoardAllocateClone(PBOARD pOrigBoard);
-void BoardCreateUniqueBoard(int startIdx, int endIdx, PBOARD pBoard, PBOARD pUniqueBoard, bool *pFlippedBoard, int numRotations = 8);
-void BoardMoveCalculator(int startIdx, int endIdx, PBOARD pBoard);
+void BoardCreateUniqueBoard(PBOARD pBoard, PBOARD pUniqueBoard, bool *pFlippedBoard, int numRotations = 8);
+void BoardMoveCalculator(PBOARD pBoard);
 
 PMOVE MoveAllocate();
 void MoveSet(PMOVE pMove, PBOARD pParent, PBOARD pResult, unsigned short usMoveIdx);
-void MovePlayAndSetResultBoard(int startIdx, int endIdx, PBOARD pBoard, PBOARD pResultBoard, int row, int col);
+void MovePlayAndSetResultBoard(PBOARD pBoard, PBOARD pResultBoard, int row, int col);
 void MovePrint(FILE* fpOut, PMOVE pMove);
 
 /* Othello BOARD Return Codes */

@@ -1,7 +1,7 @@
 #include "OthelloBasics.h"
 #include <memory.h>
 
-static bool moveCheckDir(int startIdx, int endIdx, PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
+static bool moveCheckDir(PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
 {
     int foundOppositeColor = 0;
     int foundSameColor = 0;
@@ -12,9 +12,9 @@ static bool moveCheckDir(int startIdx, int endIdx, PBOARD pBoard, char color, in
         row += rowDir;
         col += colDir;
 
-        if (row >= startIdx && row < endIdx)
+        if (row >= g_boardSi && row < g_boardEi)
         {
-            if (col >= startIdx && col < endIdx)
+            if (col >= g_boardSi && col < g_boardEi)
             {
 
                 if (!ISOCCUPIED(pBoard, row, col))
@@ -55,16 +55,16 @@ static bool moveCheckDir(int startIdx, int endIdx, PBOARD pBoard, char color, in
     return false;
 }
 
-static void moveDir(int startIdx, int endIdx, PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
+static void moveDir(PBOARD pBoard, char color, int row, int col, int rowDir, int colDir)
 {
     while (true)
     {
         row += rowDir;
         col += colDir;
 
-        if (row >= startIdx && row < endIdx)
+        if (row >= g_boardSi && row < g_boardEi)
         {
-            if (col >= startIdx && col < endIdx)
+            if (col >= g_boardSi && col < g_boardEi)
             {
                 if (GETCOLOR(pBoard, row, col) == color)
                 {
@@ -79,7 +79,7 @@ static void moveDir(int startIdx, int endIdx, PBOARD pBoard, char color, int row
     }
 }
 
-static void applyMove(int startIdx, int endIdx, PBOARD pBoard, char color, int row, int col)
+static void applyMove(PBOARD pBoard, char color, int row, int col)
 {
     /* Set the color into the position */
     SETOCCUPIED(pBoard, row, col);
@@ -88,55 +88,39 @@ static void applyMove(int startIdx, int endIdx, PBOARD pBoard, char color, int r
     /* Flip the opponents stuff */
 
     /* Check Up */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, -1, 0))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, -1, 0);
-    }
+    if (moveCheckDir(pBoard, color, row, col, -1, 0))
+        moveDir(pBoard, color, row, col, -1, 0);
 
     /* Check Up/Right Diag */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, -1, 1))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, -1, 1);
-    }
+    if (moveCheckDir(pBoard, color, row, col, -1, 1))
+        moveDir(pBoard, color, row, col, -1, 1);
 
     /* Check Right */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, 0, 1))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, 0, 1);
-    }
+    if (moveCheckDir(pBoard, color, row, col, 0, 1))
+        moveDir(pBoard, color, row, col, 0, 1);
 
     /* Check Down/Right */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, 1, 1))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, 1, 1);
-    }
+    if (moveCheckDir(pBoard, color, row, col, 1, 1))
+        moveDir(pBoard, color, row, col, 1, 1);
 
     /* Check Down */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, 1, 0))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, 1, 0);
-    }
+    if (moveCheckDir(pBoard, color, row, col, 1, 0))
+        moveDir(pBoard, color, row, col, 1, 0);
 
     /* Check Down/Left */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, 1, -1))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, 1, -1);
-    }
+    if (moveCheckDir(pBoard, color, row, col, 1, -1))
+        moveDir(pBoard, color, row, col, 1, -1);
 
     /* Check Left */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, 0, -1))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, 0, -1);
-    }
+    if (moveCheckDir(pBoard, color, row, col, 0, -1))
+        moveDir(pBoard, color, row, col, 0, -1);
 
     /* Check Up/Left */
-    if (moveCheckDir(startIdx, endIdx, pBoard, color, row, col, -1, -1))
-    {
-        moveDir(startIdx, endIdx, pBoard, color, row, col, -1, -1);
-    }
+    if (moveCheckDir(pBoard, color, row, col, -1, -1))
+        moveDir(pBoard, color, row, col, -1, -1);
 }
 
-void MovePlayAndSetResultBoard(int startIdx, int endIdx, PBOARD pBoard, PBOARD pResultBoard, int row, int col)
+void MovePlayAndSetResultBoard(PBOARD pBoard, PBOARD pResultBoard, int row, int col)
 {
 	memset(pResultBoard, 0, sizeof(BOARD));
 
@@ -152,5 +136,5 @@ void MovePlayAndSetResultBoard(int startIdx, int endIdx, PBOARD pBoard, PBOARD p
     char color = GETBOARDNEXTPLAYER(pBoard);
 
 	/* Now play the move on the result board */
-    applyMove(startIdx,endIdx, pResultBoard, color, row, col);
+    applyMove(pResultBoard, color, row, col);
 }

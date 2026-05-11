@@ -127,8 +127,6 @@ static unsigned long long LookupPathCount(const BOARD* canonical)
 static void PlayBoard(const BOARD* pBoard, unsigned long long pathCount,
                       std::vector<BOARD>& outNew)
 {
-    int si         = GETBOARDSTARTIDX(pBoard);
-    int ei         = GETBOARDENDIDX(pBoard);
     int openSpaces = s_totalCells - GETNUMINUSE(pBoard);
 
     if (openSpaces <= s_threshold)
@@ -142,7 +140,7 @@ static void PlayBoard(const BOARD* pBoard, unsigned long long pathCount,
     BOARD work;
     memcpy(&work, pBoard, sizeof(BOARD));
     work.ullPossibleMoves = 0;
-    BoardMoveCalculator(si, ei, &work);
+    BoardMoveCalculator(&work);
 
     if (work.ullPossibleMoves == 0)
     {
@@ -151,7 +149,7 @@ static void PlayBoard(const BOARD* pBoard, unsigned long long pathCount,
         memcpy(&flipped, &work, sizeof(BOARD));
         flipped.ullPossibleMoves = 0;
         SETBOARDNEXTPLAYERFLIP(&flipped);
-        BoardMoveCalculator(si, ei, &flipped);
+        BoardMoveCalculator(&flipped);
 
         if (flipped.ullPossibleMoves == 0)
         {
@@ -170,26 +168,26 @@ static void PlayBoard(const BOARD* pBoard, unsigned long long pathCount,
         {
             BOARD uniqueChild;
             bool  childFlipped;
-            BoardCreateUniqueBoard(si, ei, &flipped, &uniqueChild, &childFlipped, s_numRotations);
+            BoardCreateUniqueBoard(&flipped, &uniqueChild, &childFlipped, s_numRotations);
             if (InsertOrIncrementByN(&uniqueChild, pathCount))
                 outNew.push_back(uniqueChild);
         }
     }
     else
     {
-        for (int row = si; row < ei; row++)
+        for (int row = g_boardSi; row < g_boardEi; row++)
         {
-            for (int col = si; col < ei; col++)
+            for (int col = g_boardSi; col < g_boardEi; col++)
             {
                 if (!ISPOSSIBLE(&work, row, col)) continue;
 
                 BOARD next;
                 memset(&next, 0, sizeof(next));
-                MovePlayAndSetResultBoard(si, ei, &work, &next, row, col);
+                MovePlayAndSetResultBoard(&work, &next, row, col);
 
                 BOARD uniqueChild;
                 bool  childFlipped;
-                BoardCreateUniqueBoard(si, ei, &next, &uniqueChild, &childFlipped, s_numRotations);
+                BoardCreateUniqueBoard(&next, &uniqueChild, &childFlipped, s_numRotations);
 
                 if (InsertOrIncrementByN(&uniqueChild, pathCount))
                     outNew.push_back(uniqueChild);
@@ -308,6 +306,7 @@ void RunCpuEnumeratorFull(
     s_threshold    = threshold;
     s_numRotations = numRotations;
     s_totalCells   = boardSize * boardSize;
+    SetBoardSizeForRun(boardSize);
     s_stop.store(false);
     s_progressDone.store(false);
     s_boardsProcessed.store(0);
@@ -333,11 +332,10 @@ void RunCpuEnumeratorFull(
     }
 
     // Seed with canonical root board
-    PBOARD pRoot = BoardAllocateFirstBoard(boardSize);
+    PBOARD pRoot = BoardAllocateFirstBoard();
     BOARD  uniqueRoot;
     bool   flipped;
-    BoardCreateUniqueBoard(GETBOARDSTARTIDX(pRoot), GETBOARDENDIDX(pRoot),
-                           pRoot, &uniqueRoot, &flipped, numRotations);
+    BoardCreateUniqueBoard(pRoot, &uniqueRoot, &flipped, numRotations);
     MemFree(pRoot);
 
     BoardEntry rootEntry = {};

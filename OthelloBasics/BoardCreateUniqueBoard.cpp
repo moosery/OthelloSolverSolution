@@ -4,7 +4,7 @@
 #include <memory.h>
 #include "Rotation.h"
 
-void BoardCreateUniqueBoard(int startIdx, int endIdx, PBOARD pBoard, PBOARD pUniqueBoard, bool *pFlippedBoard, int numRotations)
+void BoardCreateUniqueBoard(PBOARD pBoard, PBOARD pUniqueBoard, bool *pFlippedBoard, int numRotations)
 {
     BOARD boardArray[16];
 
@@ -44,7 +44,7 @@ void BoardCreateUniqueBoard(int startIdx, int endIdx, PBOARD pBoard, PBOARD pUni
     }
 
 
-    BoardMoveCalculator(startIdx, endIdx, &(boardArray[0]));
+    BoardMoveCalculator(&(boardArray[0]));
     memcpy(pUniqueBoard, &(boardArray[0]), sizeof(BOARD));
 
     *pFlippedBoard = (GETBOARDNEXTPLAYER(pUniqueBoard) != GETBOARDNEXTPLAYER(pBoard) ? true : false);

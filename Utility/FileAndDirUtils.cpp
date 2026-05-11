@@ -4,8 +4,7 @@
 #include <sys/types.h>
 #include <string.h>
 #include "Error.h"
-
-#define MAX_FULL_PATH_NAME 4000
+#include "Utility.h"
 
 static bool createPath(char* pPathToCreate)
 {

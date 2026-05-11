@@ -291,8 +291,7 @@ static void AddBoardAndMove(PBOARD pParent, PBOARD pResult, unsigned short usMov
     MOVE  move;
     bool  flipped;
 
-    BoardCreateUniqueBoard(GETBOARDSTARTIDX(pResult), GETBOARDENDIDX(pResult),
-        pResult, &uniqueBoard, &flipped, s_numRotations);
+    BoardCreateUniqueBoard(pResult, &uniqueBoard, &flipped, s_numRotations);
     MoveSet(&move, pParent, &uniqueBoard, usMoveIdx);
 
     BPRc rc = BPInsertCopy(s_pUniqueBoards[BoardShard(&uniqueBoard)], &uniqueBoard);
@@ -326,9 +325,6 @@ static void PlayTheBoard(PBOARD pBoard)
     if (pBoard->usBoardState != BOARD_STATE_NOT_PLAYED)
         Fatal(FATAL_BOARD_REPLAY, "PlayTheBoard: replaying a board!\n");
 
-    int startIdx = GETBOARDSTARTIDX(pBoard);
-    int endIdx   = GETBOARDENDIDX(pBoard);
-
     if (pBoard->ullPossibleMoves == 0)
     {
         PBOARD pNext = BoardAllocate();
@@ -341,7 +337,7 @@ static void PlayTheBoard(PBOARD pBoard)
         pNext->ullCellColors = pBoard->ullCellColors;
         pNext->usBoardInfo   = pBoard->usBoardInfo;
         SETBOARDNEXTPLAYERFLIP(pNext);
-        BoardMoveCalculator(startIdx, endIdx, pNext);
+        BoardMoveCalculator(pNext);
 
         if (pNext->ullPossibleMoves == 0)
         {
@@ -357,14 +353,14 @@ static void PlayTheBoard(PBOARD pBoard)
     }
     else
     {
-        for (int row = startIdx; row < endIdx; row++)
+        for (int row = g_boardSi; row < g_boardEi; row++)
         {
-            for (int col = startIdx; col < endIdx; col++)
+            for (int col = g_boardSi; col < g_boardEi; col++)
             {
                 if (!ISPOSSIBLE(pBoard, row, col)) continue;
                 BOARD nextBoard;
                 memset(&nextBoard, 0, sizeof(nextBoard));
-                MovePlayAndSetResultBoard(startIdx, endIdx, pBoard, &nextBoard, row, col);
+                MovePlayAndSetResultBoard(pBoard, &nextBoard, row, col);
                 AddBoardAndMove(pBoard, &nextBoard, (unsigned short)GETINDEX(row, col));
             }
         }
@@ -429,7 +425,7 @@ static void WorkerThreadFunc(int /*threadIndex*/)
 
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        BoardMoveCalculator(GETBOARDSTARTIDX(&theBoard), GETBOARDENDIDX(&theBoard), &theBoard);
+        BoardMoveCalculator(&theBoard);
 
         {
             std::lock_guard<std::mutex> lk(g_currentBoardMutex);
@@ -578,8 +574,9 @@ UINT ControllerThread(LPVOID pArgs)
         // Seed the queue with the root board
         s_boardSize    = boardSize;
         s_numFirstWins = 0;
+        SetBoardSizeForRun(boardSize);
 
-        PBOARD pRoot = BoardAllocateFirstBoard(boardSize);
+        PBOARD pRoot = BoardAllocateFirstBoard();
         if (!pRoot)
         {
             ErrorPrint(stdout);
@@ -675,7 +672,7 @@ UINT ControllerThread(LPVOID pArgs)
     if (!g_stop.load())
     {
         // Normal completion: propagate win counts then build result summary
-        PBOARD pRootKey = BoardAllocateFirstBoard(s_boardSize);
+        PBOARD pRootKey = BoardAllocateFirstBoard();
         LPARAM lParam = 0;
         if (pRootKey)
         {
