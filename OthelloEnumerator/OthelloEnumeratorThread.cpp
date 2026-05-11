@@ -160,7 +160,7 @@ void doBoardPrint(PBOARD* pBoardArray, int boardArraySize, PFN_PRINT pfnOut, voi
 /* Flush the current line and reset the buffer */
 #define NL()         pfnOut(ctx, line); pfnOut(ctx, "\n"); pos = 0; line[0] = '\0'
 
-	switch (GETBOARDSIZE(pBoardArray[0]))
+	switch (g_boardSize)
 	{
 		case 4:  strcpy_s(gap, "                  "); break;
 		case 6:  strcpy_s(gap, "          ");         break;
@@ -679,8 +679,8 @@ unsigned int OthelloEnumeratorThread(void* pParam)
 	SetBoardSizeForRun(pGlobalOptions->boardSize);
 	PBOARD pBoard = BoardAllocateFirstBoard();
     boardSize = pGlobalOptions->boardSize;
-    startIdx = GETBOARDSTARTIDX(pBoard);
-    endIdx = GETBOARDENDIDX(pBoard);
+    startIdx = g_boardSi;
+    endIdx   = g_boardEi;
 	boardMask = 0;
 	boardMask = 0;
 

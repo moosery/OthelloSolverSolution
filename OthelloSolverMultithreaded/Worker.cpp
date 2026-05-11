@@ -132,12 +132,10 @@ static void DeleteDirectoryRecursively(const char* dir)
 static void CountAndAssignWin(PBOARD pBoard)
 {
     s_numFirstWins++;
-    int startIdx = GETBOARDSTARTIDX(pBoard);
-    int endIdx   = GETBOARDENDIDX(pBoard);
     int numBlack = 0, numWhite = 0;
 
-    for (int row = startIdx; row < endIdx; row++)
-        for (int col = startIdx; col < endIdx; col++)
+    for (int row = g_boardSi; row < g_boardEi; row++)
+        for (int col = g_boardSi; col < g_boardEi; col++)
             if (ISOCCUPIED(pBoard, row, col))
             {
                 if (ISBLACK(pBoard, row, col)) numBlack++;
@@ -680,9 +678,7 @@ UINT ControllerThread(LPVOID pArgs)
             BPRc bpRc = LookupBoardFromBoardKey(pRootKey, &rootBoard);
             if (bpRc == BP_RC_Success)
             {
-                int si = GETBOARDSTARTIDX(&rootBoard);
-                int ei = GETBOARDENDIDX(&rootBoard);
-                CalculateWins(&rootBoard, si, ei);
+                CalculateWins(&rootBoard, g_boardSi, g_boardEi);
 
                 size_t played = g_stats.boardsProcessed.load();
                 size_t unique = 0;

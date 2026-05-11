@@ -100,15 +100,12 @@ void DumpMoveResults()
 void countAndAssignWin(PBOARD pBoard)
 {
 	numFirstWins++;
-	int startIdx = GETBOARDSTARTIDX(pBoard);
-	int endIdx = GETBOARDENDIDX(pBoard);
-
 	int numBlack = 0;
 	int numWhite = 0;
 
-	for (int row = startIdx; row < endIdx; row++)
+	for (int row = g_boardSi; row < g_boardEi; row++)
 	{
-		for (int col = startIdx; col < endIdx; col++)
+		for (int col = g_boardSi; col < g_boardEi; col++)
 		{
 			if (ISOCCUPIED(pBoard, row, col))
 			{
@@ -192,7 +189,7 @@ BPRc findNextBoardForMove(PBOARD pParentBoard, unsigned short usMoveIdx, bool* p
 	if (rc != BP_RC_Success)
 	{
 		BoardPrint(stdout, 1, pParentBoard);
-		Fatal(FATAL_MOVE_FIND_FAILED, "findNextBoardForMove: Could not find the move (%hd) (%d,%d) for the following board!  Something is wrong!\n", usMoveIdx, (GETROWFROMINDEX(usMoveIdx) - GETBOARDSTARTIDX(pParentBoard)) + 1, (GETCOLFROMINDEX(usMoveIdx) - GETBOARDSTARTIDX(pParentBoard)) + 1);
+		Fatal(FATAL_MOVE_FIND_FAILED, "findNextBoardForMove: Could not find the move (%hd) (%d,%d) for the following board!  Something is wrong!\n", usMoveIdx, (GETROWFROMINDEX(usMoveIdx) - g_boardSi) + 1, (GETCOLFROMINDEX(usMoveIdx) - g_boardSi) + 1);
 	}
 
 	if (GETBOARDNEXTPLAYERSHORT(foundMove.usBoardInfoParent) == GETBOARDNEXTPLAYERSHORT(foundMove.usBoardInfoResult))
@@ -472,15 +469,15 @@ void solveIt(PBOARD pRootBoard)
 
 	BPRc bpRc = lookupBoardFromBoardKey(pRootBoard, pNewRoot);
 
-	calculateWins(pNewRoot, (int)GETBOARDSTARTIDX(pRootBoard), (int)GETBOARDENDIDX(pRootBoard));
+	calculateWins(pNewRoot, g_boardSi, g_boardEi);
 
 	printf("Done calculating win totals!\n");
 }
 
 void showMoveStatsForBoard(PBOARD pBoard)
 {
-	unsigned short startIdx = GETBOARDSTARTIDX(pBoard);
-	unsigned short endIdx = GETBOARDENDIDX(pBoard);
+	int startIdx = g_boardSi;
+	int endIdx   = g_boardEi;
 
 	unsigned short row;
 	unsigned short col;
@@ -534,8 +531,8 @@ void showMoveStatsForBoard(PBOARD pBoard)
 
 unsigned short getMoveForBoard(PBOARD pBoard)
 {
-	unsigned short startIdx = GETBOARDSTARTIDX(pBoard);
-	unsigned short endIdx = GETBOARDENDIDX(pBoard);
+	int startIdx = g_boardSi;
+	int endIdx   = g_boardEi;
 	char buffer[1024];
 	unsigned short row;
 	unsigned short col;
@@ -653,7 +650,7 @@ int main(int argc, char* argv[])
 	else
 	{
 
-		printf("We're going to try to solve the following %dx%d Othello board.  Wish us luck!\n", GETBOARDSIZE(pBoard), GETBOARDSIZE(pBoard));
+		printf("We're going to try to solve the following %dx%d Othello board.  Wish us luck!\n", g_boardSize, g_boardSize);
 		BoardPrint(stdout, 1, pBoard);
 
 		printf("===============================================================\n");
@@ -735,7 +732,7 @@ int main(int argc, char* argv[])
 						printf("**                            RESULTS                            **\n");
 						printf("*******************************************************************\n");
 						printf("*******************************************************************\n");
-						printf("Board Size           : %dx%d\n", GETBOARDSIZE(pSolvedBoard), GETBOARDSIZE(pSolvedBoard));
+						printf("Board Size           : %dx%d\n", g_boardSize, g_boardSize);
 						printf("Dup Reduction Factor : %d\n", NUM_OF_ROTATIONS);
 						printf("Black Wins           : %zu\n", pSolvedBoard->ullBlackWins);
 						printf("White Wins           : %zu\n", pSolvedBoard->ullWhiteWins);

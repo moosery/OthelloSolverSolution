@@ -598,8 +598,8 @@ int COthelloSolverMFCandCUDADlg::GetCpuDepth() const
 
 CString COthelloSolverMFCandCUDADlg::BoardToAscii(const BOARD& board)
 {
-    int si = GETBOARDSTARTIDX(&board);
-    int ei = GETBOARDENDIDX(&board);
+    int si = g_boardSi;
+    int ei = g_boardEi;
     if (si >= ei) return CString(_T(""));
 
     CString result;

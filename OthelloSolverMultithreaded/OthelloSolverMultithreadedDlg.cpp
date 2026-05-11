@@ -387,8 +387,8 @@ CString COthelloSolverMultithreadedDlg::FormatCount(long long n)
 
 CString COthelloSolverMultithreadedDlg::BoardToAscii(const BOARD& board)
 {
-    int startIdx = GETBOARDSTARTIDX(&board);
-    int endIdx   = GETBOARDENDIDX(&board);
+    int startIdx = g_boardSi;
+    int endIdx   = g_boardEi;
 
     if (startIdx >= endIdx)
         return CString("(no board)");

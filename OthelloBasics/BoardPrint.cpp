@@ -44,7 +44,7 @@ void BoardPrint(FILE* fpOut, int boardCount, ...)
     }
     va_end(args);
 
-    switch (GETBOARDSIZE(pBoardArray[0]))
+    switch (g_boardSize)
     {
         case 4:
             strcpy(gap, "                  ");
@@ -56,8 +56,8 @@ void BoardPrint(FILE* fpOut, int boardCount, ...)
             strcpy(gap, "  ");
     }
 
-    int startIdx = GETBOARDSTARTIDX(pBoardArray[0]);
-    int endIdx = GETBOARDENDIDX(pBoardArray[0]);
+    int startIdx = g_boardSi;
+    int endIdx   = g_boardEi;
     char color;
 
     for (int i = 0; i < boardArraySize; i++)

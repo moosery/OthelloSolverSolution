@@ -1,5 +1,16 @@
 # Changelog
 
+## [v1.8.0] - 2026-05-11
+
+### Performance
+- `BoardMirrorVerticalAxis`: replaced O(N²) cell-by-cell loop with a 9-operation bitwise implementation — reverse bits within each byte of the 64-bit word (swap nibbles → swap bit-pairs → swap adjacent bits); works for all board sizes since non-active column bits are 0; original loop preserved under `#define BITBOARD_MIRROR` fallback
+
+### Refactored
+- Replaced all active-code usages of `GETBOARDSTARTIDX`, `GETBOARDENDIDX`, and `GETBOARDSIZE` macros with the `g_boardSi`, `g_boardEi`, and `g_boardSize` globals across all projects; macros retained in the header and legacy `#else` blocks only
+- Updated files: `BoardFlip.cpp`, `BoardPrint.cpp`, `OthelloEnumeratorThread.cpp`, `OthelloSolverMFCandCUDADlg.cpp`, `OthelloSolverMultithreadedDlg.cpp`, `Worker.cpp`, `Main.cpp` (OthelloSolverUsingBplusOnly)
+
+---
+
 ## [v1.7.0] - 2026-05-11
 
 ### Refactored

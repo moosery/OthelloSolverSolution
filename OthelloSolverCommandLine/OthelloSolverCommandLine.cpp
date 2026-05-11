@@ -3,6 +3,7 @@
 #include <string.h>
 #include <Utility.h>
 #include "InternalRoutines.h"
+#include <OthelloBasics.h>
 
 typedef struct SolverConfig
 {
@@ -49,11 +50,14 @@ void doRestartProcess(PSolverConfig pConfig)
 
 void doStartProcess(PSolverConfig pConfig)
 {
+    // Ensure the output directory exists and is properly structured for the given board size.
     if (!CreateFullPathForRun(pConfig->outputDir, pConfig->boardSize))
     {
         ErrorPrint(stderr);
         exit(1);
     }
+
+    PBOARD pBoard = CreateBoard(pConfig->boardSize);
 
     // Placeholder for start logic.
     printf("Start process not implemented yet.\n");

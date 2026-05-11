@@ -2,9 +2,6 @@
 
 void BoardFlip(PBOARD pBoard, PBOARD pResult)
 {
-    int startIdx = GETBOARDSTARTIDX(pBoard);
-    int endIdx = GETBOARDENDIDX(pBoard);
-
     pResult->usBoardInfo = pBoard->usBoardInfo;
     pResult->ullPossibleMoves = 0;
     pResult->ullCellColors = 0;
@@ -19,9 +16,9 @@ void BoardFlip(PBOARD pBoard, PBOARD pResult)
         SETBOARDNEXTPLAYER(pResult, BLACK);
     }
 
-    for (int row = startIdx; row < endIdx; row++)
+    for (int row = g_boardSi; row < g_boardEi; row++)
     {
-        for (int col = startIdx; col < endIdx; col++)
+        for (int col = g_boardSi; col < g_boardEi; col++)
         {
             if (ISOCCUPIED(pBoard, row, col))
             {
