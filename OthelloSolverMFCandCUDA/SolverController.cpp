@@ -86,18 +86,11 @@ static int  s_numThreads   = 1;
 // TieredStore callbacks
 // ─────────────────────────────────────────────────────────────────────────────
 
-static int CompareUniqueRecord(const void* a, const void* b)
-{
-    const UniqueRecord* ra = (const UniqueRecord*)a;
-    const UniqueRecord* rb = (const UniqueRecord*)b;
-    if (ra->ullCellsInUse != rb->ullCellsInUse)
-        return (ra->ullCellsInUse < rb->ullCellsInUse) ? -1 : 1;
-    if (ra->ullCellColors != rb->ullCellColors)
-        return (ra->ullCellColors < rb->ullCellColors) ? -1 : 1;
-    if (ra->usBoardInfo != rb->usBoardInfo)
-        return (int)(ra->usBoardInfo) - (int)(rb->usBoardInfo);
-    return 0;
-}
+static const TSKeyFld k_uniqueKeyFlds[] = {
+    {  0, sizeof(unsigned long long), TS_DATATYPE_UNUM_8BYTE },  // ullCellsInUse
+    {  8, sizeof(unsigned long long), TS_DATATYPE_UNUM_8BYTE },  // ullCellColors
+    { 16, sizeof(unsigned short),     TS_DATATYPE_UNUM_2BYTE },  // usBoardInfo
+};
 
 static void MergeUniqueRecord(void* existing, const void* incoming)
 {
@@ -531,8 +524,6 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
     s_cpuDone.store(false);
     s_activeCount.store(0);
 
-    std::string manifestPath = dirs[0] + "\\othello_solver.manifest";
-
     FreeBTrees();
     if (!CreateBTrees())
     {
@@ -547,12 +538,13 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
 
     TSRc tsRc;
     if (isRestart)
-        tsRc = TSOpen(manifestPath.c_str(), CompareUniqueRecord, MergeUniqueRecord, &s_pTs);
+        tsRc = TSOpen(dirs[0].c_str(), k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
+                      MergeUniqueRecord, &s_pTs);
 
     if (!isRestart || tsRc != TS_RC_Success)
-        tsRc = TSCreate(manifestPath.c_str(), dirPtrs.data(), (int)dirPtrs.size(),
-                        24, sizeof(UniqueRecord), 500000,
-                        CompareUniqueRecord, MergeUniqueRecord, &s_pTs);
+        tsRc = TSCreate(dirPtrs.data(), (int)dirPtrs.size(),
+                        k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
+                        sizeof(UniqueRecord), 500000, MergeUniqueRecord, &s_pTs);
 
     if (tsRc != TS_RC_Success)
     {

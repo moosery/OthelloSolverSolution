@@ -115,24 +115,6 @@ typedef struct _TSFileDesc
     uint8_t* maxKey;         // heap-allocated: recordSize bytes; largest live key
 } TSFileDesc;
 
-// ==================== Meta-store callbacks (file registry) ====================
-//
-// The meta-store record is: TSManifestFileEntry (32 bytes) + minKey[recordSize] + maxKey[recordSize].
-// Key is the first 8 bytes (fileId, uint64_t, little-endian on x86).
-
-static inline int TSI_MetaCompareFn(const void* a, const void* b)
-{
-    uint64_t ka, kb;
-    memcpy(&ka, a, sizeof(uint64_t));
-    memcpy(&kb, b, sizeof(uint64_t));
-    return (ka > kb) - (ka < kb);
-}
-
-static inline void TSI_MetaMergeFn(void* existing, const void* incoming)
-{
-    (void)existing; (void)incoming;  // fileIds are unique; duplicates never occur
-}
-
 // ==================== Internal helper declarations ====================
 
 void  TSI_FreeFileDesc(_TieredStore* ts, TSFileDesc* desc);
@@ -160,7 +142,9 @@ struct _TieredStore
     int           keySize;          // leading bytes of each record that form the key
     int           recordSize;
     int           maxRecordsPerLevel;
-    TS_COMPARE_FN compareFn;
+    int           numKeyFlds;
+    size_t        idxSettings;
+    TSKeyFld      keyFlds[TS_MAX_KEY_FLDS];
     TS_MERGE_FN   mergeFn;
     uint64_t      nextFileId;
 

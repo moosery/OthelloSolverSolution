@@ -94,14 +94,14 @@ TSRc TSI_RegisterFile(_TieredStore* ts, TSFileDesc* desc)
 // ==================== BinarySearchFile comparator bridge ====================
 //
 // BinarySearchFile comparator: pComp(ctx, entry, key) — entry is the slot read from file.
-// TS_COMPARE_FN:                compareFn(a, b)        — standard (a < b → negative).
 // Slot layout: [record : recordSize][flags : 1 byte]; record is at offset 0.
 
-struct BsfCtx { TS_COMPARE_FN fn; };
+struct BsfCtx { int numFlds; size_t settings; TSKeyFld* flds; };
 
 static int ts_bsf_comp(void* pContext, const void* pEntry, const void* pKey)
 {
-    return ((BsfCtx*)pContext)->fn(pEntry, pKey);
+    BsfCtx* c = (BsfCtx*)pContext;
+    return BPKeyCmpPPRaw(c->numFlds, c->settings, (BPIdxFld*)c->flds, pEntry, pKey);
 }
 
 // ==================== k-way merge: cursor ====================
@@ -210,8 +210,8 @@ static void FindOverlappingFiles(_TieredStore* ts,
     for (int i = 0; i < ts->numFiles; i++)
     {
         TSFileDesc* f = ts->files[i];
-        if (ts->compareFn(f->minKey, memMax) <= 0 &&
-            ts->compareFn(f->maxKey, memMin) >= 0)
+        if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds, f->minKey, memMax) <= 0 &&
+            BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds, f->maxKey, memMin) >= 0)
             outIndices.push_back(i);
     }
 }
@@ -314,8 +314,8 @@ static TSRc DoMerge(_TieredStore*              ts,
         {
             if (cursors[i]->done) continue;
             if (minIdx == -1 ||
-                ts->compareFn(cursors[i]->current.data(),
-                              cursors[minIdx]->current.data()) < 0)
+                BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                              cursors[i]->current.data(), cursors[minIdx]->current.data()) < 0)
                 minIdx = i;
         }
         if (minIdx == -1) break;
@@ -326,9 +326,11 @@ static TSRc DoMerge(_TieredStore*              ts,
         for (int i = 0; i < (int)cursors.size(); i++)
         {
             if (i == minIdx || cursors[i]->done) continue;
-            if (ts->compareFn(cursors[i]->current.data(), merged.data()) == 0)
+            if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                              cursors[i]->current.data(), merged.data()) == 0)
             {
-                ts->mergeFn(merged.data(), cursors[i]->current.data());
+                if (ts->mergeFn != nullptr)
+                    ts->mergeFn(merged.data(), cursors[i]->current.data());
                 AdvanceCursor(cursors[i]);
             }
         }
@@ -481,9 +483,9 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
     BPFreeTree(ts->memTree, false);
     ts->memTree = nullptr;
 
-    BPIdxFld fld = { 0, (size_t)ts->keySize, BP_IDX_DATATYPE_UNUM_8BYTE };
     BPRc brc = BPCreateTree(&ts->memTree, 256, BP_IDX_MAX_DATA_DEFAULT,
-                            0, 1, &fld, ts->recordSize);
+                            ts->idxSettings, (size_t)ts->numKeyFlds,
+                            (BPIdxFld*)ts->keyFlds, ts->recordSize);
     if (brc != BP_RC_Success) return TS_RC_Out_Of_Memory;
 
     ts->statMerges++;
@@ -497,8 +499,8 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
 TSRc TSI_FindInFile(const _TieredStore* ts, const TSFileDesc* desc,
                     const void* keyRecord, void* outRecord)
 {
-    if (ts->compareFn(keyRecord, desc->minKey) < 0) return TS_RC_Not_Found;
-    if (ts->compareFn(keyRecord, desc->maxKey) > 0) return TS_RC_Not_Found;
+    if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds, keyRecord, desc->minKey) < 0) return TS_RC_Not_Found;
+    if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds, keyRecord, desc->maxKey) > 0) return TS_RC_Not_Found;
 
     FILE* f = nullptr;
     if (fopen_s(&f, desc->path, "rb") != 0 || !f) return TS_RC_IO_Error;
@@ -506,7 +508,7 @@ TSRc TSI_FindInFile(const _TieredStore* ts, const TSFileDesc* desc,
     int slotSize = TS_SLOT_SIZE(ts->recordSize);
     std::vector<uint8_t> slotBuf((size_t)slotSize);
 
-    BsfCtx ctx = { ts->compareFn };
+    BsfCtx ctx = { ts->numKeyFlds, ts->idxSettings, (TSKeyFld*)ts->keyFlds };
     long long idx = BinarySearchFile(f,
                                      const_cast<void*>(keyRecord),
                                      slotBuf.data(),
@@ -534,7 +536,7 @@ TSRc TSI_DeleteFromFile(_TieredStore* ts, TSFileDesc* desc, const void* keyRecor
     int slotSize = TS_SLOT_SIZE(ts->recordSize);
     std::vector<uint8_t> slotBuf((size_t)slotSize);
 
-    BsfCtx    ctx = { ts->compareFn };
+    BsfCtx ctx = { ts->numKeyFlds, ts->idxSettings, ts->keyFlds };
     long long idx = BinarySearchFile(f,
                                      const_cast<void*>(keyRecord),
                                      slotBuf.data(),

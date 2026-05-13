@@ -5,20 +5,21 @@
 // Internal helper: same as TSCreate but the createMetaStore flag prevents the meta-store
 // from recursively creating its own meta-store (which would cause infinite recursion).
 static TSRc TSI_CreateStore(
-    const char*   manifestPath,
-    const char**  dirs,
-    int           numDirs,
-    int           keySize,
-    int           recordSize,
-    int           maxRecordsPerLevel,
-    TS_COMPARE_FN compareFn,
-    TS_MERGE_FN   mergeFn,
-    PTS*          ppTs,
-    bool          createMetaStore)
+    const char*     manifestPath,
+    const char**    dirs,
+    int             numDirs,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    int             recordSize,
+    int             maxRecordsPerLevel,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs,
+    bool            createMetaStore)
 {
     if (!manifestPath || !dirs || numDirs < 1 ||
-        keySize < 1 || recordSize < keySize || maxRecordsPerLevel < 2 ||
-        !compareFn || !mergeFn || !ppTs)
+        !keyFlds || numKeyFlds < 1 || numKeyFlds > TS_MAX_KEY_FLDS ||
+        recordSize < 1 || maxRecordsPerLevel < 2 || !ppTs)
         return TS_RC_Invalid_Arg;
 
     _TieredStore* ts = new (std::nothrow) _TieredStore();
@@ -36,14 +37,24 @@ static TSRc TSI_CreateStore(
 
     RWLockInit(ts->baseName, "TSCreate", &ts->storeLock);
 
-    ts->keySize            = keySize;
+    ts->numKeyFlds         = numKeyFlds;
+    ts->idxSettings        = idxSettings;
+    memcpy(ts->keyFlds, keyFlds, (size_t)numKeyFlds * sizeof(TSKeyFld));
+    ts->mergeFn            = mergeFn;
     ts->recordSize         = recordSize;
     ts->maxRecordsPerLevel = maxRecordsPerLevel;
-    ts->compareFn          = compareFn;
-    ts->mergeFn            = mergeFn;
     ts->nextFileId         = 1;
     ts->roundRobinNext     = 0;
     ts->numDirs            = numDirs;
+
+    // keySize = span of record bytes covered by key fields (for manifest/diagnostics)
+    size_t span = 0;
+    for (int i = 0; i < numKeyFlds; i++)
+    {
+        size_t end = keyFlds[i].stDataOffset + keyFlds[i].stLength;
+        if (end > span) span = end;
+    }
+    ts->keySize = (int)span;
 
     ts->dirs = new (std::nothrow) char*[numDirs];
     if (!ts->dirs) { TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
@@ -56,9 +67,8 @@ static TSRc TSI_CreateStore(
         strncpy_s(ts->dirs[i], MAX_PATH, dirs[i], _TRUNCATE);
     }
 
-    BPIdxFld fld = { 0, (size_t)keySize, BP_IDX_DATATYPE_UNUM_8BYTE };
     BPRc rc = BPCreateTree(&ts->memTree, 256, BP_IDX_MAX_DATA_DEFAULT,
-                           0, 1, &fld, recordSize);
+                           idxSettings, (size_t)numKeyFlds, (BPIdxFld*)keyFlds, recordSize);
     if (rc != BP_RC_Success)
     {
         TS_DPRINT("TSCreate: BPCreateTree failed rc=%d manifest='%s'", (int)rc, manifestPath);
@@ -83,10 +93,11 @@ static TSRc TSI_CreateStore(
 
         const char* metaDirPtr    = metaDir;
         int         metaRecordSize = (int)sizeof(TSManifestFileEntry) + 2 * recordSize;
+        TSKeyFld    metaFld        = { 0, sizeof(uint64_t), TS_DATATYPE_UNUM_8BYTE };
         PTS         metaTs         = nullptr;
         TSRc mrc = TSI_CreateStore(metaPath, &metaDirPtr, 1,
-                                   (int)sizeof(uint64_t), metaRecordSize, 256,
-                                   TSI_MetaCompareFn, TSI_MetaMergeFn, &metaTs,
+                                   &metaFld, 1, TS_IDX_SETTING_DEFAULT,
+                                   metaRecordSize, 256, nullptr, &metaTs,
                                    false);
         if (mrc != TS_RC_Success)
         {
@@ -104,18 +115,21 @@ static TSRc TSI_CreateStore(
 }
 
 TSRc TSCreate(
-    const char*   manifestPath,
-    const char**  dirs,
-    int           numDirs,
-    int           keySize,
-    int           recordSize,
-    int           maxRecordsPerLevel,
-    TS_COMPARE_FN compareFn,
-    TS_MERGE_FN   mergeFn,
-    PTS*          ppTs)
+    const char**    dirs,
+    int             numDirs,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    int             recordSize,
+    int             maxRecordsPerLevel,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs)
 {
-    return TSI_CreateStore(manifestPath, dirs, numDirs, keySize, recordSize,
-                           maxRecordsPerLevel, compareFn, mergeFn, ppTs, true);
+    if (!dirs || numDirs < 1) return TS_RC_Invalid_Arg;
+    char manifestPath[MAX_PATH];
+    sprintf_s(manifestPath, MAX_PATH, "%s\\manifest.tsm", dirs[0]);
+    return TSI_CreateStore(manifestPath, dirs, numDirs, keyFlds, numKeyFlds, idxSettings,
+                           recordSize, maxRecordsPerLevel, mergeFn, ppTs, true);
 }
 
 TSRc TSClose(PTS* ppTs)

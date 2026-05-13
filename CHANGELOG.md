@@ -1,5 +1,24 @@
 # Changelog
 
+## [v1.9.0] - 2026-05-13
+
+### Changed
+- `TieredStore`: replaced `TS_COMPARE_FN compareFn` + `keySize` parameters with structured field definitions (`TSKeyFld* keyFlds`, `numKeyFlds`, `idxSettings`) mirroring BPlusTree's approach — callers declare which record fields form the key and their types; comparison is derived automatically via `BPKeyCmpPPRaw`; `TSKeyFld` is layout-compatible with `BPIdxFld` for safe casting
+- `TieredStore`: `TS_MERGE_FN mergeFn` is now nullable in `TSCreate` and `TSOpen` — passing `nullptr` means keep the existing record unchanged on duplicate key (no-op merge)
+- `TieredStore`: manifest path is now always `dirs[0]\manifest.tsm` — removed the caller-supplied manifest path parameter from the public API
+- `TieredStore`: `TSEnumerate` now flushes the in-memory tree before iterating disk files only — eliminates the bug where a record present in both the tree and an older disk file would be returned twice; write lock held for the duration
+- `OthelloSolverMFCandCUDA` (`SolverController`): replaced `CompareUniqueRecord` callback with a `k_uniqueKeyFlds[]` constant (3 fields: `ullCellsInUse`, `ullCellColors`, `usBoardInfo`); updated `TSCreate`/`TSOpen` calls
+- `OthelloSolverCommandLine`: updated `TSCreate` calls to new field-definition API; added `k_boardKeyFlds` and `k_moveKeyFlds` constants
+
+### Added
+- `TieredStore`: new sorted pull-style iterator — `TSIterOpen`, `TSIterNext`, `TSIterNextN`, `TSIterClose`; iterates all live records in ascending key order across all disk files; `TSIterOpen` flushes the in-memory tree and opens all file handles while holding the write lock (prevents concurrent merges from deleting snapshotted files on Windows where `remove()` fails on open handles); `TSIterClose` performs orphan cleanup — removes any snapshotted files that a concurrent merge removed from the store registry but could not physically delete while the iterator held them open
+- `TieredStoreTester`: Group 8 — four iterator tests: `IteratorEmpty` (empty store returns Not_Found immediately), `IteratorSortedOrder` (150 records across 3 files returned in strict ascending key order), `IteratorSkipsTombstones` (3 deleted keys absent from iteration), `IteratorNextN` (100 records consumed in batches of 30: 3 full + 1 partial)
+
+### Fixed
+- `OthelloSolverCommandLine`: MOVE stores were incorrectly inserting into `g_tieredBoardStores[i]` instead of `g_tieredMoveStores[i]`
+
+---
+
 ## [v1.8.0] - 2026-05-11
 
 ### Performance

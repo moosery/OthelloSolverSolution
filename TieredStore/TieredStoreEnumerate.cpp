@@ -5,15 +5,22 @@ TSRc TSEnumerate(PTS pTs, TS_ENUM_FN enumFn, void* ctx)
 {
     if (!pTs || !enumFn) return TS_RC_Invalid_Arg;
 
-    RWLockReadLock("TSEnumerate", &pTs->storeLock);
+    // Write lock: we flush the in-memory tree before enumerating so that every
+    // record appears exactly once (on disk).  Without the flush a key present in
+    // both the tree and an older disk file would be returned twice.
+    RWLockWriteLock("TSEnumerate", &pTs->storeLock);
 
-    std::vector<uint8_t> buf((size_t)pTs->recordSize);
+    TSRc result = TS_RC_Success;
 
-    BPIterator iter;
-    BPIterateStart(pTs->memTree, &iter);
-    while (BPIterate(&iter, buf.data()) == BP_RC_Success)
-        enumFn(buf.data(), ctx);
-    BPIterateStop(&iter);
+    if (BPGetDataCnt(pTs->memTree) > 0)
+    {
+        result = TSI_FlushMemTree(pTs);
+        if (result != TS_RC_Success)
+        {
+            RWLockWriteUnlock("TSEnumerate", &pTs->storeLock);
+            return result;
+        }
+    }
 
     int slotSize = TS_SLOT_SIZE(pTs->recordSize);
     std::vector<uint8_t> slotBuf((size_t)slotSize);
@@ -33,6 +40,6 @@ TSRc TSEnumerate(PTS pTs, TS_ENUM_FN enumFn, void* ctx)
         fclose(f);
     }
 
-    RWLockReadUnlock("TSEnumerate", &pTs->storeLock);
-    return TS_RC_Success;
+    RWLockWriteUnlock("TSEnumerate", &pTs->storeLock);
+    return result;
 }

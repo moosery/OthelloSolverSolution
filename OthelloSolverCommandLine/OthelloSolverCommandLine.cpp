@@ -4,7 +4,9 @@
 #include <Utility.h>
 #include "InternalRoutines.h"
 #include <OthelloBasics.h>
+#include <TierdStore.h>
 
+#define MAX_BOARD_IN_ONESTORE 10000000
 typedef struct SolverConfig
 {
     int boardSize;
@@ -13,6 +15,9 @@ typedef struct SolverConfig
     const char* outputDir;
     bool restart;
 }SolverConfig, * PSolverConfig;
+
+PTS g_tieredBoardStores[61] = { 0 }; // Create an array of TieredStores for each board level (which is how board spaces are taken).  Since there are 64 spaces on an 8x8 board, we need 60 TieredStores to cover all levels from 4x4 to 8x8 (first four spaces are already occupied at the start of the game).
+PTS g_tieredMoveStores[61] = { 0 }; // Create an array of TieredStores for each board level (which is how board spaces are taken).  Since there are 64 spaces on an 8x8 board, we need 60 TieredStores to cover all levels from 4x4 to 8x8 (first four spaces are already occupied at the start of the game).
 
 void doRestartProcess(PSolverConfig pConfig);
 void doStartProcess(PSolverConfig pConfig);
@@ -57,12 +62,62 @@ void doStartProcess(PSolverConfig pConfig)
         exit(1);
     }
 
+    // Configure the size of the board and allocate the initial board state.
     SetBoardSizeForRun(pConfig->boardSize);
 
-    PBOARD firstBoard = BoardAllocate();
+    PBOARD firstBoard = BoardAllocateFirstBoard();
+    if (firstBoard == NULL)
+    {
+        ErrorPrint(stderr);
+        exit(1);
+    }
 
-    // Placeholder for start logic.
-    printf("Start process not implemented yet.\n");
+    // Key fields for BOARD stores
+    static const TSKeyFld k_boardKeyFlds[] = {
+        { 0, offsetof(BOARD, ullPossibleMoves), TS_DATATYPE_BYTE }
+    };
+
+    // Key fields for MOVE stores
+    static const TSKeyFld k_moveKeyFlds[] = {
+        { 0, offsetof(MOVE, ullCellsInUseResult), TS_DATATYPE_BYTE }
+    };
+
+    // Allocate the TierdStores for the solver
+    for (int i = 0; i < ((g_boardSize * g_boardSize) - 4)+1; i++)
+    {
+        char *pszBaseBoardPath = GetFullFilePathBaseNameForBoardLevel(i);
+        char *pszBaseMovePath = GetFullFilePathBaseNameForMoveLevel(i);
+        const char *charArray[1] = { pszBaseBoardPath };
+
+        TSRc tsRc = TSCreate(charArray, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                             sizeof(BOARD), MAX_BOARD_IN_ONESTORE, nullptr, &(g_tieredBoardStores[i]));
+        if (tsRc != TS_RC_Success)
+        {
+            ErrorPrint(stderr);
+            exit(1);
+        }
+
+        charArray[0] = pszBaseMovePath;
+        tsRc = TSCreate(charArray, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                        sizeof(MOVE), MAX_BOARD_IN_ONESTORE, nullptr, &(g_tieredMoveStores[i]));
+
+        if (tsRc != TS_RC_Success)
+        {
+            ErrorPrint(stderr);
+            exit(1);
+        }
+    }
+
+    // Now we need to prime the first board into the TieredStore for the first board level (which is 0 since the first 4 spaces are already occupied at the start of the game).
+    TSRc tsRc = TSInsert(g_tieredBoardStores[0], firstBoard);
+    if (tsRc != TS_RC_Success)
+    {
+        ErrorPrint(stderr);
+        exit(1);
+    }
+
+    // Now we will call the solver routine to start solving the boards.
+    
 }
 
 /*

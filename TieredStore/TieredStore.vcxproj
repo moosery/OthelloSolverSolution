@@ -34,6 +34,7 @@
     <ClCompile Include="TieredStoreEnumerate.cpp" />
     <ClCompile Include="TieredStoreFind.cpp" />
     <ClCompile Include="TieredStoreInsert.cpp" />
+    <ClCompile Include="TieredStoreIterator.cpp" />
     <ClCompile Include="TieredStoreOpen.cpp" />
     <ClCompile Include="TieredStoreStatus.cpp" />
   </ItemGroup>

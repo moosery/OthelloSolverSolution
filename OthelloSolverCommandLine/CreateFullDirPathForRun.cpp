@@ -1,6 +1,7 @@
 #include <Utility.h>
+#include "InternalRoutines.h"
 
-constexpr char FULL_DIR_PATH_FORMAT[] = "%s\\%s\\BoardSize%dx%d";
+constexpr char FULL_DIR_PATH_FORMAT[] = "%s\\%s\\BoardSize%dx%d\\";
 static char szFullDirPathForRun[MAX_FULL_PATH_NAME + 1];
 
 /*
@@ -67,4 +68,58 @@ bool CreateFullPathForRun(const char* outputDir, int boardSize)
 {
     SetFullDirPathForRun(outputDir, boardSize);
     return CreateFullPath(GetFullDirPathForRun());
+}
+
+/*
+* Name: GetFullFilePathBaseNameForBoardLevel
+* Description: Generates a full file path base name for a given board level. The path is constructed using the full directory path for the current run, and appending a subdirectory for "Boards" and the specific board level (e.g., "Level0", "Level1", etc.).
+* Parameters:             
+* - boardLevel: An integer representing the board level for which to generate the file path base name.
+* Returns: A pointer to a static character array containing the generated full file path base name for the specified board level.
+* Note: 
+* - The function uses a static character array to store the generated file path base name, which is reused for subsequent calls. Ensure that the returned pointer is not modified or freed by the caller.    
+* - Level of the board is the number of moved played to reach the board state. For example, the initial board state is level 0, after one move is played it's level 1, and so on.
+* Example usage:
+* char* boardLevel0Path = GetFullFilePathBaseNameForBoardLevel(0);
+* printf("Board Level 0 file path base name: %s\n", boardLevel0Path);
+* This will output something like: "Board Level 0 file path base name: D:\CommandLineSolverDataDir\2024_06_01.12_00_00\BoardSize4x4\Boards\Level0"
+* The caller can then use this base name to construct specific file paths for storing board data related to the specified board level.
+*/
+char *GetFullFilePathBaseNameForBoardLevel(int boardLevel)
+{
+    char *pszBaseDir = GetFullDirPathForRun();
+    static thread_local char szFullFilePathForBoardLevel[MAX_FULL_PATH_NAME + 1];
+
+
+    snprintf(szFullFilePathForBoardLevel, sizeof(szFullFilePathForBoardLevel),
+        "%s\\Boards\\Level%d", GetFullDirPathForRun(), boardLevel);
+
+    return szFullFilePathForBoardLevel;
+}
+
+/* 
+* Name: GetFullFilePathBaseNameForMoveLevel
+* Description: Generates a full file path base name for a given move level. The path is constructed using the full directory path for the current run, and appending a subdirectory for "Moves" and the specific move level (e.g., "Level0", "Level1", etc.).
+* Parameters:             
+* - boardLevel: An integer representing the move level for which to generate the file path base name.
+* Returns: A pointer to a static character array containing the generated full file path base name for the specified move level.
+* Note:     
+* - The function uses a static character array to store the generated file path base name, which is reused for subsequent calls. Ensure that the returned pointer is not modified or freed by the caller.    
+* - Level of the board is the number of moved played to reach the board state. For example, the initial board state is level 0, after one move is played it's level 1, and so on.
+* Example usage:
+* char* moveLevel0Path = GetFullFilePathBaseNameForMoveLevel(0);
+* printf("Move Level 0 file path base name: %s\n", moveLevel0Path);
+* This will output something like: "Move Level 0 file path base name: D:\CommandLineSolverDataDir\2024_06_01.12_00_00\BoardSize4x4\Moves\Level0"
+* The caller can then use this base name to construct specific file paths for storing move data related to the specified move level.
+*/
+char *GetFullFilePathBaseNameForMoveLevel(int boardLevel)
+{
+    char *pszBaseDir = GetFullDirPathForRun();
+    static thread_local char szFullFilePathForMoveLevel[MAX_FULL_PATH_NAME + 1];
+
+
+    snprintf(szFullFilePathForMoveLevel, sizeof(szFullFilePathForMoveLevel),
+        "%s\\Moves\\Level%d", GetFullDirPathForRun(), boardLevel);
+
+    return szFullFilePathForMoveLevel;
 }

@@ -12,8 +12,8 @@ TSRc TSDelete(PTS pTs, const void* keyRecord)
     for (int i = 0; i < pTs->numFiles; i++)
     {
         TSFileDesc* f = pTs->files[i];
-        if (pTs->compareFn(keyRecord, f->minKey) < 0) continue;
-        if (pTs->compareFn(keyRecord, f->maxKey) > 0) continue;
+        if (BPKeyCmpPPRaw(pTs->numKeyFlds, pTs->idxSettings, (BPIdxFld*)pTs->keyFlds, keyRecord, f->minKey) < 0) continue;
+        if (BPKeyCmpPPRaw(pTs->numKeyFlds, pTs->idxSettings, (BPIdxFld*)pTs->keyFlds, keyRecord, f->maxKey) > 0) continue;
         result = TSI_DeleteFromFile(pTs, f, keyRecord);
         break;
     }

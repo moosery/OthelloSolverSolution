@@ -47,16 +47,17 @@ static void RebuildFilesCallback(const void* record, void* ctx)
 }
 
 // Internal helper: same as TSOpen but openMetaStore=false tells the meta-store not to
-// attempt to open a nested meta-meta-store. Leaf stores (openMetaStore=false) read their
-// file registry as flat entries written directly into the manifest by TSCheckpoint.
+// attempt to open a nested meta-meta-store.
 static TSRc TSI_OpenStore(
-    const char*   manifestPath,
-    TS_COMPARE_FN compareFn,
-    TS_MERGE_FN   mergeFn,
-    PTS*          ppTs,
-    bool          openMetaStore)
+    const char*     manifestPath,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs,
+    bool            openMetaStore)
 {
-    if (!manifestPath || !compareFn || !mergeFn || !ppTs)
+    if (!manifestPath || !keyFlds || numKeyFlds < 1 || numKeyFlds > TS_MAX_KEY_FLDS || !ppTs)
         return TS_RC_Invalid_Arg;
 
     FILE* f = nullptr;
@@ -92,8 +93,11 @@ static TSRc TSI_OpenStore(
     ts->roundRobinNext     = (int)hdr.roundRobinNext;
     ts->nextFileId         = hdr.nextFileId;
     ts->numDirs            = (int)hdr.numDirs;
-    ts->compareFn          = compareFn;
-    ts->mergeFn            = mergeFn;
+
+    ts->numKeyFlds  = numKeyFlds;
+    ts->idxSettings = idxSettings;
+    memcpy(ts->keyFlds, keyFlds, (size_t)numKeyFlds * sizeof(TSKeyFld));
+    ts->mergeFn     = mergeFn;
 
     ts->dirs = new (std::nothrow) char*[hdr.numDirs];
     if (!ts->dirs) { fclose(f); TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
@@ -156,8 +160,10 @@ static TSRc TSI_OpenStore(
         sprintf_s(metaPath, MAX_PATH, "%s.meta", ts->manifestPath);
         TS_DPRINT("TSOpen: opening meta-store at '%s'", metaPath);
 
+        TSKeyFld metaFld = { 0, sizeof(uint64_t), TS_DATATYPE_UNUM_8BYTE };
         PTS  metaTs = nullptr;
-        TSRc mrc = TSI_OpenStore(metaPath, TSI_MetaCompareFn, TSI_MetaMergeFn, &metaTs, false);
+        TSRc mrc = TSI_OpenStore(metaPath, &metaFld, 1, TS_IDX_SETTING_DEFAULT,
+                                 nullptr, &metaTs, false);
         if (mrc != TS_RC_Success)
         {
             TS_DPRINT("TSOpen: meta-store open failed rc=%d", (int)mrc);
@@ -177,9 +183,8 @@ static TSRc TSI_OpenStore(
         TS_DPRINT("TSOpen: rebuilt %d files from meta-store", ts->numFiles);
     }
 
-    BPIdxFld fld = { 0, (size_t)ts->keySize, BP_IDX_DATATYPE_UNUM_8BYTE };
     BPRc brc = BPCreateTree(&ts->memTree, 256, BP_IDX_MAX_DATA_DEFAULT,
-                            0, 1, &fld, ts->recordSize);
+                            idxSettings, (size_t)numKeyFlds, (BPIdxFld*)keyFlds, ts->recordSize);
     if (brc != BP_RC_Success)
     {
         TS_DPRINT("TSOpen: BPCreateTree failed rc=%d", (int)brc);
@@ -193,10 +198,15 @@ static TSRc TSI_OpenStore(
 }
 
 TSRc TSOpen(
-    const char*   manifestPath,
-    TS_COMPARE_FN compareFn,
-    TS_MERGE_FN   mergeFn,
-    PTS*          ppTs)
+    const char*     dir0,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs)
 {
-    return TSI_OpenStore(manifestPath, compareFn, mergeFn, ppTs, true);
+    if (!dir0) return TS_RC_Invalid_Arg;
+    char manifestPath[MAX_PATH];
+    sprintf_s(manifestPath, MAX_PATH, "%s\\manifest.tsm", dir0);
+    return TSI_OpenStore(manifestPath, keyFlds, numKeyFlds, idxSettings, mergeFn, ppTs, true);
 }

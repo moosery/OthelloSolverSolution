@@ -18,14 +18,6 @@ struct TestRec
 };
 #pragma pack(pop)
 
-static int TRCompare(const void* a, const void* b)
-{
-    uint64_t ka, kb;
-    memcpy(&ka, a, sizeof(uint64_t));
-    memcpy(&kb, b, sizeof(uint64_t));
-    return (ka > kb) - (ka < kb);
-}
-
 static void TRMerge(void* existing, const void* incoming)
 {
     ((TestRec*)existing)->value += ((const TestRec*)incoming)->value;
@@ -58,9 +50,10 @@ static const char* TSRcStr(TSRc rc)
 }
 
 // ==================== Working directory ====================
-static const char* k_dir      = "D:\\TSTest_work";
-static const char* k_manifest = "D:\\TSTest_work\\test.tsm";
-static const char* k_dirs[]   = { "D:\\TSTest_work" };
+static const char* k_dir    = "D:\\TSTest_work";
+static const char* k_dirs[] = { "D:\\TSTest_work" };
+
+static const TSKeyFld k_keyFlds[] = { { 0, sizeof(uint64_t), TS_DATATYPE_UNUM_8BYTE } };
 
 static void DeleteDirContents(const char* dir)
 {
@@ -94,8 +87,8 @@ static void ResetWorkDir()
 static PTS CreateStore(const char* testName, int maxRec)
 {
     PTS ts = nullptr;
-    TSRc rc = TSCreate(k_manifest, k_dirs, 1, sizeof(uint64_t), sizeof(TestRec),
-                       maxRec, TRCompare, TRMerge, &ts);
+    TSRc rc = TSCreate(k_dirs, 1, k_keyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                       sizeof(TestRec), maxRec, TRMerge, &ts);
     if (rc != TS_RC_Success)
         printf("    TSCreate(%s, maxRec=%d) -> %s\n", testName, maxRec, TSRcStr(rc));
     return ts;
@@ -104,7 +97,7 @@ static PTS CreateStore(const char* testName, int maxRec)
 static PTS OpenStore(const char* testName)
 {
     PTS ts = nullptr;
-    TSRc rc = TSOpen(k_manifest, TRCompare, TRMerge, &ts);
+    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts);
     if (rc != TS_RC_Success)
         printf("    TSOpen(%s) -> %s\n", testName, TSRcStr(rc));
     return ts;
@@ -620,8 +613,10 @@ static bool TestCorruptManifest()
 
     // Overwrite the magic bytes at the start of the manifest
     {
+        char mpath[MAX_PATH];
+        sprintf_s(mpath, MAX_PATH, "%s\\manifest.tsm", k_dirs[0]);
         FILE* f = nullptr;
-        if (fopen_s(&f, k_manifest, "r+b") != 0 || !f)
+        if (fopen_s(&f, mpath, "r+b") != 0 || !f)
             { Fail(T, "could not open manifest for corruption"); return false; }
         uint32_t garbage = 0xDEADBEEFu;
         fwrite(&garbage, sizeof(garbage), 1, f);
@@ -630,7 +625,7 @@ static bool TestCorruptManifest()
 
     // TSOpen must detect the bad magic and fail cleanly
     PTS ts = nullptr;
-    TSRc rc = TSOpen(k_manifest, TRCompare, TRMerge, &ts);
+    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts);
     if (ts) TSClose(&ts);
     if (rc != TS_RC_Corrupt)
     {
@@ -876,6 +871,196 @@ static bool TestStress()
     return true;
 }
 
+// ==================== Test 16: Iterator - empty store ====================
+static bool TestIteratorEmpty()
+{
+    const char* T = "IteratorEmpty";
+    ResetWorkDir();
+
+    PTS ts = CreateStore(T, 50);
+    if (!ts) { Fail(T, "TSCreate failed"); return false; }
+
+    PTSI iter = nullptr;
+    TSRc rc = TSIterOpen(ts, &iter);
+    if (rc != TS_RC_Success || !iter)
+        { TSClose(&ts); Fail(T, "TSIterOpen failed on empty store"); return false; }
+
+    TestRec out = {};
+    rc = TSIterNext(iter, &out);
+    TSIterClose(&iter);
+    TSClose(&ts);
+
+    if (rc != TS_RC_Not_Found)
+    {
+        char msg[128];
+        sprintf_s(msg, "expected Not_Found on empty store, got %s", TSRcStr(rc));
+        Fail(T, msg);
+        return false;
+    }
+
+    Pass(T);
+    return true;
+}
+
+// ==================== Test 17: Iterator - sorted order across multiple files ====================
+static bool TestIteratorSortedOrder()
+{
+    const char* T = "IteratorSortedOrder";
+    ResetWorkDir();
+
+    const int maxRec = 50;
+    PTS ts = CreateStore(T, maxRec);
+    if (!ts) { Fail(T, "TSCreate failed"); return false; }
+
+    // Three non-overlapping key ranges — each flush produces a separate file.
+    if (!InsertRange(ts, 1,   50, 1,   T)) { TSClose(&ts); Fail(T, "flush 1 failed"); return false; }
+    if (!InsertRange(ts, 101, 50, 101, T)) { TSClose(&ts); Fail(T, "flush 2 failed"); return false; }
+    if (!InsertRange(ts, 201, 50, 201, T)) { TSClose(&ts); Fail(T, "flush 3 failed"); return false; }
+
+    PTSI iter = nullptr;
+    if (TSIterOpen(ts, &iter) != TS_RC_Success || !iter)
+        { TSClose(&ts); Fail(T, "TSIterOpen failed"); return false; }
+
+    int      count      = 0;
+    uint64_t prevKey    = 0;
+    bool     outOfOrder = false;
+    TestRec  out        = {};
+
+    while (TSIterNext(iter, &out) == TS_RC_Success)
+    {
+        if (count > 0 && out.key <= prevKey)
+            outOfOrder = true;
+        prevKey = out.key;
+        count++;
+    }
+
+    TSIterClose(&iter);
+    TSClose(&ts);
+
+    if (outOfOrder) { Fail(T, "records not in ascending key order"); return false; }
+    if (count != 150)
+    {
+        char msg[128];
+        sprintf_s(msg, "expected 150 records, got %d", count);
+        Fail(T, msg);
+        return false;
+    }
+
+    Pass(T);
+    return true;
+}
+
+// ==================== Test 18: Iterator - tombstones excluded ====================
+static bool TestIteratorSkipsTombstones()
+{
+    const char* T = "IteratorSkipsTombstones";
+    ResetWorkDir();
+
+    const int maxRec = 50;
+    PTS ts = CreateStore(T, maxRec);
+    if (!ts) { Fail(T, "TSCreate failed"); return false; }
+
+    // 100 records → 2 flushes; all slots land on disk before we delete anything.
+    if (!InsertRange(ts, 1, 100, 1, T))
+        { TSClose(&ts); Fail(T, "insert failed"); return false; }
+
+    // Delete 3 disk keys — TSDelete writes the tombstone flag in-place in the slot.
+    uint64_t deleted[] = { 10, 50, 90 };
+    for (uint64_t k : deleted)
+    { TestRec del = { k, 0 }; TSDelete(ts, &del); }
+
+    PTSI iter = nullptr;
+    if (TSIterOpen(ts, &iter) != TS_RC_Success || !iter)
+        { TSClose(&ts); Fail(T, "TSIterOpen failed"); return false; }
+
+    int     count      = 0;
+    bool    sawDeleted = false;
+    TestRec out        = {};
+
+    while (TSIterNext(iter, &out) == TS_RC_Success)
+    {
+        for (uint64_t dk : deleted)
+            if (out.key == dk) sawDeleted = true;
+        count++;
+    }
+
+    TSIterClose(&iter);
+    TSClose(&ts);
+
+    if (sawDeleted) { Fail(T, "iterator returned tombstoned key"); return false; }
+    if (count != 97)
+    {
+        char msg[128];
+        sprintf_s(msg, "expected 97 live records, got %d", count);
+        Fail(T, msg);
+        return false;
+    }
+
+    Pass(T);
+    return true;
+}
+
+// ==================== Test 19: Iterator - TSIterNextN batching ====================
+static bool TestIteratorNextN()
+{
+    const char* T = "IteratorNextN";
+    ResetWorkDir();
+
+    const int maxRec = 50;
+    PTS ts = CreateStore(T, maxRec);
+    if (!ts) { Fail(T, "TSCreate failed"); return false; }
+
+    // 100 records → 2 disk files
+    if (!InsertRange(ts, 1, 100, 1, T))
+        { TSClose(&ts); Fail(T, "insert failed"); return false; }
+
+    PTSI iter = nullptr;
+    if (TSIterOpen(ts, &iter) != TS_RC_Success || !iter)
+        { TSClose(&ts); Fail(T, "TSIterOpen failed"); return false; }
+
+    const int batchSize = 30;
+    TestRec   buf[30];
+    int       totalCount = 0;
+    int       batchNum   = 0;
+    int       gotCount   = 0;
+    TSRc      rc;
+
+    while ((rc = TSIterNextN(iter, buf, batchSize, &gotCount)) == TS_RC_Success)
+    {
+        totalCount += gotCount;
+        batchNum++;
+    }
+
+    TSIterClose(&iter);
+    TSClose(&ts);
+
+    if (rc != TS_RC_Not_Found)
+    {
+        char msg[128];
+        sprintf_s(msg, "expected final Not_Found, got %s", TSRcStr(rc));
+        Fail(T, msg);
+        return false;
+    }
+    if (totalCount != 100)
+    {
+        char msg[128];
+        sprintf_s(msg, "expected 100 total records via NextN, got %d", totalCount);
+        Fail(T, msg);
+        return false;
+    }
+    // 3 full batches of 30 (90) + 1 partial of 10 = 4 batches total
+    if (batchNum != 4)
+    {
+        char msg[128];
+        sprintf_s(msg, "expected 4 batches, got %d", batchNum);
+        Fail(T, msg);
+        return false;
+    }
+
+    Pass(T);
+    return true;
+}
+
 // ==================== Main ====================
 int main()
 {
@@ -910,6 +1095,12 @@ int main()
 
     printf("\nGroup 7 -- Stress\n");
     TestStress();
+
+    printf("\nGroup 8 -- Iterator\n");
+    TestIteratorEmpty();
+    TestIteratorSortedOrder();
+    TestIteratorSkipsTombstones();
+    TestIteratorNextN();
 
     printf("\n======================\n");
     printf("Results: %d passed, %d failed\n", g_pass, g_fail);

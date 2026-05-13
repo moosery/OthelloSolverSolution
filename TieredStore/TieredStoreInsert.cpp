@@ -22,7 +22,8 @@ TSRc TSInsert(PTS pTs, const void* record)
     {
         std::vector<uint8_t> buf((size_t)pTs->recordSize);
         BPFindEqualKey(pTs->memTree, const_cast<void*>(record), buf.data());
-        pTs->mergeFn(buf.data(), record);
+        if (pTs->mergeFn != nullptr)
+            pTs->mergeFn(buf.data(), record);
         BPUpdate(pTs->memTree, buf.data());
         result = TS_RC_Success;
     }

@@ -635,7 +635,7 @@ void PlayGame(PBOARD pBoard)
 
 int main(int argc, char* argv[])
 {
-	SetBoardSizeForRun(6);
+	SetBoardSizeForRun(4);
 	PBOARD pBoard = BoardAllocateFirstBoard();
 	system("rmdir D:\\Othello\\Boards /s /q");
 	system("rmdir D:\\Othello\\Moves /s /q");
