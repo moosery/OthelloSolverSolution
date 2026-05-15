@@ -5,6 +5,7 @@
 #include "RWLock.h"
 #include "ClockTick.h"
 #include <stdint.h>
+#include <atomic>
 #include <windows.h>
 
 // ==================== Debug output ====================
@@ -124,6 +125,8 @@ TSRc  TSI_RegisterFile(_TieredStore* ts, TSFileDesc* desc);      // array + meta
 TSRc  TSI_FlushMemTree(_TieredStore* ts);
 TSRc  TSI_FindInFile(const _TieredStore* ts, const TSFileDesc* desc,
                      const void* keyRecord, void* outRecord);
+TSRc  TSI_UpdateInFile(_TieredStore* ts, TSFileDesc* desc,
+                       const void* record);
 TSRc  TSI_DeleteFromFile(_TieredStore* ts, TSFileDesc* desc,
                          const void* keyRecord);
 
@@ -160,7 +163,8 @@ struct _TieredStore
     PTS           metaStore;
 
     // Synchronization
-    RWLock        storeLock;
+    RWLock             storeLock;
+    std::atomic<int>   activeIterCount;  // incremented by TSIterOpen, decremented by TSIterClose
 
     // Stats — always read/written while holding storeLock
     uint64_t      statInserts;

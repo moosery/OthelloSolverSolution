@@ -1,140 +1,930 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <vector>
+#include <atomic>
+#include <string>
+#include <filesystem>
+#include <windows.h>
 #include <Utility.h>
 #include "InternalRoutines.h"
+#include "Logger.h"
+#include "SolverWorker.h"
 #include <OthelloBasics.h>
 #include <TierdStore.h>
 
-#define MAX_BOARD_IN_ONESTORE 10000000
+constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 15 * 1024 * 1024 * 1024ULL; // 15GB
+constexpr auto MAX_BOARDS_IN_ONESTORE = MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER / sizeof(BOARD);
+constexpr auto MAX_MOVES_IN_ONESTORE = MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER / sizeof(MOVE);
+
 typedef struct SolverConfig
 {
-    int boardSize;
-    int numThreads;
-    int numRotations;
+    int         boardSize;
+    int         numThreads;
+    int         numRotations;
     const char* outputDir;
-    bool restart;
-}SolverConfig, * PSolverConfig;
+    bool        restart;
+} SolverConfig, * PSolverConfig;
 
-PTS g_tieredBoardStores[61] = { 0 }; // Create an array of TieredStores for each board level (which is how board spaces are taken).  Since there are 64 spaces on an 8x8 board, we need 60 TieredStores to cover all levels from 4x4 to 8x8 (first four spaces are already occupied at the start of the game).
-PTS g_tieredMoveStores[61] = { 0 }; // Create an array of TieredStores for each board level (which is how board spaces are taken).  Since there are 64 spaces on an 8x8 board, we need 60 TieredStores to cover all levels from 4x4 to 8x8 (first four spaces are already occupied at the start of the game).
+// Levels index piece count: level k holds boards with k+4 pieces on the board.
+// 8x8 worst case: 8*8-4+1 = 61 levels (level 0 = 4 pieces, level 60 = 64 pieces).
+PTS g_tieredBoardStores[61] = { 0 };
+PTS g_tieredMoveStores[61]  = { 0 };
+
+// ==================== Forward declarations ====================
 
 void doRestartProcess(PSolverConfig pConfig);
 void doStartProcess(PSolverConfig pConfig);
+void doBackPropagation(int deepestLevel);
 void processArgs(int argc, char* argv[], PSolverConfig pConfig);
 void usage();
 
-int main(int argc, char* argv[])
+// ==================== Per-level record ====================
+
+struct LevelRecord
 {
-    SolverConfig config = { 4, 1, 8, "D:\\CommandLineSolverDataDir", false };
+    int       level;
+    long long boardsIn;
+    long long newBoardsOut;
+    long long totalChildren;    // total legal moves generated (= move edges in move store)
+    long long terminalBoardsOut;// boards at this level with no legal moves (game over)
+    long long elapsedNs;
+    long long predictedNs;      // prediction made for this level; 0 = none
+};
 
-    if (argc > 1)
-        processArgs(argc, argv, &config);
+// ==================== Helpers ====================
 
-    if (config.restart)
+static long long RollingAvgNsPerBoard(const std::vector<LevelRecord>& recs)
+{
+    int n = (int)recs.size();
+    if (n == 0) return 0;
+    int start = (n > 3) ? n - 3 : 0;
+    long long totalNs = 0, totalBoards = 0;
+    for (int i = start; i < n; i++)
     {
-        printf("Restarting solver with boardSize=%d, numThreads=%d, numRotations=%d, outputDir=%s\n",
-            config.boardSize, config.numThreads, config.numRotations, config.outputDir);
-        doRestartProcess(&config);
+        totalNs    += recs[i].elapsedNs;
+        totalBoards+= recs[i].boardsIn;
     }
-    else
-    {
-        printf("Starting solver with boardSize=%d, numThreads=%d, numRotations=%d, outputDir=%s\n",
-            config.boardSize, config.numThreads, config.numRotations, config.outputDir);
-        doStartProcess(&config);
-    }
+    long long avgNs = (totalBoards > 0) ? totalNs / totalBoards : 0;
 
-    return 0;
+    // If the most recent level's ns/board exceeds the rolling average by >40%,
+    // the store has gone to disk (I/O inflection). Use the latest rate — it's a
+    // better predictor than the pre-inflection average.
+    const LevelRecord& latest = recs[n - 1];
+    if (latest.boardsIn > 0)
+    {
+        long long latestNs = latest.elapsedNs / latest.boardsIn;
+        if (latestNs > avgNs * 14 / 10)
+            return latestNs;
+    }
+    return avgNs;
 }
 
-void doRestartProcess(PSolverConfig pConfig)
+static void ReportLine(FILE* rf, const char* fmt, ...)
 {
-    // Placeholder for restart logic.
-    printf("Restart process not implemented yet.\n");
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    LogPrintf("%s", buf);
+    if (rf) fprintf(rf, "%s", buf);
 }
+
+static void PrintBoardToFiles(const BOARD* b, int boardSize, FILE* rf)
+{
+    // Board bits use absolute 8x8 indexing (row*8+col) from the MSB (FIRSTBIT).
+    int boardSi = (8 - boardSize) / 2;
+    int boardEi = 8 - boardSi;
+    for (int r = boardSi; r < boardEi; r++)
+    {
+        ReportLine(rf, "    ");
+        for (int c = boardSi; c < boardEi; c++)
+        {
+            int      idx  = r * 8 + c;
+            uint64_t mask = FIRSTBIT >> idx;
+            char     ch;
+            if      (!(b->ullCellsInUse & mask)) ch = '.';
+            else if (b->ullCellColors   & mask)  ch = 'B';
+            else                                 ch = 'W';
+            ReportLine(rf, "%c ", ch);
+        }
+        ReportLine(rf, "\n");
+    }
+}
+
+static void BoardWinsMergeFn(void* existing, const void* incoming)
+{
+    BOARD*       e = (BOARD*)existing;
+    const BOARD* i = (const BOARD*)incoming;
+    e->ullBlackWins += i->ullBlackWins;
+    e->ullWhiteWins += i->ullWhiteWins;
+    e->ullTies      += i->ullTies;
+}
+
+static void WriteBackpropSentinel()
+{
+    char path[MAX_PATH];
+    snprintf(path, MAX_PATH, "%sbackprop.done", GetFullDirPathForRun());
+    FILE* f = nullptr;
+    fopen_s(&f, path, "w");
+    if (f) { fprintf(f, "done\n"); fclose(f); }
+}
+
+static bool BackpropSentinelExists()
+{
+    char path[MAX_PATH];
+    snprintf(path, MAX_PATH, "%sbackprop.done", GetFullDirPathForRun());
+    FILE* f = nullptr;
+    fopen_s(&f, path, "r");
+    if (f) { fclose(f); return true; }
+    return false;
+}
+
+// ==================== Results report ====================
+
+static void doReportResults(
+    PSolverConfig               pConfig,
+    const char*                 gpuDeviceName,
+    const BOARD*                rootBoard,
+    const std::vector<LevelRecord>& levels,
+    const WorkerRunStats&       runStats,
+    long long                   wallNs,
+    long long                   totalBoardsProcessed,
+    long long                   totalUniqueBoards,
+    long long                   totalChildren,
+    long long                   totalGpuDispatches,
+    long long                   totalTerminals)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char resultsPath[MAX_PATH];
+    snprintf(resultsPath, MAX_PATH, "%sresults_%04d%02d%02d_%02d%02d%02d.txt",
+        GetFullDirPathForRun(),
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond);
+    FILE* rf = nullptr;
+    fopen_s(&rf, resultsPath, "w");
+    if (!rf)
+        LogErrorf("Warning: could not write results file %s\n", resultsPath);
+
+    long long dupBoards  = totalChildren - totalUniqueBoards;
+    long long wallMs     = wallNs / 1000000LL;
+    long long nsPerBrd   = (totalBoardsProcessed > 0) ? wallNs / totalBoardsProcessed : 0;
+    long long brdsPerSec = (wallNs > 0)
+        ? (long long)((double)totalBoardsProcessed * 1e9 / (double)wallNs) : 0;
+
+    unsigned long long blackWins = rootBoard ? rootBoard->ullBlackWins : 0;
+    unsigned long long whiteWins = rootBoard ? rootBoard->ullWhiteWins : 0;
+    unsigned long long ties      = rootBoard ? rootBoard->ullTies      : 0;
+    unsigned long long total     = blackWins + whiteWins + ties;
+
+    char dateTimeBuf[64];
+    snprintf(dateTimeBuf, sizeof(dateTimeBuf), "%04d-%02d-%02d %02d:%02d:%02d",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    const char* sep = "============================================================\n";
+
+    ReportLine(rf, "\n%s", sep);
+    ReportLine(rf, "OthelloSolverCommandLine - Run Complete\n");
+    ReportLine(rf, "%s", sep);
+    ReportLine(rf, "Status:           Complete\n");
+    ReportLine(rf, "Date/Time:        %s\n", dateTimeBuf);
+    ReportLine(rf, "%s", sep);
+    ReportLine(rf, "Configuration\n");
+    ReportLine(rf, "  Board Size:     %dx%d\n", pConfig->boardSize, pConfig->boardSize);
+    ReportLine(rf, "  Num Threads:    %d\n",    pConfig->numThreads);
+    ReportLine(rf, "  Num Rotations:  %d\n",    pConfig->numRotations);
+    ReportLine(rf, "  Output Dir:     %s\n",    GetFullDirPathForRun());
+    ReportLine(rf, "  GPU Device:     %s\n",    gpuDeviceName ? gpuDeviceName : "unknown");
+    ReportLine(rf, "%s", sep);
+    ReportLine(rf, "Results\n");
+    ReportLine(rf, "  Black Wins:     %llu\n", blackWins);
+    ReportLine(rf, "  White Wins:     %llu\n", whiteWins);
+    ReportLine(rf, "  Ties:           %llu\n", ties);
+    ReportLine(rf, "  Total Games:    %llu\n", total);
+    if (pConfig->boardSize == 4)
+    {
+        bool pass = (blackWins == 24632 && whiteWins == 30116 && ties == 5312);
+        ReportLine(rf, "\n  4x4 Validation: %s  (expected B=24632 W=30116 T=5312)\n",
+            pass ? "PASS" : "FAIL");
+    }
+    ReportLine(rf, "%s", sep);
+    ReportLine(rf, "Stats\n");
+    ReportLine(rf, "  Boards Processed: %lld\n", totalBoardsProcessed);
+    ReportLine(rf, "  Unique Boards:    %lld\n", totalUniqueBoards);
+    ReportLine(rf, "  Duplicate Boards: %lld\n", dupBoards);
+    ReportLine(rf, "  Total Moves:      %lld\n", totalChildren);
+    ReportLine(rf, "  Total End Boards: %lld\n", totalTerminals);
+    ReportLine(rf, "  GPU Dispatched:   %lld\n", totalGpuDispatches);
+    ReportLine(rf, "  Max Legal Moves:  %d  (level %d)\n",
+        runStats.maxMovesCount, runStats.maxMovesLevel);
+    ReportLine(rf, "  Max Move Board:\n");
+    PrintBoardToFiles(&runStats.maxMovesBoard, pConfig->boardSize, rf);
+    ReportLine(rf, "%s", sep);
+    ReportLine(rf, "Timing\n");
+    ReportLine(rf, "  Wall Clock:       %lld ms  /  %lld ns\n", wallMs, wallNs);
+    ReportLine(rf, "  Boards/sec:       %lld\n", brdsPerSec);
+    ReportLine(rf, "  Ns/Board:         %lld\n", nsPerBrd);
+    ReportLine(rf, "\n  Level Analysis:\n");
+    ReportLine(rf, "  %2s  %10s  %10s  %10s  %10s  %8s  %10s  %7s  %10s  %9s\n",
+        "Lv", "BoardsIn", "NewBoards", "Dups", "Moves", "Ends", "Elapsed(s)", "ns/brd", "brd/s", "Pred(s)");
+    ReportLine(rf, "  %2s  %10s  %10s  %10s  %10s  %8s  %10s  %7s  %10s  %9s\n",
+        "--", "--------", "---------", "----", "-----", "----", "----------", "------", "-----", "-------");
+    for (const LevelRecord& r : levels)
+    {
+        long long dups   = r.totalChildren - r.newBoardsOut;
+        double    elpS   = r.elapsedNs / 1e9;
+        long long nsPerB = (r.boardsIn > 0) ? r.elapsedNs / r.boardsIn : 0;
+        long long bps    = (r.elapsedNs > 0)
+            ? (long long)((double)r.boardsIn * 1e9 / (double)r.elapsedNs) : 0;
+        if (r.predictedNs > 0)
+            ReportLine(rf, "  %2d  %10lld  %10lld  %10lld  %10lld  %8lld  %10.3f  %7lld  %10lld  %9.3f\n",
+                r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
+                elpS, nsPerB, bps, r.predictedNs / 1e9);
+        else
+            ReportLine(rf, "  %2d  %10lld  %10lld  %10lld  %10lld  %8lld  %10.3f  %7lld  %10lld  %9s\n",
+                r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
+                elpS, nsPerB, bps, "---");
+    }
+    ReportLine(rf, "%s", sep);
+
+    if (rf) { fflush(rf); fclose(rf); }
+    LogPrintf("\nResults saved to: %s\n", resultsPath);
+}
+
+// ==================== Back-propagation ====================
+
+void doBackPropagation(int deepestLevel)
+{
+    if (deepestLevel < 0) return;
+
+    LogPrintf("\nBack-propagation: levels %d -> 0\n", deepestLevel);
+
+    static const int kBatch = 4096;
+    std::vector<MOVE> moves(kBatch);
+
+    for (int level = deepestLevel; level >= 0; level--)
+    {
+        // --- Pass 1: regular move edges (child at level+1) ---
+        // Must run before pass 2 so that pass-child boards have their wins set
+        // before their pass-parents accumulate from them.
+        {
+            PTSI iter = nullptr;
+            TSRc rc = TSIterOpen(g_tieredMoveStores[level], &iter);
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("Back-prop pass1: TSIterOpen failed rc=%d level %d\n", (int)rc, level);
+                exit(1);
+            }
+
+            while (true)
+            {
+                int got = 0;
+                rc = TSIterNextN(iter, moves.data(), kBatch, &got);
+                if (rc == TS_RC_Not_Found) break;
+                if (rc != TS_RC_Success)
+                {
+                    LogErrorf("Back-prop pass1: TSIterNextN failed rc=%d level %d\n", (int)rc, level);
+                    exit(1);
+                }
+
+                for (int i = 0; i < got; i++)
+                {
+                    const MOVE& m = moves[i];
+                    if (m.usMoveIdx == MOVE_PLAYERCHANGEONLY) continue;
+
+                    BOARD childKey         = {};
+                    childKey.ullCellsInUse = m.ullCellsInUseResult;
+                    childKey.ullCellColors = m.ullCellColorsResult;
+                    childKey.usBoardInfo   = m.usBoardInfoResult;
+
+                    BOARD childBoard = {};
+                    rc = TSFind(g_tieredBoardStores[level + 1], &childKey, &childBoard);
+                    if (rc != TS_RC_Success)
+                    {
+                        LogErrorf("Back-prop pass1: child not found at level %d\n", level + 1);
+                        exit(1);
+                    }
+
+                    // Player bits match → canonical form used a color-swap (BoardFlip).
+                    bool flipped = ((m.usBoardInfoParent & 0x01u) ==
+                                    (m.usBoardInfoResult & 0x01u));
+
+                    BOARD parentDelta         = {};
+                    parentDelta.ullCellsInUse = m.ullCellsInUseParent;
+                    parentDelta.ullCellColors = m.ullCellColorsParent;
+                    parentDelta.usBoardInfo   = m.usBoardInfoParent;
+                    parentDelta.ullBlackWins  = flipped ? childBoard.ullWhiteWins
+                                                        : childBoard.ullBlackWins;
+                    parentDelta.ullWhiteWins  = flipped ? childBoard.ullBlackWins
+                                                        : childBoard.ullWhiteWins;
+                    parentDelta.ullTies       = childBoard.ullTies;
+
+                    rc = TSInsert(g_tieredBoardStores[level], &parentDelta);
+                    if (rc != TS_RC_Success)
+                    {
+                        LogErrorf("Back-prop pass1: TSInsert parent failed rc=%d level %d\n", (int)rc, level);
+                        exit(1);
+                    }
+                }
+            }
+            TSIterClose(&iter);
+        }
+
+        // --- Pass 2: pass move edges (child at same level) ---
+        // Pass children (same piece count) are at 'level', not level+1.
+        // Their wins were accumulated in pass 1 above.
+        {
+            PTSI iter = nullptr;
+            TSRc rc = TSIterOpen(g_tieredMoveStores[level], &iter);
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("Back-prop pass2: TSIterOpen failed rc=%d level %d\n", (int)rc, level);
+                exit(1);
+            }
+
+            while (true)
+            {
+                int got = 0;
+                rc = TSIterNextN(iter, moves.data(), kBatch, &got);
+                if (rc == TS_RC_Not_Found) break;
+                if (rc != TS_RC_Success)
+                {
+                    LogErrorf("Back-prop pass2: TSIterNextN failed rc=%d level %d\n", (int)rc, level);
+                    exit(1);
+                }
+
+                for (int i = 0; i < got; i++)
+                {
+                    const MOVE& m = moves[i];
+                    if (m.usMoveIdx != MOVE_PLAYERCHANGEONLY) continue;
+
+                    BOARD childKey         = {};
+                    childKey.ullCellsInUse = m.ullCellsInUseResult;
+                    childKey.ullCellColors = m.ullCellColorsResult;
+                    childKey.usBoardInfo   = m.usBoardInfoResult;
+
+                    BOARD childBoard = {};
+                    rc = TSFind(g_tieredBoardStores[level], &childKey, &childBoard);
+                    if (rc != TS_RC_Success)
+                    {
+                        LogErrorf("Back-prop pass2: pass child not found at level %d\n", level);
+                        exit(1);
+                    }
+
+                    bool flipped = ((m.usBoardInfoParent & 0x01u) ==
+                                    (m.usBoardInfoResult & 0x01u));
+
+                    BOARD parentDelta         = {};
+                    parentDelta.ullCellsInUse = m.ullCellsInUseParent;
+                    parentDelta.ullCellColors = m.ullCellColorsParent;
+                    parentDelta.usBoardInfo   = m.usBoardInfoParent;
+                    parentDelta.ullBlackWins  = flipped ? childBoard.ullWhiteWins
+                                                        : childBoard.ullBlackWins;
+                    parentDelta.ullWhiteWins  = flipped ? childBoard.ullBlackWins
+                                                        : childBoard.ullWhiteWins;
+                    parentDelta.ullTies       = childBoard.ullTies;
+
+                    rc = TSInsert(g_tieredBoardStores[level], &parentDelta);
+                    if (rc != TS_RC_Success)
+                    {
+                        LogErrorf("Back-prop pass2: TSInsert parent failed rc=%d level %d\n", (int)rc, level);
+                        exit(1);
+                    }
+                }
+            }
+            TSIterClose(&iter);
+        }
+
+        TSCheckpoint(g_tieredBoardStores[level]);
+        LogPrintf("  Back-prop level %2d complete\n", level);
+    }
+}
+
+// ==================== Core solver (BFS + back-prop + report + cleanup) ====================
+//
+// Both doStartProcess and doRestartProcess set up stores, then delegate here.
+// startLevel: first BFS level to process (0 = fresh run, N = restart from level N).
+// numLevels:  total number of levels allocated in g_tieredBoardStores/g_tieredMoveStores.
+
+static void RunSolverCore(
+    PSolverConfig        pConfig,
+    const GpuDeviceInfo& gpuInfo,
+    int                  startLevel,
+    int                  numLevels)
+{
+    int maxLevel = numLevels - 1;
+    int numWorkers = pConfig->numThreads;
+    int batchSize  = gpuInfo.optimalBatchSize;
+    int maxMoves   = (pConfig->boardSize == 4) ? 6 : (pConfig->boardSize == 6) ? 20 : 28;
+    DevBoardConsts consts = OBCuda_GetBoardConsts();
+
+    std::vector<WorkerGpuContext*> contexts;
+    contexts.reserve(numWorkers);
+    std::vector<WorkerGpuContext*> freePool;
+    freePool.reserve(numWorkers);
+    std::mutex              poolMtx;
+    std::condition_variable poolCv;
+
+    for (int i = 0; i < numWorkers; i++)
+    {
+        WorkerGpuContext* c = WorkerGpuContextCreate(batchSize, maxMoves);
+        contexts.push_back(c);
+        freePool.push_back(c);
+    }
+
+    ThreadPool workerThreadPool(numWorkers, "OthelloSolverWorker");
+    workerThreadPool.Start();
+
+    WorkerRunStats           runStats;
+    std::vector<LevelRecord> levelHistory;
+    levelHistory.reserve(maxLevel + 1);
+    long long totalBoardsProcessed = 0;
+    long long totalUniqueBoards    = 0;
+    long long totalGpuDispatches   = 0;
+    long long totalChildren        = 0;
+    long long totalTerminals       = 0;
+    long long nextLevelPredNs      = 0;
+
+    // Pass-board queue: pass children (same piece count) are accumulated here
+    // during each level sweep and then dispatched as an extra batch before
+    // the level is checkpointed.
+    std::mutex         passMtx;
+    std::vector<BOARD> passQueue;
+
+    auto wallStart = std::chrono::high_resolution_clock::now();
+
+    // BFS producer loop.
+    int deepestLevel = startLevel;
+    for (int level = startLevel; level <= maxLevel; level++)
+    {
+        deepestLevel = level;
+        WorkerLevelStats levelStats;
+        long long boardsIn      = 0;
+        long long gpuDispatches = 0;
+        long long thisPredNs    = nextLevelPredNs;
+
+        auto levelStart = std::chrono::high_resolution_clock::now();
+
+        PTSI iter = nullptr;
+        TSRc rc = TSIterOpen(g_tieredBoardStores[level], &iter);
+        if (rc != TS_RC_Success)
+        {
+            LogErrorf("TSIterOpen failed rc=%d at level %d\n", (int)rc, level);
+            exit(1);
+        }
+
+        while (true)
+        {
+            std::vector<BOARD> batch(batchSize);
+            int got = 0;
+            rc = TSIterNextN(iter, batch.data(), batchSize, &got);
+            if (rc == TS_RC_Not_Found) break;
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("TSIterNextN failed rc=%d at level %d\n", (int)rc, level);
+                exit(1);
+            }
+            boardsIn      += got;
+            gpuDispatches += 1;
+            batch.resize(got);
+
+            WorkerGpuContext* ctx;
+            {
+                std::unique_lock<std::mutex> lk(poolMtx);
+                poolCv.wait(lk, [&] { return !freePool.empty(); });
+                ctx = freePool.back();
+                freePool.pop_back();
+            }
+
+            levelStats.activeCount.fetch_add(1);
+            int lvl    = level;
+            int numRot = pConfig->numRotations;
+            int maxMvs = maxMoves;
+            workerThreadPool.QueueJob(
+                [batch = std::move(batch), lvl, numRot, maxMvs, consts, ctx,
+                 &levelStats, &runStats, &poolMtx, &freePool, &poolCv,
+                 &passMtx, &passQueue]() mutable {
+                    WorkerProcessBatch(std::move(batch), lvl, numRot, maxMvs, consts,
+                                       ctx, &levelStats, &runStats, &passMtx, &passQueue);
+                    { std::lock_guard<std::mutex> lk(poolMtx); freePool.push_back(ctx); }
+                    poolCv.notify_one();
+                });
+        }
+
+        TSIterClose(&iter);
+
+        while (levelStats.activeCount.load() > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        // Drain pass-board queue.  Pass children have the same piece count as their
+        // parent (no stone placed), so they live at 'level'.  They always have legal
+        // moves, so they generate regular children at level+1 — never more passes.
+        while (true)
+        {
+            std::vector<BOARD> passes;
+            { std::lock_guard<std::mutex> lk(passMtx); passes.swap(passQueue); }
+            if (passes.empty()) break;
+
+            for (int ps = 0; ps < (int)passes.size(); ps += batchSize)
+            {
+                int end = (std::min)(ps + batchSize, (int)passes.size());
+                std::vector<BOARD> passBatch(passes.begin() + ps, passes.begin() + end);
+                boardsIn      += (int)passBatch.size();
+                gpuDispatches += 1;
+
+                WorkerGpuContext* pCtx;
+                {
+                    std::unique_lock<std::mutex> lk(poolMtx);
+                    poolCv.wait(lk, [&] { return !freePool.empty(); });
+                    pCtx = freePool.back();
+                    freePool.pop_back();
+                }
+
+                levelStats.activeCount.fetch_add(1);
+                int lvl    = level;
+                int numRot = pConfig->numRotations;
+                int maxMvs = maxMoves;
+                workerThreadPool.QueueJob(
+                    [passBatch = std::move(passBatch), lvl, numRot, maxMvs, consts, pCtx,
+                     &levelStats, &runStats, &poolMtx, &freePool, &poolCv,
+                     &passMtx, &passQueue]() mutable {
+                        WorkerProcessBatch(std::move(passBatch), lvl, numRot, maxMvs, consts,
+                                           pCtx, &levelStats, &runStats, &passMtx, &passQueue);
+                        { std::lock_guard<std::mutex> lk(poolMtx); freePool.push_back(pCtx); }
+                        poolCv.notify_one();
+                    });
+            }
+
+            while (levelStats.activeCount.load() > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        auto levelEnd = std::chrono::high_resolution_clock::now();
+        long long elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            levelEnd - levelStart).count();
+
+        TSCheckpoint(g_tieredBoardStores[level]);
+        TSCheckpoint(g_tieredMoveStores[level]);
+
+        // Record stats.
+        LevelRecord rec;
+        rec.level         = level;
+        rec.boardsIn      = boardsIn;
+        rec.newBoardsOut       = levelStats.newBoards.load();
+        rec.totalChildren      = levelStats.totalChildren.load();
+        rec.terminalBoardsOut  = levelStats.terminalBoards.load();
+        rec.elapsedNs          = elapsedNs;
+        rec.predictedNs        = thisPredNs;
+        levelHistory.push_back(rec);
+
+        totalBoardsProcessed += boardsIn;
+        totalUniqueBoards    += rec.newBoardsOut;
+        totalGpuDispatches   += gpuDispatches;
+        totalChildren        += rec.totalChildren;
+        totalTerminals       += rec.terminalBoardsOut;
+
+        // Per-level log line.
+        double    elpS    = elapsedNs / 1e9;
+        long long nsPerBd = (boardsIn > 0) ? elapsedNs / boardsIn : 0;
+        long long bps     = (elapsedNs > 0)
+            ? (long long)((double)boardsIn * 1e9 / (double)elapsedNs) : 0;
+        long long dups    = rec.totalChildren - rec.newBoardsOut;
+
+        LogPrintf("Lv %2d: in=%9lld  new=%9lld  dups=%9lld  moves=%9lld  ends=%6lld  "
+                  "time=%9.3fs  ns/brd=%7lld  brd/s=%10lld",
+                  level, boardsIn, rec.newBoardsOut, dups,
+                  rec.totalChildren, rec.terminalBoardsOut, elpS, nsPerBd, bps);
+
+        if (thisPredNs > 0)
+            LogPrintf("  pred=%7.3fs/act=%7.3fs", thisPredNs / 1e9, elpS);
+
+        nextLevelPredNs = 0;
+        if (rec.newBoardsOut > 0)
+        {
+            long long avgNs = RollingAvgNsPerBoard(levelHistory);
+            nextLevelPredNs = avgNs * rec.newBoardsOut;
+            LogPrintf("  next=%7.3fs", nextLevelPredNs / 1e9);
+        }
+        LogPrintf("\n");
+
+        if (rec.newBoardsOut == 0)
+            break;
+    }
+
+    doBackPropagation(deepestLevel);
+    WriteBackpropSentinel();
+
+    auto wallEnd = std::chrono::high_resolution_clock::now();
+    long long wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        wallEnd - wallStart).count();
+
+    // Read root board win counts.
+    PBOARD firstBoardKey = BoardAllocateFirstBoard();
+    BOARD  rootBoard     = {};
+    if (!firstBoardKey || TSFind(g_tieredBoardStores[0], firstBoardKey, &rootBoard) != TS_RC_Success)
+        LogErrorf("Warning: could not read root board win counts\n");
+    free(firstBoardKey);
+
+    doReportResults(pConfig, gpuInfo.name, &rootBoard,
+                    levelHistory, runStats,
+                    wallNs,
+                    totalBoardsProcessed,
+                    totalUniqueBoards,
+                    totalChildren,
+                    totalGpuDispatches,
+                    totalTerminals);
+
+    // Close stores.
+    for (int i = 0; i < numLevels; i++)
+    {
+        if (g_tieredBoardStores[i]) { TSClose(&g_tieredBoardStores[i]); }
+        if (g_tieredMoveStores[i])  { TSClose(&g_tieredMoveStores[i]);  }
+    }
+
+    workerThreadPool.Stop();
+    for (WorkerGpuContext* c : contexts)
+        WorkerGpuContextDestroy(c);
+
+    LogPrintf("\nSolver complete.\n");
+}
+
+// ==================== Fresh start ====================
 
 void doStartProcess(PSolverConfig pConfig)
 {
-    // Ensure the output directory exists and is properly structured for the given board size.
     if (!CreateFullPathForRun(pConfig->outputDir, pConfig->boardSize))
     {
         ErrorPrint(stderr);
         exit(1);
     }
 
-    // Configure the size of the board and allocate the initial board state.
+    LogOpen(GetFullDirPathForRun());
+    LogPrintf("OthelloSolverCommandLine starting\n");
+    LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
+    LogPrintf("  Num Threads:   %d\n",    pConfig->numThreads);
+    LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
+    LogPrintf("  Output Dir:    %s\n",    GetFullDirPathForRun());
+
     SetBoardSizeForRun(pConfig->boardSize);
 
     PBOARD firstBoard = BoardAllocateFirstBoard();
-    if (firstBoard == NULL)
-    {
-        ErrorPrint(stderr);
-        exit(1);
-    }
+    if (!firstBoard) { ErrorPrint(stderr); exit(1); }
 
-    // Key fields for BOARD stores
     static const TSKeyFld k_boardKeyFlds[] = {
         { 0, offsetof(BOARD, ullPossibleMoves), TS_DATATYPE_BYTE }
     };
-
-    // Key fields for MOVE stores
     static const TSKeyFld k_moveKeyFlds[] = {
         { 0, offsetof(MOVE, ullCellsInUseResult), TS_DATATYPE_BYTE }
     };
 
-    // Allocate the TierdStores for the solver
-    for (int i = 0; i < ((g_boardSize * g_boardSize) - 4)+1; i++)
+    int numLevels = (g_boardSize * g_boardSize - 4) + 1;
+
+    for (int i = 0; i < numLevels; i++)
     {
-        char *pszBaseBoardPath = GetFullFilePathBaseNameForBoardLevel(i);
-        char *pszBaseMovePath = GetFullFilePathBaseNameForMoveLevel(i);
-        const char *charArray[1] = { pszBaseBoardPath };
-
-        TSRc tsRc = TSCreate(charArray, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                             sizeof(BOARD), MAX_BOARD_IN_ONESTORE, nullptr, &(g_tieredBoardStores[i]));
-        if (tsRc != TS_RC_Success)
         {
-            ErrorPrint(stderr);
-            exit(1);
+            char path[MAX_PATH];
+            strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(i), _TRUNCATE);
+            CreateFullPath(path);
+            const char* dirs[1] = { GetFullFilePathBaseNameForBoardLevel(i) };
+            TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                               sizeof(BOARD), MAX_BOARDS_IN_ONESTORE, BoardWinsMergeFn,
+                               &g_tieredBoardStores[i]);
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("TSCreate board store failed rc=%d level %d\n", (int)rc, i);
+                exit(1);
+            }
         }
-
-        charArray[0] = pszBaseMovePath;
-        tsRc = TSCreate(charArray, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                        sizeof(MOVE), MAX_BOARD_IN_ONESTORE, nullptr, &(g_tieredMoveStores[i]));
-
-        if (tsRc != TS_RC_Success)
         {
-            ErrorPrint(stderr);
-            exit(1);
+            char path[MAX_PATH];
+            strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(i), _TRUNCATE);
+            CreateFullPath(path);
+            const char* dirs[1] = { GetFullFilePathBaseNameForMoveLevel(i) };
+            TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                               sizeof(MOVE), MAX_MOVES_IN_ONESTORE, nullptr,
+                               &g_tieredMoveStores[i]);
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("TSCreate move store failed rc=%d level %d\n", (int)rc, i);
+                exit(1);
+            }
         }
     }
 
-    // Now we need to prime the first board into the TieredStore for the first board level (which is 0 since the first 4 spaces are already occupied at the start of the game).
-    TSRc tsRc = TSInsert(g_tieredBoardStores[0], firstBoard);
-    if (tsRc != TS_RC_Success)
+    TSRc rc = TSInsert(g_tieredBoardStores[0], firstBoard);
+    if (rc != TS_RC_Success)
     {
-        ErrorPrint(stderr);
+        LogErrorf("TSInsert first board failed rc=%d\n", (int)rc);
         exit(1);
     }
+    free(firstBoard);
 
-    // Now we will call the solver routine to start solving the boards.
-    
+    GpuDeviceInfo gpuInfo = QueryGpuDevice();
+    LogPrintf("  GPU Device:    %s\n",  gpuInfo.name);
+    LogPrintf("  Batch Size:    %d\n",  gpuInfo.optimalBatchSize);
+    LogPrintf("\n");
+
+    RunSolverCore(pConfig, gpuInfo, 0, numLevels);
+    LogClose();
 }
 
-/*
-* Name: processArgs
-* Description: Processes command-line arguments and updates the solver configuration accordingly.
-* Parameters:
-* - argc: The number of command-line arguments.
-* - argv: An array of strings representing the command-line arguments.
-* - pConfig: A pointer to the solver configuration structure to be updated.
-* Notes:
-* - This function supports the following arguments:
-*   - "help": Displays usage information and exits.
-*   - "restart": Sets the restart flag in the configuration.
-*   - "<boardSize> <numThreads> <numRotations> <outputDir>": Sets the corresponding configuration values.
-* - If invalid arguments are provided, the function prints an error message and exits.
-*/
-void  processArgs(int argc, char* argv[], PSolverConfig pConfig)
+// ==================== Restart ====================
+
+void doRestartProcess(PSolverConfig pConfig)
+{
+    namespace fs = std::filesystem;
+
+    // Find the most recent timestamped run directory for this board size.
+    char boardSizeDirName[64];
+    snprintf(boardSizeDirName, sizeof(boardSizeDirName), "BoardSize%dx%d",
+             pConfig->boardSize, pConfig->boardSize);
+
+    fs::path outPath(pConfig->outputDir);
+    if (!fs::exists(outPath))
+    {
+        printf("Output dir not found: %s  Starting fresh.\n", pConfig->outputDir);
+        doStartProcess(pConfig);
+        return;
+    }
+
+    std::string latestTimestamp;
+    for (auto& entry : fs::directory_iterator(outPath))
+    {
+        if (!entry.is_directory()) continue;
+        if (fs::exists(entry.path() / boardSizeDirName))
+        {
+            std::string ts = entry.path().filename().string();
+            if (ts > latestTimestamp) latestTimestamp = ts;
+        }
+    }
+
+    if (latestTimestamp.empty())
+    {
+        printf("No previous run found in %s  Starting fresh.\n", pConfig->outputDir);
+        doStartProcess(pConfig);
+        return;
+    }
+
+    // Point the path helpers at the existing run directory.
+    char runDirBuf[MAX_PATH];
+    snprintf(runDirBuf, MAX_PATH, "%s\\%s\\%s",
+             pConfig->outputDir, latestTimestamp.c_str(), boardSizeDirName);
+    SetFullDirPathDirect(runDirBuf);
+    SetBoardSizeForRun(pConfig->boardSize);
+
+    LogOpen(GetFullDirPathForRun());
+    LogPrintf("OthelloSolverCommandLine restarting\n");
+    LogPrintf("  Run Dir:       %s\n", GetFullDirPathForRun());
+    LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
+    LogPrintf("  Num Threads:   %d\n",    pConfig->numThreads);
+    LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
+
+    // If back-prop already completed, just report it and exit.
+    if (BackpropSentinelExists())
+    {
+        LogPrintf("Back-propagation already complete for this run.\n");
+        LogPrintf("Check results_*.txt in: %s\n", GetFullDirPathForRun());
+        LogClose();
+        return;
+    }
+
+    static const TSKeyFld k_boardKeyFlds[] = {
+        { 0, offsetof(BOARD, ullPossibleMoves), TS_DATATYPE_BYTE }
+    };
+    static const TSKeyFld k_moveKeyFlds[] = {
+        { 0, offsetof(MOVE, ullCellsInUseResult), TS_DATATYPE_BYTE }
+    };
+
+    int maxLevel  = pConfig->boardSize * pConfig->boardSize - 4;
+    int numLevels = maxLevel + 1;
+
+    // Find the last level where BOTH board+move stores are checkpointed.
+    // We will redo BFS from that level (regenerating its move store and all higher stores).
+    int resumeFromLevel = -1;
+    for (int i = 0; i <= maxLevel; i++)
+    {
+        char boardManifest[MAX_PATH];
+        snprintf(boardManifest, MAX_PATH, "%s\\manifest.tsm",
+                 GetFullFilePathBaseNameForBoardLevel(i));
+        char moveManifest[MAX_PATH];
+        snprintf(moveManifest, MAX_PATH, "%s\\manifest.tsm",
+                 GetFullFilePathBaseNameForMoveLevel(i));
+        if (fs::exists(boardManifest) && fs::exists(moveManifest))
+            resumeFromLevel = i;
+        else
+            break;
+    }
+
+    if (resumeFromLevel < 0)
+    {
+        LogPrintf("No checkpointed levels found; starting fresh run.\n");
+        LogClose();
+        doStartProcess(pConfig);
+        return;
+    }
+
+    LogPrintf("Last fully checkpointed level: %d\n", resumeFromLevel);
+    LogPrintf("Redoing BFS from level %d\n\n", resumeFromLevel);
+
+    // Open complete board stores (0..resumeFromLevel).
+    for (int i = 0; i <= resumeFromLevel; i++)
+    {
+        char path[MAX_PATH];
+        strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(i), _TRUNCATE);
+        TSRc rc = TSOpen(path, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                         BoardWinsMergeFn, &g_tieredBoardStores[i]);
+        if (rc != TS_RC_Success)
+        {
+            LogErrorf("TSOpen board store failed rc=%d level %d\n", (int)rc, i);
+            exit(1);
+        }
+    }
+
+    // Open complete move stores (0..resumeFromLevel-1).
+    for (int i = 0; i < resumeFromLevel; i++)
+    {
+        char path[MAX_PATH];
+        strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(i), _TRUNCATE);
+        TSRc rc = TSOpen(path, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                         nullptr, &g_tieredMoveStores[i]);
+        if (rc != TS_RC_Success)
+        {
+            LogErrorf("TSOpen move store failed rc=%d level %d\n", (int)rc, i);
+            exit(1);
+        }
+    }
+
+    // Delete and recreate move_store[resumeFromLevel] (will be regenerated by BFS redo).
+    {
+        char path[MAX_PATH];
+        strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(resumeFromLevel), _TRUNCATE);
+        if (fs::exists(path)) fs::remove_all(path);
+        CreateFullPath(GetFullFilePathBaseNameForMoveLevel(resumeFromLevel));
+        const char* dirs[1] = { GetFullFilePathBaseNameForMoveLevel(resumeFromLevel) };
+        TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                           sizeof(MOVE), MAX_MOVES_IN_ONESTORE, nullptr,
+                           &g_tieredMoveStores[resumeFromLevel]);
+        if (rc != TS_RC_Success)
+        {
+            LogErrorf("TSCreate move store failed rc=%d level %d\n", (int)rc, resumeFromLevel);
+            exit(1);
+        }
+    }
+
+    // Delete and recreate all stores above resumeFromLevel (partial or non-existent).
+    for (int i = resumeFromLevel + 1; i <= maxLevel; i++)
+    {
+        {
+            char path[MAX_PATH];
+            strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(i), _TRUNCATE);
+            if (fs::exists(path)) fs::remove_all(path);
+            CreateFullPath(GetFullFilePathBaseNameForBoardLevel(i));
+            const char* dirs[1] = { GetFullFilePathBaseNameForBoardLevel(i) };
+            TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                               sizeof(BOARD), MAX_BOARDS_IN_ONESTORE, BoardWinsMergeFn,
+                               &g_tieredBoardStores[i]);
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("TSCreate board store failed rc=%d level %d\n", (int)rc, i);
+                exit(1);
+            }
+        }
+        {
+            char path[MAX_PATH];
+            strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(i), _TRUNCATE);
+            if (fs::exists(path)) fs::remove_all(path);
+            CreateFullPath(GetFullFilePathBaseNameForMoveLevel(i));
+            const char* dirs[1] = { GetFullFilePathBaseNameForMoveLevel(i) };
+            TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                               sizeof(MOVE), MAX_MOVES_IN_ONESTORE, nullptr,
+                               &g_tieredMoveStores[i]);
+            if (rc != TS_RC_Success)
+            {
+                LogErrorf("TSCreate move store failed rc=%d level %d\n", (int)rc, i);
+                exit(1);
+            }
+        }
+    }
+
+    GpuDeviceInfo gpuInfo = QueryGpuDevice();
+    LogPrintf("  GPU Device:    %s\n",  gpuInfo.name);
+    LogPrintf("  Batch Size:    %d\n",  gpuInfo.optimalBatchSize);
+    LogPrintf("\n");
+
+    RunSolverCore(pConfig, gpuInfo, resumeFromLevel, numLevels);
+    LogClose();
+}
+
+// ==================== Argument parsing ====================
+
+void processArgs(int argc, char* argv[], PSolverConfig pConfig)
 {
     for (int i = 1; i < argc; i++)
     {
@@ -149,10 +939,10 @@ void  processArgs(int argc, char* argv[], PSolverConfig pConfig)
         }
         else if (i + 3 < argc)
         {
-            pConfig->boardSize = atoi(argv[i]);
-            pConfig->numThreads = atoi(argv[i + 1]);
+            pConfig->boardSize    = atoi(argv[i]);
+            pConfig->numThreads   = atoi(argv[i + 1]);
             pConfig->numRotations = atoi(argv[i + 2]);
-            pConfig->outputDir = argv[i + 3];
+            pConfig->outputDir    = argv[i + 3];
             i += 3;
         }
         else
@@ -161,19 +951,38 @@ void  processArgs(int argc, char* argv[], PSolverConfig pConfig)
             exit(1);
         }
     }
-}   
+}
 
-/*
-* Name: usage
-* Description: Prints usage information for the OthelloSolverCommandLine application.
-*/
 void usage()
 {
+    int hw = (int)std::thread::hardware_concurrency();
+    if (hw < 1) hw = 1;
     printf("OthelloSolverCommandLine: Command-line Othello solver.\n");
     printf("Usage: OthelloSolverCommandLine [help] [boardSize numThreads numRotations outputDir] [restart]\n");
-    printf("  boardSize: 4, 6, or 8 (default=4)\n");
-    printf("  numThreads: Number of CPU worker threads (default=1)\n");
+    printf("  boardSize:    4, 6, or 8 (default=4)\n");
+    printf("  numThreads:   Number of CPU worker threads (default=%d)\n", hw);
     printf("  numRotations: Number of symmetries to consider (default=8, max=16)\n");
-    printf("  outputDir: Directory for solver output and restart persistence (default=current dir)\n");
-    printf("  restart: Optional flag to restart from previous state\n");
+    printf("  outputDir:    Directory for solver output and restart persistence\n");
+    printf("                (default=D:\\CommandLineSolverDataDir)\n");
+    printf("  restart:      Optional flag to resume the most recent run\n");
+}
+
+// ==================== Entry point ====================
+
+int main(int argc, char* argv[])
+{
+    int defaultThreads = (int)std::thread::hardware_concurrency();
+    if (defaultThreads < 1) defaultThreads = 1;
+
+    SolverConfig config = { 6, defaultThreads, 16, "D:\\CommandLineSolverDataDir", false };
+
+    if (argc > 1)
+        processArgs(argc, argv, &config);
+
+    if (config.restart)
+        doRestartProcess(&config);
+    else
+        doStartProcess(&config);
+
+    return 0;
 }

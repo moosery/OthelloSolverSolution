@@ -20,7 +20,7 @@ void TSI_FreeStore(_TieredStore* ts)
 {
     if (!ts) return;
     if (ts->metaStore) { TSClose(&ts->metaStore); }
-    if (ts->memTree) { BPFreeTree(ts->memTree, false); ts->memTree = nullptr; }
+    if (ts->memTree) { BPFreeTree(ts->memTree, true); ts->memTree = nullptr; }
     if (ts->files)
     {
         for (int i = 0; i < ts->numFiles; i++)
@@ -480,7 +480,7 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
         }
     }
 
-    BPFreeTree(ts->memTree, false);
+    BPFreeTree(ts->memTree, true);
     ts->memTree = nullptr;
 
     BPRc brc = BPCreateTree(&ts->memTree, 256, BP_IDX_MAX_DATA_DEFAULT,
@@ -554,6 +554,39 @@ TSRc TSI_DeleteFromFile(_TieredStore* ts, TSFileDesc* desc, const void* keyRecor
             desc->liveCount--;
             result = TS_RC_Success;
         }
+        else
+            result = TS_RC_IO_Error;
+    }
+
+    fclose(f);
+    return result;
+}
+
+// ==================== In-place record write for TSUpdate ====================
+
+TSRc TSI_UpdateInFile(_TieredStore* ts, TSFileDesc* desc, const void* record)
+{
+    FILE* f = nullptr;
+    if (fopen_s(&f, desc->path, "r+b") != 0 || !f) return TS_RC_IO_Error;
+
+    int slotSize = TS_SLOT_SIZE(ts->recordSize);
+    std::vector<uint8_t> slotBuf((size_t)slotSize);
+
+    BsfCtx ctx = { ts->numKeyFlds, ts->idxSettings, ts->keyFlds };
+    long long idx = BinarySearchFile(f,
+                                     const_cast<void*>(record),
+                                     slotBuf.data(),
+                                     (long long)desc->slotCount,
+                                     (long long)slotSize,
+                                     ts_bsf_comp, &ctx);
+
+    TSRc result = TS_RC_Not_Found;
+    if (idx >= 0 && !(slotBuf[ts->recordSize] & TS_FLAG_TOMBSTONE))
+    {
+        int64_t slotOffset = (int64_t)idx * slotSize;
+        if (_fseeki64(f, slotOffset, SEEK_SET) == 0 &&
+            fwrite(record, (size_t)ts->recordSize, 1, f) == 1)
+            result = TS_RC_Success;
         else
             result = TS_RC_IO_Error;
     }

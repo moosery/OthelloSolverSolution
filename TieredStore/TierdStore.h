@@ -134,6 +134,16 @@ TSRc TSInsert(PTS pTs, const void* record);
 // outRecord: receives the full matching record on success.
 TSRc TSFind(PTS pTs, const void* keyRecord, void* outRecord);
 
+// Update the data (non-key) bytes of an existing record in-place.
+// record: full record-sized buffer; key fields identify the record to update,
+//         remaining bytes replace the stored data fields.
+// If the record is currently in the in-memory tree it is flushed to disk first,
+// then the on-disk slot is overwritten.
+// Returns TS_RC_Not_Found if no live record with that key exists.
+// Returns TS_RC_Invalid_Arg if any iterator is currently open on this store
+// (TSIterNext reads file data lock-free; a concurrent multi-byte write is unsafe).
+TSRc TSUpdate(PTS pTs, const void* record);
+
 // Mark a record deleted (tombstone). Cleaned up during future merge passes.
 TSRc TSDelete(PTS pTs, const void* keyRecord);
 

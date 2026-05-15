@@ -123,6 +123,7 @@ TSRc TSIterOpen(PTS pTs, PTSI* ppIter)
     if (iter->fileIdx < iter->numFiles)
         iter->slotsLeft = iter->slotCounts[iter->fileIdx];
 
+    pTs->activeIterCount.fetch_add(1);
     RWLockWriteUnlock("TSIterOpen", &pTs->storeLock);
     *ppIter = iter;
     return TS_RC_Success;
@@ -236,6 +237,9 @@ TSRc TSIterClose(PTSI* ppIter)
 
         RWLockReadUnlock("TSIterClose", &iter->pTs->storeLock);
     }
+
+    if (iter->pTs)
+        iter->pTs->activeIterCount.fetch_sub(1);
 
     // Free snapshot memory.
     if (iter->filePaths)

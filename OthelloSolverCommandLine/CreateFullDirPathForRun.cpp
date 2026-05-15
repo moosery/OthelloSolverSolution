@@ -46,6 +46,11 @@ char *GetFullDirPathForRun()
     return szFullDirPathForRun;
 }
 
+void SetFullDirPathDirect(const char* fullPath)
+{
+    strncpy_s(szFullDirPathForRun, sizeof(szFullDirPathForRun), fullPath, _TRUNCATE);
+}
+
 /*
 * Name: CreateFullPathForRun
 * Description: Creates the full directory path for the current run, which includes the output directory, a timestamp, and the board size. This function sets the full directory path using SetFullDirPathForRun and then creates the directory using CreateFullPath.

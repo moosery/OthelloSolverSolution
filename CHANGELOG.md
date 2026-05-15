@@ -1,5 +1,25 @@
 # Changelog
 
+## [v2.0.0] - 2026-05-15
+
+### Added
+- `OthelloSolverCommandLine`: new console project — full GPU-accelerated exhaustive BFS solver; processes each level (piece count) by iterating canonical boards from a TieredStore, dispatching batches to the CUDA kernel, and inserting child boards and move edges into per-level TieredStores
+- `OthelloSolverCommandLine` / `SolverKernel` (CUDA): `OthelloExpandKernel` — one thread per input board; iterates legal move bits, applies each move, canonicalizes the child via `dev_canonicalize`, and writes a `GpuResult` (child board + move edge) per slot; handles pass-move (opponent can still play) and terminal-board (neither player can move) cases; `DispatchBatch`, `LaunchOthelloKernel`, and `WorkerGpuContext` manage per-worker CUDA streams, device buffers, and pinned host buffers
+- `OthelloSolverCommandLine` / `SolverWorker`: `WorkerProcessBatch` — stages a batch into pinned host memory, dispatches to GPU, detects slot overflow, initializes terminal board win/loss/tie counts, and inserts all child boards and move edges into the appropriate TieredStores
+- `OthelloSolverCommandLine`: back-propagation sweep — iterates levels from `maxLevel` down to 0; for each move edge in the move store, adds the child board's win/loss/tie counts into the parent board record via `TSUpdate`
+- `OthelloSolverCommandLine`: progress reporting — per-level table with `boardsIn`, `newBoardsOut`, dups, moves, terminal boards (`ends`), elapsed time, ns/board, boards/sec, and predicted vs actual time; rolling-average prediction with spike detection (switches to latest ns/board when it exceeds 1.4× the rolling average, catching the RAM→disk I/O inflection point cleanly)
+- `OthelloSolverCommandLine`: restart support (`doRestartProcess`) — scans existing TieredStore directories, identifies the last fully checkpointed level, reopens all stores, and resumes BFS from that level
+- `OthelloSolverCommandLine`: overflow detection — if any board produces more children than `maxMovesPerBoard` allows, prints the actual maximum and exits with an actionable message
+- `OthelloSolverCommandLine`: pass-move handling — boards with no legal moves for the current player but legal moves for the opponent produce a pass child (player-flipped board at the same piece count) queued for a separate post-sweep pass
+- `OthelloSolverCommandLine` / `Logger`: timestamped file logger
+- `OthelloBasicsForCUDA`: new project — CUDA-compatible OthelloBasics for use in `.cu` translation units
+- `TieredStore` / `TSUpdate`: new `TSUpdate` function (`TieredStoreUpdate.cpp`) — finds the on-disk record matching the supplied key and overwrites it in place; used by back-propagation to accumulate win/loss/tie counts without re-inserting
+
+### Fixed
+- `TieredStore`: `BPFreeTree` was called with `false` (free nodes only, not record data) in both `TSI_FreeStore` and `TSI_FlushMemTree`; since `BPInsertCopy` makes a separate heap allocation per record, every flush leaked all record data — approximately 16 GB per flush of a 287 M-record tree during the 6×6 solve; three such flushes at level 12 exhausted VM on a 64 GB machine, causing heap corruption that manifested as `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409); fix: changed both calls to `BPFreeTree(ts->memTree, true)`
+
+---
+
 ## [v1.9.0] - 2026-05-13
 
 ### Changed

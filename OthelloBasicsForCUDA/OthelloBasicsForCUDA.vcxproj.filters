@@ -15,33 +15,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="OthelloSolverCommandLine.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="CreateFullDirPathForRun.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="SolverWorker.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <CudaCompile Include="SolverKernel.cu">
+    <CudaCompile Include="OthelloBasicsForCUDA.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="InternalRoutines.h">
+    <ClInclude Include="OthelloBasicsForCUDA.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="SolverKernel.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="SolverWorker.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <Text Include="README.txt" />
   </ItemGroup>
 </Project>

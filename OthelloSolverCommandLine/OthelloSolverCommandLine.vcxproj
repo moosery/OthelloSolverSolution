@@ -54,6 +54,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.2.props" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -105,12 +106,18 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore;..\OthelloBasicsForCUDA</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
     </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <AdditionalOptions>--std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -121,16 +128,27 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore;..\OthelloBasicsForCUDA</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
     </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <AdditionalOptions>--std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CreateFullDirPathForRun.cpp" />
+    <ClCompile Include="Logger.cpp" />
     <ClCompile Include="OthelloSolverCommandLine.cpp" />
+    <ClCompile Include="SolverWorker.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="SolverKernel.cu" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
@@ -145,11 +163,21 @@
     <ProjectReference Include="..\Utility\Utility.vcxproj">
       <Project>{1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1}</Project>
     </ProjectReference>
+    <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
+      <Project>{375f3354-bf89-48cd-8405-d660fa4a3983}</Project>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="InternalRoutines.h" />
+    <ClInclude Include="Logger.h" />
+    <ClInclude Include="SolverKernel.h" />
+    <ClInclude Include="SolverWorker.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="README.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.2.targets" />
   </ImportGroup>
 </Project>
