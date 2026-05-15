@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2.0.1] - 2026-05-15
+
+### Changed
+- `OthelloSolverCommandLine`: level progress line is now a single line per level; columns widened to 13 digits (handles 10+ digit board/move counts without skewing); removed duplicate `act=` field (actual time already shown as `tm=`); removed `brd/s` (redundant with `ns/brd`); abbreviated `moves`→`mvs`, `next`→`nxt`, `time`→`tm`; added current date/time at end of each line
+- `OthelloSolverCommandLine`: final report table updated to match — removed `brd/s` column, widened numeric columns, abbreviated `Moves`→`Mvs` and `Elapsed(s)`→`Tm(s)`
+
+---
+
 ## [v2.0.0] - 2026-05-15
 
 ### Added
