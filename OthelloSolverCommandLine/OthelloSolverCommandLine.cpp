@@ -612,8 +612,7 @@ static void RunSolverCore(
             strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
         }
 
-        LogPrintf("Lv %2d: in=%13lld new=%13lld dups=%13lld mvs=%13lld ends=%8lld\n"
-                  "        tm=%11.3fs ns/brd=%8lld pred=%11.3fs nxt=%11.3fs  %s\n",
+        LogPrintf("Lv %2d: in=%13lld new=%13lld dups=%13lld mvs=%13lld ends=%8lld tm=%11.3fs ns/brd=%8lld pred=%11.3fs nxt=%11.3fs  %s\n",
                   level, boardsIn, rec.newBoardsOut, dups,
                   rec.totalChildren, rec.terminalBoardsOut,
                   elpS, nsPerBd, predS, nxtS, dtBuf);
