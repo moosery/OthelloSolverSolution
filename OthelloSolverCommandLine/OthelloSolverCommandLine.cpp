@@ -19,6 +19,8 @@
 #include <OthelloBasics.h>
 #include <TierdStore.h>
 
+#define APP_VERSION "2.0.1"
+
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 15 * 1024 * 1024 * 1024ULL; // 15GB
 constexpr auto MAX_BOARDS_IN_ONESTORE = MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER / sizeof(BOARD);
 constexpr auto MAX_MOVES_IN_ONESTORE = MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER / sizeof(MOVE);
@@ -669,7 +671,7 @@ void doStartProcess(PSolverConfig pConfig)
     }
 
     LogOpen(GetFullDirPathForRun());
-    LogPrintf("OthelloSolverCommandLine starting\n");
+    LogPrintf("OthelloSolverCommandLine v" APP_VERSION " starting\n");
     LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
     LogPrintf("  Num Threads:   %d\n",    pConfig->numThreads);
     LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
@@ -783,7 +785,7 @@ void doRestartProcess(PSolverConfig pConfig)
     SetBoardSizeForRun(pConfig->boardSize);
 
     LogOpen(GetFullDirPathForRun());
-    LogPrintf("OthelloSolverCommandLine restarting\n");
+    LogPrintf("OthelloSolverCommandLine v" APP_VERSION " restarting\n");
     LogPrintf("  Run Dir:       %s\n", GetFullDirPathForRun());
     LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
     LogPrintf("  Num Threads:   %d\n",    pConfig->numThreads);
