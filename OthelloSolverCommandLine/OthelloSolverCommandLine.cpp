@@ -6,6 +6,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <ctime>
 #include <vector>
 #include <atomic>
 #include <string>
@@ -232,25 +233,23 @@ static void doReportResults(
     ReportLine(rf, "  Boards/sec:       %lld\n", brdsPerSec);
     ReportLine(rf, "  Ns/Board:         %lld\n", nsPerBrd);
     ReportLine(rf, "\n  Level Analysis:\n");
-    ReportLine(rf, "  %2s  %10s  %10s  %10s  %10s  %8s  %10s  %7s  %10s  %9s\n",
-        "Lv", "BoardsIn", "NewBoards", "Dups", "Moves", "Ends", "Elapsed(s)", "ns/brd", "brd/s", "Pred(s)");
-    ReportLine(rf, "  %2s  %10s  %10s  %10s  %10s  %8s  %10s  %7s  %10s  %9s\n",
-        "--", "--------", "---------", "----", "-----", "----", "----------", "------", "-----", "-------");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %11s %8s %11s\n",
+        "Lv", "BoardsIn", "NewBoards", "Dups", "Mvs", "Ends", "Tm(s)", "ns/brd", "Pred(s)");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %11s %8s %11s\n",
+        "--", "--------", "---------", "----", "---", "----", "-----", "------", "-------");
     for (const LevelRecord& r : levels)
     {
         long long dups   = r.totalChildren - r.newBoardsOut;
         double    elpS   = r.elapsedNs / 1e9;
         long long nsPerB = (r.boardsIn > 0) ? r.elapsedNs / r.boardsIn : 0;
-        long long bps    = (r.elapsedNs > 0)
-            ? (long long)((double)r.boardsIn * 1e9 / (double)r.elapsedNs) : 0;
         if (r.predictedNs > 0)
-            ReportLine(rf, "  %2d  %10lld  %10lld  %10lld  %10lld  %8lld  %10.3f  %7lld  %10lld  %9.3f\n",
+            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %11.3f %8lld %11.3f\n",
                 r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
-                elpS, nsPerB, bps, r.predictedNs / 1e9);
+                elpS, nsPerB, r.predictedNs / 1e9);
         else
-            ReportLine(rf, "  %2d  %10lld  %10lld  %10lld  %10lld  %8lld  %10.3f  %7lld  %10lld  %9s\n",
+            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %11.3f %8lld %11s\n",
                 r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
-                elpS, nsPerB, bps, "---");
+                elpS, nsPerB, "---");
     }
     ReportLine(rf, "%s", sep);
 
@@ -593,26 +592,31 @@ static void RunSolverCore(
         // Per-level log line.
         double    elpS    = elapsedNs / 1e9;
         long long nsPerBd = (boardsIn > 0) ? elapsedNs / boardsIn : 0;
-        long long bps     = (elapsedNs > 0)
-            ? (long long)((double)boardsIn * 1e9 / (double)elapsedNs) : 0;
         long long dups    = rec.totalChildren - rec.newBoardsOut;
-
-        LogPrintf("Lv %2d: in=%9lld  new=%9lld  dups=%9lld  moves=%9lld  ends=%6lld  "
-                  "time=%9.3fs  ns/brd=%7lld  brd/s=%10lld",
-                  level, boardsIn, rec.newBoardsOut, dups,
-                  rec.totalChildren, rec.terminalBoardsOut, elpS, nsPerBd, bps);
-
-        if (thisPredNs > 0)
-            LogPrintf("  pred=%7.3fs/act=%7.3fs", thisPredNs / 1e9, elpS);
+        double    predS   = (thisPredNs > 0) ? thisPredNs / 1e9 : 0.0;
 
         nextLevelPredNs = 0;
+        double nxtS = 0.0;
         if (rec.newBoardsOut > 0)
         {
             long long avgNs = RollingAvgNsPerBoard(levelHistory);
             nextLevelPredNs = avgNs * rec.newBoardsOut;
-            LogPrintf("  next=%7.3fs", nextLevelPredNs / 1e9);
+            nxtS = nextLevelPredNs / 1e9;
         }
-        LogPrintf("\n");
+
+        char dtBuf[32];
+        {
+            time_t now = time(nullptr);
+            struct tm tmNow;
+            localtime_s(&tmNow, &now);
+            strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+        }
+
+        LogPrintf("Lv %2d: in=%13lld new=%13lld dups=%13lld mvs=%13lld ends=%8lld\n"
+                  "        tm=%11.3fs ns/brd=%8lld pred=%11.3fs nxt=%11.3fs  %s\n",
+                  level, boardsIn, rec.newBoardsOut, dups,
+                  rec.totalChildren, rec.terminalBoardsOut,
+                  elpS, nsPerBd, predS, nxtS, dtBuf);
 
         if (rec.newBoardsOut == 0)
             break;
