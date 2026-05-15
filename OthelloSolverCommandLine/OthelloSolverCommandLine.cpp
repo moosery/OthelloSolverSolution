@@ -162,7 +162,8 @@ static void doReportResults(
     long long                   totalUniqueBoards,
     long long                   totalChildren,
     long long                   totalGpuDispatches,
-    long long                   totalTerminals)
+    long long                   totalTerminals,
+    const char*                 startDateTime)
 {
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -197,7 +198,8 @@ static void doReportResults(
     ReportLine(rf, "OthelloSolverCommandLine - Run Complete\n");
     ReportLine(rf, "%s", sep);
     ReportLine(rf, "Status:           Complete\n");
-    ReportLine(rf, "Date/Time:        %s\n", dateTimeBuf);
+    ReportLine(rf, "Started:          %s\n", startDateTime ? startDateTime : "unknown");
+    ReportLine(rf, "Ended:            %s\n", dateTimeBuf);
     ReportLine(rf, "%s", sep);
     ReportLine(rf, "Configuration\n");
     ReportLine(rf, "  Board Size:     %dx%d\n", pConfig->boardSize, pConfig->boardSize);
@@ -459,6 +461,15 @@ static void RunSolverCore(
     std::mutex         passMtx;
     std::vector<BOARD> passQueue;
 
+    char startDtBuf[32];
+    {
+        time_t now = time(nullptr);
+        struct tm tmNow;
+        localtime_s(&tmNow, &now);
+        strftime(startDtBuf, sizeof(startDtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+    }
+    LogPrintf("  Started:       %s\n\n", startDtBuf);
+
     auto wallStart = std::chrono::high_resolution_clock::now();
 
     // BFS producer loop.
@@ -630,6 +641,15 @@ static void RunSolverCore(
     long long wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         wallEnd - wallStart).count();
 
+    char endDtBuf[32];
+    {
+        time_t now = time(nullptr);
+        struct tm tmNow;
+        localtime_s(&tmNow, &now);
+        strftime(endDtBuf, sizeof(endDtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+    }
+    LogPrintf("\n  Started: %s\n  Ended:   %s\n", startDtBuf, endDtBuf);
+
     // Read root board win counts.
     PBOARD firstBoardKey = BoardAllocateFirstBoard();
     BOARD  rootBoard     = {};
@@ -644,7 +664,8 @@ static void RunSolverCore(
                     totalUniqueBoards,
                     totalChildren,
                     totalGpuDispatches,
-                    totalTerminals);
+                    totalTerminals,
+                    startDtBuf);
 
     // Close stores.
     for (int i = 0; i < numLevels; i++)
