@@ -23,9 +23,11 @@ static inline unsigned long long flipDiagA1H8(unsigned long long x)
 void BoardRotate90DegreesRight(PBOARD pBoard, PBOARD pResult)
 {
     pResult->usBoardInfo      = pBoard->usBoardInfo;
+    pResult->_pad1[0] = pResult->_pad1[1] = pResult->_pad1[2] = 0;
     pResult->ullPossibleMoves = 0;
     pResult->ullCellsInUse    = flipDiagA1H8(_byteswap_uint64(pBoard->ullCellsInUse));
     pResult->ullCellColors    = flipDiagA1H8(_byteswap_uint64(pBoard->ullCellColors));
+    pResult->_pad2[0] = pResult->_pad2[1] = pResult->_pad2[2] = 0;
 }
 
 #else /* USE_ORIGINAL_ROTATION */
@@ -38,9 +40,11 @@ void BoardRotate90DegreesRight(PBOARD pBoard, PBOARD pResult)
     int newCol;
 
     pResult->usBoardInfo = pBoard->usBoardInfo;
+    pResult->_pad1[0] = pResult->_pad1[1] = pResult->_pad1[2] = 0;
     pResult->ullPossibleMoves = 0;
     pResult->ullCellColors = 0;
     pResult->ullCellsInUse = 0;
+    pResult->_pad2[0] = pResult->_pad2[1] = pResult->_pad2[2] = 0;
 
     for (int row = startIdx; row < endIdx; row++)
     {

@@ -19,35 +19,32 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BPlusTreeArena\BPlusTreeArena.vcxproj">
-      <Project>{77f4ffcc-e592-4e1a-adad-b202114be622}</Project>
-    </ProjectReference>
+    <ClInclude Include="BP.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="BPAllocateNode.cpp" />
+    <ClCompile Include="BPCreateTree.cpp" />
+    <ClCompile Include="BPDelete.cpp" />
+    <ClCompile Include="BPFind.cpp" />
+    <ClCompile Include="BPGetDataCnt.cpp" />
+    <ClCompile Include="BPIdxInfo.cpp" />
+    <ClCompile Include="BPInsert.cpp" />
+    <ClCompile Include="BPIntegrityCheck.cpp" />
+    <ClCompile Include="BPIterate.cpp" />
+    <ClCompile Include="BPKeyCmp.cpp" />
+    <ClCompile Include="BPPrint.cpp" />
+    <ClCompile Include="BPUpdate.cpp" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Utility\Utility.vcxproj">
       <Project>{1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1}</Project>
     </ProjectReference>
   </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="TieredStore.cpp" />
-    <ClCompile Include="TieredStoreCheckpoint.cpp" />
-    <ClCompile Include="TieredStoreCreate.cpp" />
-    <ClCompile Include="TieredStoreDelete.cpp" />
-    <ClCompile Include="TieredStoreEnumerate.cpp" />
-    <ClCompile Include="TieredStoreFind.cpp" />
-    <ClCompile Include="TieredStoreInsert.cpp" />
-    <ClCompile Include="TieredStoreIterator.cpp" />
-    <ClCompile Include="TieredStoreOpen.cpp" />
-    <ClCompile Include="TieredStoreUpdate.cpp" />
-    <ClCompile Include="TieredStoreStatus.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="TierdStore.h" />
-    <ClInclude Include="TieredStoreInternal.h" />
-  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{b3dba222-f8f9-421c-9bad-0a6d4cadcbd5}</ProjectGuid>
-    <RootNamespace>TieredStore</RootNamespace>
+    <ProjectGuid>{77f4ffcc-e592-4e1a-adad-b202114be622}</ProjectGuid>
+    <RootNamespace>BPlusTreeArena</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -95,11 +92,6 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-  <ItemDefinitionGroup>
-    <ClCompile>
-      <AdditionalIncludeDirectories>..\BPlusTreeArena;..\Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ClCompile>
-  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -115,6 +107,9 @@
       </SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -133,6 +128,9 @@
       </SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -143,12 +141,16 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>..\Utility</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
       </SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -161,12 +163,16 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>..\Utility</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
       </SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

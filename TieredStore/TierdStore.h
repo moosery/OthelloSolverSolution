@@ -1,6 +1,20 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
+
+// Default to the arena-backed tree.  Define TS_USE_BPTREE_NORMAL before
+// including this header to use the standard (non-arena) B+ tree instead.
+#if !defined(TS_USE_BPTREE_NORMAL)
+#  define TS_USE_BPTREE_ARENA
+#endif
+
+#ifdef TS_USE_BPTREE_ARENA
+// Forward declaration only.  Callers that need ArenaMemCreate/Destroy must
+// #include "ArenaMem.h" (or "BP.h") directly.
+struct ArenaMem;
+typedef struct ArenaMem* PArenaMem;
+#endif
 
 // ==================== Return codes ====================
 
@@ -60,7 +74,7 @@ typedef struct _TSStatusBlock
     unsigned long long filesInUse;          // data files currently on disk
     unsigned long long totalRecords;        // in-memory + all disk files
     unsigned long long inMemoryRecords;     // records in the current in-memory tree
-    unsigned long long inMemoryFillPct;     // inMemoryRecords * 100 / maxRecordsPerLevel
+    unsigned long long inMemoryFillPct;     // inMemoryRecords * 100 / maxMemoryRecords
     unsigned long long diskRecords;         // records across all disk files
     unsigned long long totalBytesOnDisk;    // sum of all data file sizes in bytes
     int                numDirectories;      // number of directories in use
@@ -88,15 +102,27 @@ typedef struct _TieredStore* PTS;
 
 // ==================== API ====================
 
-// Create a new store.
-//   dirs / numDirs     — one or more directories for data files; files are distributed
-//                        round-robin across dirs at creation time; the manifest is written
-//                        to dirs[0]\manifest.tsm automatically
-//   keyFlds / numKeyFlds / idxSettings — define which record fields form the key and
-//                        how they are ordered; mirror BPlusTree field definitions
+// ==================== Create / Open ====================
+//
+// Common parameters:
+//   dirs / numDirs     — one or more directories for data files; manifest written to dirs[0]
+//   keyFlds / numKeyFlds / idxSettings — key layout; mirrors BPlusTree field definitions
 //   recordSize         — fixed size of every record in bytes
-//   maxRecordsPerLevel — capacity of the in-memory tree; also the max records per disk file
-//   mergeFn            — called on duplicate key to combine values; may be NULL (keep existing)
+//   maxMemoryBytes     — flush threshold: in-memory tree is written to disk when it
+//                        accumulates this many bytes of data
+//   maxFileBytes       — max bytes per output file (may exceed maxMemoryBytes)
+//   mergeFn            — called on duplicate key; NULL = keep existing record unchanged
+//
+// Arena build (TS_USE_BPTREE_ARENA):
+//   pArena             — caller-owned, pre-allocated arena.  Must remain valid until
+//                        TSClose.  TSClose resets (but does NOT free) the arena so the
+//                        caller can recycle it for another store.
+//                        pArena->totalSize must be >= maxMemoryBytes + node overhead.
+//
+// Non-arena build:
+//   TieredStore allocates its own in-memory tree internally.
+
+#ifdef TS_USE_BPTREE_ARENA
 TSRc TSCreate(
     const char**    dirs,
     int             numDirs,
@@ -104,14 +130,33 @@ TSRc TSCreate(
     int             numKeyFlds,
     size_t          idxSettings,
     int             recordSize,
-    int             maxRecordsPerLevel,
+    PArenaMem       pArena,
+    uint64_t        maxMemoryBytes,
+    uint64_t        maxFileBytes,
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs);
 
-// Open an existing store.
-//   dir0 — first directory used at TSCreate time; the manifest is read from dir0\manifest.tsm
-//   keyFlds / numKeyFlds / idxSettings — must match the values used at TSCreate time
-//   mergeFn — may be NULL
+TSRc TSOpen(
+    const char*     dir0,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    PArenaMem       pArena,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs);
+#else
+TSRc TSCreate(
+    const char**    dirs,
+    int             numDirs,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    int             recordSize,
+    uint64_t        maxMemoryBytes,
+    uint64_t        maxFileBytes,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs);
+
 TSRc TSOpen(
     const char*     dir0,
     const TSKeyFld* keyFlds,
@@ -119,6 +164,7 @@ TSRc TSOpen(
     size_t          idxSettings,
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs);
+#endif
 
 // Flush in-memory tree, wait for all pending merges, write manifest, free all resources.
 TSRc TSClose(PTS* ppTs);

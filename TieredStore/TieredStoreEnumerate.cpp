@@ -12,7 +12,7 @@ TSRc TSEnumerate(PTS pTs, TS_ENUM_FN enumFn, void* ctx)
 
     TSRc result = TS_RC_Success;
 
-    if (BPGetDataCnt(pTs->memTree) > 0)
+    if (pTs->memTree && BPGetDataCnt(pTs->memTree) > 0)
     {
         result = TSI_FlushMemTree(pTs);
         if (result != TS_RC_Success)

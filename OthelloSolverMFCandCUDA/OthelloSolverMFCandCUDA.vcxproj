@@ -97,13 +97,14 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PreprocessorDefinitions>_WINDOWS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTreeArena;..\OthelloBasics;..\TieredStore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
@@ -150,7 +151,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PreprocessorDefinitions>_WINDOWS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTreeArena;..\OthelloBasics;..\TieredStore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -225,8 +226,8 @@
     <Image Include="res\OthelloSolverMFCandCUDA.ico" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
+    <ProjectReference Include="..\BPlusTreeArena\BPlusTreeArena.vcxproj">
+      <Project>{77f4ffcc-e592-4e1a-adad-b202114be622}</Project>
     </ProjectReference>
     <ProjectReference Include="..\OthelloBasics\OthelloBasics.vcxproj">
       <Project>{2cc52c70-80f3-4700-9e46-0f6b1c077667}</Project>

@@ -106,7 +106,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore;..\OthelloBasicsForCUDA</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTreeArena;..\OthelloBasics;..\TieredStore;..\OthelloBasicsForCUDA</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -128,7 +128,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\OthelloBasics;..\TieredStore;..\OthelloBasicsForCUDA</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTreeArena;..\OthelloBasics;..\TieredStore;..\OthelloBasicsForCUDA</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -151,8 +151,8 @@
     <CudaCompile Include="SolverKernel.cu" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
+    <ProjectReference Include="..\BPlusTreeArena\BPlusTreeArena.vcxproj">
+      <Project>{77f4ffcc-e592-4e1a-adad-b202114be622}</Project>
     </ProjectReference>
     <ProjectReference Include="..\OthelloBasics\OthelloBasics.vcxproj">
       <Project>{2cc52c70-80f3-4700-9e46-0f6b1c077667}</Project>

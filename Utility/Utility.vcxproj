@@ -139,6 +139,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="ArenaMem.h" />
     <ClInclude Include="BinarySearch.h" />
     <ClInclude Include="BinSearchLE.h" />
     <ClInclude Include="ClockTick.h" />
@@ -146,10 +147,12 @@
     <ClInclude Include="FileAndDirUtils.h" />
     <ClInclude Include="Mem.h" />
     <ClInclude Include="RWLock.h" />
+    <ClInclude Include="SysMemInfo.h" />
     <ClInclude Include="ThreadPool.h" />
     <ClInclude Include="Utility.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="ArenaMem.cpp" />
     <ClCompile Include="BinSearch.cpp" />
     <ClCompile Include="BinSearchFile.cpp" />
     <ClCompile Include="BinSearchLE.cpp" />

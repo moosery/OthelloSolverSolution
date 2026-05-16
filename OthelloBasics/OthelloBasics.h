@@ -2,8 +2,7 @@
 #include "Error.h"
 #include <stdio.h>
 
-/* 50 bytes for a board */
-/* Optimization could be if we move the shorts together */
+/* 64 bytes for a board */
 typedef struct _Board
 {
 	unsigned long long  ullCellsInUse;      /* 0-> Not used      1-> Used             */
@@ -11,6 +10,7 @@ typedef struct _Board
 	unsigned short      usBoardInfo;        /* 0b0000XXX0        Boardsize (4,6,8)    */
 	                                        /* 0b0000000X        Next Player 1->Black */
 	                                        /*                               0->White */
+	unsigned short      _pad1[3];           /* explicit alignment padding             */
 	unsigned long long  ullPossibleMoves;   /* 0-> No move       1-> Can play         */
 	                                        /* If all 0xFFFFFFFFFFFFFFFF then no move */
 	                                        /* for this player but other player can   */
@@ -25,10 +25,10 @@ typedef struct _Board
 											/* 3   -> Played but no moves avail       */
 											/*        So find the next board with     */
 											/*        player flipped!                 */
+	unsigned short      _pad2[3];           /* explicit trailing padding              */
 } BOARD, * PBOARD;
 
-/* 40 bytes for a move */
-/* Optimization could be if we move the shorts together */
+/* 48 bytes for a move */
 typedef struct _Move
 {
 	unsigned long long  ullCellsInUseParent;/* 0-> Not used      1-> Used             */
@@ -39,11 +39,13 @@ typedef struct _Move
 	unsigned short      usMoveIdx;          /* 100 -> Just a change in players         */
 	                                        /* Otherwise 0->63 starting in upper left */
 	                                        /* Moving to lower right in row first ord */
+	unsigned int        _pad1;              /* explicit alignment padding             */
 	unsigned long long  ullCellsInUseResult;/* 0-> Not used      1-> Used             */
 	unsigned long long  ullCellColorsResult;/* 0-> White         1-> Black            */
 	unsigned short      usBoardInfoResult;  /* 0b0000XXX0        Boardsize (4,6,8)    */
 											/* 0b0000000X        Next Player 1->Black */
 											/*                               0->White */
+	unsigned short      _pad2[3];           /* explicit trailing padding              */
 } MOVE, * PMOVE;
 
 /* The bit we move all around */

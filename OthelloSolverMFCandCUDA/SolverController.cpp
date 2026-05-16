@@ -29,9 +29,11 @@ std::atomic<bool> g_stop{ false };
 static std::thread  s_controllerThread;
 
 // In-memory B+ tree shards for fast "is new board?" dedup.
-static const int NUM_SHARDS = 16;
-static PBPTree   s_pBoards[NUM_SHARDS] = {};
-static std::mutex s_shardLock[NUM_SHARDS];
+static const int      NUM_SHARDS = 16;
+static uint64_t s_shardArenaBytes = 256ULL * 1024 * 1024;  // default 256 MB per shard; resized from budget each run
+static PBPTree        s_pBoards[NUM_SHARDS] = {};
+static PArenaMem      s_shardArenas[NUM_SHARDS] = {};
+static std::mutex     s_shardLock[NUM_SHARDS];
 
 struct BoardEntry
 {
@@ -48,6 +50,14 @@ static inline int BoardShard(const BOARD* p)
 
 // TieredStore handle (persistence for restart).
 static PTS s_pTs = nullptr;
+#ifdef TS_USE_BPTREE_ARENA
+static PArenaMem s_tsArena      = nullptr;  // allocated once, reset (not freed) on each TSClose
+static uint64_t  s_tsMaxMem     = 0;        // set when s_tsArena is first allocated
+#endif
+
+// Memory budget mode (set via SCSetMemoryMode before starting the solver).
+static MemoryMode s_memMode           = MM_RECOMMENDED;
+static uint64_t   s_specifiedMemBytes = 0;
 
 // CPU BFS wave queues.  Children go to nextWave; swap happens only after the
 // entire currentWave is drained.  This ensures every parent at depth D has
@@ -111,8 +121,10 @@ static bool CreateBTrees()
     };
     for (int i = 0; i < NUM_SHARDS; i++)
     {
-        BPRc rc = BPCreateTree(&s_pBoards[i], 256, BP_IDX_MAX_DATA_DEFAULT,
-                               0, 1, fields, (int)sizeof(BoardEntry));
+        s_shardArenas[i] = ArenaMemCreate(s_shardArenaBytes);
+        if (!s_shardArenas[i]) return false;
+        BPRc rc = BPCreateTree(&s_pBoards[i], 256,
+                               0, 1, fields, (int)sizeof(BoardEntry), s_shardArenas[i]);
         if (rc != BP_RC_Success) return false;
     }
     return true;
@@ -121,7 +133,10 @@ static bool CreateBTrees()
 static void FreeBTrees()
 {
     for (int i = 0; i < NUM_SHARDS; i++)
+    {
         if (s_pBoards[i]) { BPFreeTree(s_pBoards[i], false); s_pBoards[i] = nullptr; }
+        if (s_shardArenas[i]) { ArenaMemDestroy(s_shardArenas[i]); s_shardArenas[i] = nullptr; }
+    }
 }
 
 // Insert canonical board.  Returns true if newly seen (false = duplicate path).
@@ -524,6 +539,10 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
     s_cpuDone.store(false);
     s_activeCount.store(0);
 
+    // Compute per-shard arena size from the current memory budget.
+    s_shardArenaBytes = CalcMemoryBudget(s_memMode, s_specifiedMemBytes) / (uint64_t)NUM_SHARDS;
+    if (s_shardArenaBytes < 1024ULL * 1024) s_shardArenaBytes = 1024ULL * 1024;  // floor at 1 MB
+
     FreeBTrees();
     if (!CreateBTrees())
     {
@@ -536,15 +555,49 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
     std::vector<const char*> dirPtrs;
     for (const auto& d : dirs) dirPtrs.push_back(d.c_str());
 
+#ifdef TS_USE_BPTREE_ARENA
+    if (!s_tsArena)
+    {
+        constexpr uint64_t tsMaxMem = 500000ULL * sizeof(UniqueRecord);
+        size_t nodeOverhead = (size_t)(tsMaxMem / sizeof(UniqueRecord)) * 10;
+        if (nodeOverhead < 65536) nodeOverhead = 65536;
+        s_tsMaxMem = tsMaxMem;
+        s_tsArena  = ArenaMemCreate((size_t)tsMaxMem + nodeOverhead);
+    }
+    if (!s_tsArena)
+    {
+        FreeBTrees();
+        g_solverRunning.store(false, std::memory_order_release);
+        PostMessage(hDlg, WM_SOLVER_DONE, 1, 0);
+        return;
+    }
+#endif
+
     TSRc tsRc;
     if (isRestart)
+#ifdef TS_USE_BPTREE_ARENA
+        tsRc = TSOpen(dirs[0].c_str(), k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
+                      s_tsArena, MergeUniqueRecord, &s_pTs);
+#else
         tsRc = TSOpen(dirs[0].c_str(), k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
                       MergeUniqueRecord, &s_pTs);
+#endif
 
     if (!isRestart || tsRc != TS_RC_Success)
+#ifdef TS_USE_BPTREE_ARENA
         tsRc = TSCreate(dirPtrs.data(), (int)dirPtrs.size(),
                         k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
-                        sizeof(UniqueRecord), 500000, MergeUniqueRecord, &s_pTs);
+                        sizeof(UniqueRecord), s_tsArena,
+                        s_tsMaxMem, s_tsMaxMem,
+                        MergeUniqueRecord, &s_pTs);
+#else
+        tsRc = TSCreate(dirPtrs.data(), (int)dirPtrs.size(),
+                        k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
+                        sizeof(UniqueRecord),
+                        500000ULL * sizeof(UniqueRecord),
+                        500000ULL * sizeof(UniqueRecord),
+                        MergeUniqueRecord, &s_pTs);
+#endif
 
     if (tsRc != TS_RC_Success)
     {
@@ -667,6 +720,12 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
+
+void SCSetMemoryMode(MemoryMode mode, uint64_t specifiedBytes)
+{
+    s_memMode           = mode;
+    s_specifiedMemBytes = specifiedBytes;
+}
 
 void StartSolver(HWND hDlg, int boardSize, int cpuDepth, int numThreads,
                  int numRotations, const std::vector<std::string>& dirs)

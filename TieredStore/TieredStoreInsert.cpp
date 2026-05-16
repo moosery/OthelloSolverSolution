@@ -9,27 +9,36 @@ TSRc TSInsert(PTS pTs, const void* record)
     ClockStart(&ct);
     RWLockWriteLock("TSInsert", &pTs->storeLock);
 
-    TSRc result;
+    TSRc result = TS_RC_Success;
+
     BPRc rc = BPInsertCopy(pTs->memTree, const_cast<void*>(record));
-    if (rc == BP_RC_Success)
+
+    if (rc == BP_RC_Tree_Full)
     {
-        if (BPGetDataCnt(pTs->memTree) >= (uint64_t)pTs->maxRecordsPerLevel)
-            result = TSI_FlushMemTree(pTs);
+        result = TSI_FlushMemTree(pTs);
+        if (result == TS_RC_Success)
+            rc = BPInsertCopy(pTs->memTree, const_cast<void*>(record));
+    }
+
+    if (result == TS_RC_Success)
+    {
+        if (rc == BP_RC_Success)
+        {
+            if (BPGetDataCnt(pTs->memTree) >= pTs->maxMemoryRecords)
+                result = TSI_FlushMemTree(pTs);
+        }
+        else if (rc == BP_RC_Duplicate_Found)
+        {
+            std::vector<uint8_t> buf((size_t)pTs->recordSize);
+            BPFindEqualKey(pTs->memTree, const_cast<void*>(record), buf.data());
+            if (pTs->mergeFn != nullptr)
+                pTs->mergeFn(buf.data(), record);
+            BPUpdate(pTs->memTree, buf.data());
+        }
         else
-            result = TS_RC_Success;
-    }
-    else if (rc == BP_RC_Duplicate_Found)
-    {
-        std::vector<uint8_t> buf((size_t)pTs->recordSize);
-        BPFindEqualKey(pTs->memTree, const_cast<void*>(record), buf.data());
-        if (pTs->mergeFn != nullptr)
-            pTs->mergeFn(buf.data(), record);
-        BPUpdate(pTs->memTree, buf.data());
-        result = TS_RC_Success;
-    }
-    else
-    {
-        result = TS_RC_Out_Of_Memory;
+        {
+            result = TS_RC_Out_Of_Memory;
+        }
     }
 
     if (result == TS_RC_Success)

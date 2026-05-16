@@ -1,7 +1,17 @@
 #pragma once
 
 #include "TierdStore.h"
-#include "BP.h"
+
+// Compile-time B+ tree back-end selection.
+// Default: arena-backed tree (BPlusTreeArena) for high-throughput inserts.
+// Define TS_USE_BPTREE_NORMAL before including this header to use the standard tree.
+#if !defined(TS_USE_BPTREE_NORMAL)
+#  define TS_USE_BPTREE_ARENA
+#  include "../BPlusTreeArena/BP.h"
+#else
+#  include "../BPlusTree/BP.h"
+#endif
+
 #include "RWLock.h"
 #include "ClockTick.h"
 #include <stdint.h>
@@ -23,8 +33,12 @@
 #define TS_DATA_FILE_EXT        ".tsf"
 #define TS_MANIFEST_MAGIC       0x54534D46u     // 'TSMF'
 #define TS_DATA_FILE_MAGIC      0x54534446u     // 'TSDF'
-#define TS_MANIFEST_VERSION     2u
+#define TS_MANIFEST_VERSION     3u
 #define TS_DATA_FILE_VERSION    1u
+
+// Fixed byte budgets for the internal manifest (meta) store — not exposed to callers.
+#define TS_MANIFEST_MEMORY_BYTES    (4ULL  * 1024 * 1024)   // 4 MB in-memory tree
+#define TS_MANIFEST_FILE_BYTES      (64ULL * 1024 * 1024)   // 64 MB per manifest file
 
 // Flag byte stored at the END of every on-disk slot (after the record bytes),
 // so compareFn operates on record bytes starting at offset 0 with no skew.
@@ -77,11 +91,13 @@ typedef struct _TSManifestHeader
     char     baseName[MAX_PATH];    // base filename stem for data files (no extension/dir)
     uint32_t recordSize;
     uint32_t keySize;               // leading bytes of each record that form the key
-    uint32_t maxRecordsPerLevel;
     uint32_t numDirs;
     uint32_t numFiles;
     uint32_t roundRobinNext;        // next directory index to assign a new file
+    uint32_t pad;                   // reserved
     uint64_t nextFileId;            // next unique file ID to assign (monotonic, never reused)
+    uint64_t maxMemoryBytes;        // in-memory tree flush threshold (bytes)
+    uint64_t maxFileBytes;          // max bytes per disk file
 } TSManifestHeader;
 
 typedef struct _TSManifestDir
@@ -144,7 +160,10 @@ struct _TieredStore
     int           roundRobinNext;   // next dir index for new file assignment
     int           keySize;          // leading bytes of each record that form the key
     int           recordSize;
-    int           maxRecordsPerLevel;
+    uint64_t      maxMemoryBytes;       // flush threshold
+    uint64_t      maxFileBytes;         // max bytes per output file
+    uint64_t      maxMemoryRecords;     // = maxMemoryBytes / recordSize (cached)
+    uint64_t      maxFileRecords;       // = maxFileBytes   / recordSize (cached)
     int           numKeyFlds;
     size_t        idxSettings;
     TSKeyFld      keyFlds[TS_MAX_KEY_FLDS];
@@ -153,6 +172,11 @@ struct _TieredStore
 
     // In-memory B+ tree
     PBPTree       memTree;
+#ifdef TS_USE_BPTREE_ARENA
+    PArenaMem     pMemArena;    // arena backing the in-memory tree
+    bool          ownsArena;    // true = arena was allocated internally (meta-stores only);
+                                // false = caller-owned, TSClose resets but does not free it
+#endif
 
     // File registry — array of pointers, grown on demand
     TSFileDesc**  files;

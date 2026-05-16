@@ -12,7 +12,7 @@ TSRc TSCheckpoint(PTS pTs)
 
     TSRc result = TS_RC_Success;
 
-    if (BPGetDataCnt(pTs->memTree) > 0)
+    if (pTs->memTree && BPGetDataCnt(pTs->memTree) > 0)
     {
         result = TSI_FlushMemTree(pTs);
         if (result != TS_RC_Success)
@@ -48,10 +48,11 @@ TSRc TSCheckpoint(PTS pTs)
     hdr.magic              = TS_MANIFEST_MAGIC;
     hdr.version            = TS_MANIFEST_VERSION;
     strncpy_s(hdr.baseName, pTs->baseName, _TRUNCATE);
-    hdr.recordSize         = (uint32_t)pTs->recordSize;
-    hdr.keySize            = (uint32_t)pTs->keySize;
-    hdr.maxRecordsPerLevel = (uint32_t)pTs->maxRecordsPerLevel;
-    hdr.numDirs            = (uint32_t)pTs->numDirs;
+    hdr.recordSize     = (uint32_t)pTs->recordSize;
+    hdr.keySize        = (uint32_t)pTs->keySize;
+    hdr.maxMemoryBytes = pTs->maxMemoryBytes;
+    hdr.maxFileBytes   = pTs->maxFileBytes;
+    hdr.numDirs        = (uint32_t)pTs->numDirs;
     // Leaf stores (no meta-store) write file entries directly in the manifest.
     // Main stores (with meta-store) keep numFiles=0; the registry lives in the meta-store.
     hdr.numFiles           = (pTs->metaStore == nullptr) ? (uint32_t)pTs->numFiles : 0;

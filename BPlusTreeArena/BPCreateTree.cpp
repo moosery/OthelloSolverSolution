@@ -5,6 +5,7 @@ void BPFreeTree(PBPTree pTree, bool freeData)
 {
     if (pTree != NULL)
     {
+        PArenaMem pArena = pTree->pArena;
         PBPNode currNode;
         PBPNode pNextLeftMostNode = pTree->keyInfo.pRootNode;
 
@@ -19,15 +20,18 @@ void BPFreeTree(PBPTree pTree, bool freeData)
             while (currNode != NULL)
             {
                 PBPNode pTmp = currNode->pRightSibling;
-                if(freeData)
-                    BPFreeNode(&(pTree->keyInfo), currNode);
+                if (freeData)
+                    BPFreeNode(pTree, &(pTree->keyInfo), currNode);
                 else
-                    BPFreeNodeButNotData(&(pTree->keyInfo), currNode);
+                    BPFreeNodeButNotData(pTree, &(pTree->keyInfo), currNode);
 
                 currNode = pTmp;
             }
         }
-        RWLockFree("BPFreeTree-tree", & pTree->rwTreeLock);
+
+        RWLockFree("BPFreeTree-idx", &pTree->keyInfo.rwIdxLock);
+        RWLockFree("BPFreeTree-tree", &pTree->rwTreeLock);
+        ArenaMemReset(pArena);
         MemFree(pTree);
     }
 }
@@ -37,7 +41,7 @@ void BPFreeTree(PBPTree pTree, bool freeData)
 ** Purpose:
 **   To allocate and initialize the tree structure.
 */
-BPRc BPCreateTree(PBPTree* ppTree, BPLL llOrder, size_t maxMemoryBytes, size_t stIdxSettings, size_t stNumFlds, BPIdxFld idxFlds[], size_t stDataSize)
+BPRc BPCreateTree(PBPTree* ppTree, BPLL llOrder, size_t stIdxSettings, size_t stNumFlds, BPIdxFld idxFlds[], size_t stDataSize, PArenaMem pArena)
 {
     BPRc result = BP_RC_Success;
 
@@ -46,8 +50,10 @@ BPRc BPCreateTree(PBPTree* ppTree, BPLL llOrder, size_t maxMemoryBytes, size_t s
     if (*ppTree == NULL)
         return BP_RC_Allocate_Failed;
 
-    RWLockInit("BPTree", "BPCreateTree", & ((*ppTree)->rwTreeLock));
-    RWLockInit("BPIdxInfo", "BPCreateTree", & ((*ppTree)->keyInfo.rwIdxLock));
+    (*ppTree)->pArena = pArena;
+
+    RWLockInit("BPTree", "BPCreateTree", &((*ppTree)->rwTreeLock));
+    RWLockInit("BPIdxInfo", "BPCreateTree", &((*ppTree)->keyInfo.rwIdxLock));
 
     /* Sorry, but we need uneven key entries to allow for delete to merge on the way down.  It's a performance thing - and the delete takes advantage of this fact. */
     if (llOrder % 2 == 1)
@@ -65,7 +71,7 @@ BPRc BPCreateTree(PBPTree* ppTree, BPLL llOrder, size_t maxMemoryBytes, size_t s
     pKeyInfo->stNumKeyNodes = 0;
     pKeyInfo->stNumLeafNodes = 0;
     pKeyInfo->stDataCnt = 0;
-    pKeyInfo->stMaxDataCnt = (stDataSize > 0) ? (maxMemoryBytes / stDataSize) : maxMemoryBytes;
+    pKeyInfo->stMaxDataCnt = BP_IDX_MAX_DATA_DEFAULT;
 
     /* Verify the settings.  DUPLICATES are NOT allowed in the key.  Keys must be unique!!! */
     size_t goodFlags = 0;

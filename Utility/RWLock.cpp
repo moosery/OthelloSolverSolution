@@ -101,6 +101,8 @@ void RWLockInit(const char *pszLockName, const char *pszLocation, PRWLock pLock)
 {
 	strncpy(pLock->lockName, pszLockName,LOCKNAME_SIZE);
 	pLock->lockName[LOCKNAME_SIZE] = '\0';
+	pLock->_pad[0] = pLock->_pad[1] = pLock->_pad[2] = pLock->_pad[3] =
+	pLock->_pad[4] = pLock->_pad[5] = pLock->_pad[6] = 0;
 #ifdef DEBUG_ON
 	if (IsDebugging(DEBUG_LOCKS))
 	{

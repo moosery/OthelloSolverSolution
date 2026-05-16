@@ -25,6 +25,9 @@ static void TRMerge(void* existing, const void* incoming)
 
 // ==================== Test infrastructure ====================
 static int g_pass = 0, g_fail = 0;
+#ifdef TS_USE_BPTREE_ARENA
+static PArenaMem s_testArena = nullptr;
+#endif
 
 static void Pass(const char* name) { printf("  [PASS] %s\n", name); g_pass++; }
 static void Fail(const char* name, const char* reason)
@@ -87,8 +90,14 @@ static void ResetWorkDir()
 static PTS CreateStore(const char* testName, int maxRec)
 {
     PTS ts = nullptr;
+    uint64_t maxBytes = (uint64_t)maxRec * sizeof(TestRec);
+#ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSCreate(k_dirs, 1, k_keyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                       sizeof(TestRec), maxRec, TRMerge, &ts);
+                       sizeof(TestRec), s_testArena, maxBytes, maxBytes, TRMerge, &ts);
+#else
+    TSRc rc = TSCreate(k_dirs, 1, k_keyFlds, 1, TS_IDX_SETTING_DEFAULT,
+                       sizeof(TestRec), maxBytes, maxBytes, TRMerge, &ts);
+#endif
     if (rc != TS_RC_Success)
         printf("    TSCreate(%s, maxRec=%d) -> %s\n", testName, maxRec, TSRcStr(rc));
     return ts;
@@ -97,7 +106,11 @@ static PTS CreateStore(const char* testName, int maxRec)
 static PTS OpenStore(const char* testName)
 {
     PTS ts = nullptr;
+#ifdef TS_USE_BPTREE_ARENA
+    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, s_testArena, TRMerge, &ts);
+#else
     TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts);
+#endif
     if (rc != TS_RC_Success)
         printf("    TSOpen(%s) -> %s\n", testName, TSRcStr(rc));
     return ts;
@@ -350,7 +363,7 @@ static bool TestMerge()
 }
 
 // ==================== Test 6: Pre-split during merge ====================
-// Pre-split fires when (mem live + file live) > maxRecordsPerLevel BEFORE deduplication.
+// Pre-split fires when (mem live + file live) > maxFileRecords BEFORE deduplication.
 // Strategy: flush 50 unique keys, then flush 50 keys that overlap in only 25 of them.
 // That gives 50 + 50 = 100 estimated total > 50, so doSplit = true.
 // After deduplication the merged output has 75 unique keys → desc1 gets 50, desc2 gets 25.
@@ -625,7 +638,11 @@ static bool TestCorruptManifest()
 
     // TSOpen must detect the bad magic and fail cleanly
     PTS ts = nullptr;
+#ifdef TS_USE_BPTREE_ARENA
+    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, s_testArena, TRMerge, &ts);
+#else
     TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts);
+#endif
     if (ts) TSClose(&ts);
     if (rc != TS_RC_Corrupt)
     {
@@ -736,6 +753,8 @@ struct EnumCtx
     int      count;
     bool     duplicates;
 };
+
+static void ArenaEmptyEnumCb(const void*, void* ctx) { (*(int*)ctx)++; }
 
 static void EnumCallback(const void* record, void* ctx)
 {
@@ -1061,11 +1080,124 @@ static bool TestIteratorNextN()
     return true;
 }
 
+// ==================== Test 20: Arena small-store flush cycles ====================
+// maxRec=5 means maxMemoryBytes=80, so nodeOverhead would be only 50 bytes before the
+// 64 KB floor kicks in.  Four batches of 5 non-overlapping keys exercise four
+// flush/arena-reset/arena-recreate cycles without any heap corruption.
+static bool TestArenaSmallStore()
+{
+    const char* T = "ArenaSmallStore";
+    ResetWorkDir();
+
+    const int maxRec = 5;
+    PTS ts = CreateStore(T, maxRec);
+    if (!ts) { Fail(T, "TSCreate failed"); return false; }
+
+    for (int batch = 0; batch < 4; batch++)
+    {
+        uint64_t base = (uint64_t)(batch * 5 + 1);
+        if (!InsertRange(ts, base, 5, base, T))
+            { TSClose(&ts); Fail(T, "insert failed"); return false; }
+    }
+
+    // All 20 records must be accessible across the four flushed files.
+    if (!FindRange(ts, 1, 20, 1, T))
+        { TSClose(&ts); Fail(T, "records missing after small-store flush cycles"); return false; }
+
+    if (TSCheckpoint(ts) != TS_RC_Success)
+        { TSClose(&ts); Fail(T, "TSCheckpoint failed"); return false; }
+    TSClose(&ts);
+
+    ts = OpenStore(T);
+    if (!ts) { Fail(T, "TSOpen failed"); return false; }
+
+    if (!FindRange(ts, 1, 20, 1, T))
+        { TSClose(&ts); Fail(T, "records missing after reopen"); return false; }
+
+    TSClose(&ts);
+    Pass(T);
+    return true;
+}
+
+// ==================== Test 21: Arena null-tree paths (never-inserted store) ====================
+// Exercises every code path that touches memTree/pMemArena when no insert has ever
+// been issued: TSClose, TSCheckpoint, TSStatus, TSEnumerate, and TSOpen of the result.
+static bool TestArenaCloseEmpty()
+{
+    const char* T = "ArenaCloseEmpty";
+
+    // Phase 1: create + immediate close — TSI_FreeStore with null arena/tree must not crash.
+    ResetWorkDir();
+    {
+        PTS ts = CreateStore(T, 100);
+        if (!ts) { Fail(T, "TSCreate failed"); return false; }
+        TSClose(&ts);
+    }
+
+    // Phase 2: fresh store — query status, enumerate, checkpoint, close.
+    ResetWorkDir();
+    {
+        PTS ts = CreateStore(T, 100);
+        if (!ts) { Fail(T, "TSCreate (phase 2) failed"); return false; }
+
+        TSStatusBlock st = {};
+        TSStatus(ts, &st);
+        if (st.totalRecords != 0 || st.filesInUse != 0)
+        {
+            char msg[128];
+            sprintf_s(msg, "expected 0 records/files, got records=%llu files=%llu",
+                      st.totalRecords, st.filesInUse);
+            TSClose(&ts); Fail(T, msg); return false;
+        }
+
+        int enumCount = 0;
+        if (TSEnumerate(ts, ArenaEmptyEnumCb, &enumCount) != TS_RC_Success || enumCount != 0)
+            { TSClose(&ts); Fail(T, "TSEnumerate on empty store unexpected result"); return false; }
+
+        if (TSCheckpoint(ts) != TS_RC_Success)
+            { TSClose(&ts); Fail(T, "TSCheckpoint on empty store failed"); return false; }
+        TSClose(&ts);
+    }
+
+    // Phase 3: reopen the empty-store manifest — must be usable (insert + find must work).
+    {
+        PTS ts = OpenStore(T);
+        if (!ts) { Fail(T, "TSOpen failed"); return false; }
+
+        TSStatusBlock st = {};
+        TSStatus(ts, &st);
+        if (st.totalRecords != 0)
+        {
+            char msg[128];
+            sprintf_s(msg, "expected 0 records after reopen, got %llu", st.totalRecords);
+            TSClose(&ts); Fail(T, msg); return false;
+        }
+
+        TestRec r = { 42, 42 };
+        if (TSInsert(ts, &r) != TS_RC_Success)
+            { TSClose(&ts); Fail(T, "insert into reopened empty store failed"); return false; }
+
+        TestRec key = { 42, 0 }, out = {};
+        if (TSFind(ts, &key, &out) != TS_RC_Success || out.value != 42)
+            { TSClose(&ts); Fail(T, "find after insert into reopened empty store failed"); return false; }
+
+        TSClose(&ts);
+    }
+
+    Pass(T);
+    return true;
+}
+
 // ==================== Main ====================
 int main()
 {
     printf("TieredStore Test Suite\n");
     printf("======================\n\n");
+
+#ifdef TS_USE_BPTREE_ARENA
+    s_testArena = ArenaMemCreate(1024ULL * 1024);
+    if (!s_testArena) { printf("ArenaMemCreate failed\n"); return 1; }
+#endif
 
     printf("Group 1 -- Basic correctness\n");
     TestBasicCRUD();
@@ -1102,12 +1234,21 @@ int main()
     TestIteratorSkipsTombstones();
     TestIteratorNextN();
 
+    printf("\nGroup 9 -- Arena\n");
+    TestArenaSmallStore();
+    TestArenaCloseEmpty();
+
     printf("\n======================\n");
     printf("Results: %d passed, %d failed\n", g_pass, g_fail);
 
     // Clean up working directory
     DeleteDirContents(k_dir);
     RemoveDirectoryA(k_dir);
+
+#ifdef TS_USE_BPTREE_ARENA
+    ArenaMemDestroy(s_testArena);
+    s_testArena = nullptr;
+#endif
 
     return g_fail == 0 ? 0 : 1;
 }

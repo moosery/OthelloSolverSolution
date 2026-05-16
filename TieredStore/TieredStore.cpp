@@ -21,6 +21,14 @@ void TSI_FreeStore(_TieredStore* ts)
     if (!ts) return;
     if (ts->metaStore) { TSClose(&ts->metaStore); }
     if (ts->memTree) { BPFreeTree(ts->memTree, true); ts->memTree = nullptr; }
+#ifdef TS_USE_BPTREE_ARENA
+    if (ts->pMemArena) {
+        if (ts->ownsArena)
+            ArenaMemDestroy(ts->pMemArena);
+        // else: BPFreeTree already called ArenaMemReset; caller manages the struct
+        ts->pMemArena = nullptr;
+    }
+#endif
     if (ts->files)
     {
         for (int i = 0; i < ts->numFiles; i++)
@@ -428,7 +436,7 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
         return TS_RC_IO_Error;
     }
 
-    bool        doSplit = (total > (int64_t)ts->maxRecordsPerLevel);
+    bool        doSplit = (total > (int64_t)ts->maxFileRecords);
     TSFileDesc* desc1   = MakeOutputDesc(ts);
     TSFileDesc* desc2   = doSplit ? MakeOutputDesc(ts) : nullptr;
 
@@ -483,9 +491,16 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
     BPFreeTree(ts->memTree, true);
     ts->memTree = nullptr;
 
-    BPRc brc = BPCreateTree(&ts->memTree, 256, BP_IDX_MAX_DATA_DEFAULT,
+    BPRc brc = BPCreateTree(&ts->memTree, 256,
+#ifndef TS_USE_BPTREE_ARENA
+                            ts->maxMemoryBytes,
+#endif
                             ts->idxSettings, (size_t)ts->numKeyFlds,
-                            (BPIdxFld*)ts->keyFlds, ts->recordSize);
+                            (BPIdxFld*)ts->keyFlds, ts->recordSize
+#ifdef TS_USE_BPTREE_ARENA
+                            , ts->pMemArena
+#endif
+                            );
     if (brc != BP_RC_Success) return TS_RC_Out_Of_Memory;
 
     ts->statMerges++;

@@ -6,7 +6,8 @@ TSRc TSDelete(PTS pTs, const void* keyRecord)
 
     RWLockWriteLock("TSDelete", &pTs->storeLock);
 
-    BPDeleteDataAndFree(pTs->memTree, const_cast<void*>(keyRecord));
+    if (pTs->memTree)
+        BPDeleteDataAndFree(pTs->memTree, const_cast<void*>(keyRecord));
 
     TSRc result = TS_RC_Success;
     for (int i = 0; i < pTs->numFiles; i++)

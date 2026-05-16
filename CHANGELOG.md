@@ -1,5 +1,26 @@
 # Changelog
 
+## [v2.1.0] - 2026-05-16
+
+### Added
+- `Utility` / `ArenaMem`: new bump-pointer arena allocator — `ArenaMemCreate` pre-allocates a contiguous block (malloc + memset); `ArenaMemAlloc` advances an atomic offset for lock-free per-thread allocation; overflow chain falls back to a linked list of extension blocks; `ArenaMemReset` resets the offset to zero for reuse without re-allocating
+- `Utility` / `SysMemInfo.h`: new header-only memory budget helpers — `MemoryMode` enum (`MM_RECOMMENDED`, `MM_USE_MAX`, `MM_SPECIFIED`), `ParseMemorySize()` (parses "34GB", "16000MB", etc.), `CalcMemoryBudget()` (calls `GlobalMemoryStatusEx`; returns 75% of available RAM for recommended, 95% for max, or a specified amount; capped at 95% of total physical RAM)
+- `BPlusTreeArena`: new project — B+ tree variant backed by an `ArenaMem` arena; node allocation draws from the pre-allocated arena instead of `malloc`/`free`, eliminating per-node heap overhead and fragmentation; interface-compatible with `BPlusTree` via compile switch
+- `TieredStore`: optional arena-backed in-memory B+ tree — `TS_USE_BPTREE_ARENA` compile switch; `TSCreate` and `TSOpen` accept an optional `PArenaMem`; when provided, the in-memory B+ tree uses `BPlusTreeArena` and `ArenaMemReset` reclaims all node memory on each flush without individual frees
+- `OthelloSolverCommandLine`: `--use-max-memory`, `--use-recommended-memory` (default), `--max-memory <size>` CLI arguments control the physical arena budget; budget is divided evenly across all six arenas (three board + three move) so total physical allocation equals the budget exactly; budget and per-store sizes printed in the startup and restart banners
+- `OthelloSolverMFCandCUDA` / `SolverController`: `SCSetMemoryMode()` — sets memory mode and optional byte count before a run starts; `s_shardArenaBytes` is computed per-run from `CalcMemoryBudget()` divided by `NUM_SHARDS`
+
+### Changed
+- `Utility` / `ArenaMemReset`: removed bulk `memset` of used bytes on reset — was ~70 ms overhead per large level; B+ tree nodes are fully initialized before first read so the zero-fill is not needed
+- `OthelloSolverCommandLine`: level progress output is now a columnar table — a header row (`Lv`, `BoardsIn`, `NewBoards`, `Dups`, `Mvs`, `Ends`, `Pred(s)`, `Tm(s)`, `ns/brd`, `Nxt(s)`, `DateTime`) is printed once before the BFS loop; each level line is plain aligned values with no `field=` labels; `Pred(s)` and `Tm(s)` are now adjacent columns; levels with no prediction yet show `---`
+- `OthelloSolverCommandLine`: final report table column order updated to match — `Pred(s)` now immediately precedes `Tm(s)`
+- `OthelloBasics` / `BOARD`: added explicit `_pad1[3]` (6 bytes, offsets 18–23) and `_pad2[3]` (6 bytes, offsets 58–63) fields; size comment corrected to 64 bytes; `BoardFlip`, `BoardMirrorVerticalAxis`, and `BoardRotate90DegreesRight` explicitly zero both pad fields
+- `OthelloBasics` / `MOVE`: added explicit `_pad1` (4 bytes, offsets 20–23) and `_pad2[3]` (6 bytes, offsets 42–47) fields; size comment corrected to 48 bytes
+- `Utility` / `RWLock`: added explicit `_pad[7]` field; zeroed in `RWLockInit`
+- `BPlusTree` / `BPIterator`: added explicit `_pad[7]` field; zeroed in `BPIterateStart` and `BPIterateStartFrom`
+
+---
+
 ## [v2.0.1] - 2026-05-15
 
 ### Changed

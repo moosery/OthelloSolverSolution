@@ -53,12 +53,19 @@ static TSRc TSI_OpenStore(
     const TSKeyFld* keyFlds,
     int             numKeyFlds,
     size_t          idxSettings,
+#ifdef TS_USE_BPTREE_ARENA
+    PArenaMem       pArena,
+    bool            ownsArena,
+#endif
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
     bool            openMetaStore)
 {
     if (!manifestPath || !keyFlds || numKeyFlds < 1 || numKeyFlds > TS_MAX_KEY_FLDS || !ppTs)
         return TS_RC_Invalid_Arg;
+#ifdef TS_USE_BPTREE_ARENA
+    if (!pArena) return TS_RC_Invalid_Arg;
+#endif
 
     FILE* f = nullptr;
     if (fopen_s(&f, manifestPath, "rb") != 0 || !f)
@@ -87,12 +94,15 @@ static TSRc TSI_OpenStore(
     strncpy_s(ts->baseName,     hdr.baseName, _TRUNCATE);
     RWLockInit(ts->baseName, "TSOpen", &ts->storeLock);
 
-    ts->recordSize         = (int)hdr.recordSize;
-    ts->keySize            = (int)hdr.keySize;
-    ts->maxRecordsPerLevel = (int)hdr.maxRecordsPerLevel;
-    ts->roundRobinNext     = (int)hdr.roundRobinNext;
-    ts->nextFileId         = hdr.nextFileId;
-    ts->numDirs            = (int)hdr.numDirs;
+    ts->recordSize       = (int)hdr.recordSize;
+    ts->keySize          = (int)hdr.keySize;
+    ts->maxMemoryBytes   = hdr.maxMemoryBytes;
+    ts->maxFileBytes     = hdr.maxFileBytes;
+    ts->maxMemoryRecords = hdr.maxMemoryBytes / (uint64_t)hdr.recordSize;
+    ts->maxFileRecords   = hdr.maxFileBytes   / (uint64_t)hdr.recordSize;
+    ts->roundRobinNext   = (int)hdr.roundRobinNext;
+    ts->nextFileId       = hdr.nextFileId;
+    ts->numDirs          = (int)hdr.numDirs;
 
     ts->numKeyFlds  = numKeyFlds;
     ts->idxSettings = idxSettings;
@@ -162,8 +172,19 @@ static TSRc TSI_OpenStore(
 
         TSKeyFld metaFld = { 0, sizeof(uint64_t), TS_DATATYPE_UNUM_8BYTE };
         PTS  metaTs = nullptr;
+        int  metaRecordSize = (int)sizeof(TSManifestFileEntry) + 2 * ts->recordSize;
+
+#ifdef TS_USE_BPTREE_ARENA
+        size_t metaNodeOverhead = (TS_MANIFEST_MEMORY_BYTES / (size_t)metaRecordSize) * 10;
+        if (metaNodeOverhead < 65536) metaNodeOverhead = 65536;
+        PArenaMem metaArena = ArenaMemCreate(TS_MANIFEST_MEMORY_BYTES + metaNodeOverhead);
+        if (!metaArena) { TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
+        TSRc mrc = TSI_OpenStore(metaPath, &metaFld, 1, TS_IDX_SETTING_DEFAULT,
+                                 metaArena, true, nullptr, &metaTs, false);
+#else
         TSRc mrc = TSI_OpenStore(metaPath, &metaFld, 1, TS_IDX_SETTING_DEFAULT,
                                  nullptr, &metaTs, false);
+#endif
         if (mrc != TS_RC_Success)
         {
             TS_DPRINT("TSOpen: meta-store open failed rc=%d", (int)mrc);
@@ -183,8 +204,16 @@ static TSRc TSI_OpenStore(
         TS_DPRINT("TSOpen: rebuilt %d files from meta-store", ts->numFiles);
     }
 
-    BPRc brc = BPCreateTree(&ts->memTree, 256, BP_IDX_MAX_DATA_DEFAULT,
+#ifdef TS_USE_BPTREE_ARENA
+    ts->pMemArena = pArena;
+    ts->ownsArena = ownsArena;
+    BPRc brc = BPCreateTree(&ts->memTree, 256,
+                            idxSettings, (size_t)numKeyFlds, (BPIdxFld*)keyFlds, ts->recordSize,
+                            pArena);
+#else
+    BPRc brc = BPCreateTree(&ts->memTree, 256, ts->maxMemoryBytes,
                             idxSettings, (size_t)numKeyFlds, (BPIdxFld*)keyFlds, ts->recordSize);
+#endif
     if (brc != BP_RC_Success)
     {
         TS_DPRINT("TSOpen: BPCreateTree failed rc=%d", (int)brc);
@@ -197,6 +226,23 @@ static TSRc TSI_OpenStore(
     return TS_RC_Success;
 }
 
+#ifdef TS_USE_BPTREE_ARENA
+TSRc TSOpen(
+    const char*     dir0,
+    const TSKeyFld* keyFlds,
+    int             numKeyFlds,
+    size_t          idxSettings,
+    PArenaMem       pArena,
+    TS_MERGE_FN     mergeFn,
+    PTS*            ppTs)
+{
+    if (!dir0) return TS_RC_Invalid_Arg;
+    char manifestPath[MAX_PATH];
+    sprintf_s(manifestPath, MAX_PATH, "%s\\manifest.tsm", dir0);
+    return TSI_OpenStore(manifestPath, keyFlds, numKeyFlds, idxSettings,
+                         pArena, false, mergeFn, ppTs, true);
+}
+#else
 TSRc TSOpen(
     const char*     dir0,
     const TSKeyFld* keyFlds,
@@ -208,5 +254,7 @@ TSRc TSOpen(
     if (!dir0) return TS_RC_Invalid_Arg;
     char manifestPath[MAX_PATH];
     sprintf_s(manifestPath, MAX_PATH, "%s\\manifest.tsm", dir0);
-    return TSI_OpenStore(manifestPath, keyFlds, numKeyFlds, idxSettings, mergeFn, ppTs, true);
+    return TSI_OpenStore(manifestPath, keyFlds, numKeyFlds, idxSettings,
+                         mergeFn, ppTs, true);
 }
+#endif

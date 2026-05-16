@@ -10,10 +10,10 @@ TSRc TSStatus(PTS pTs, TSStatusBlock* pStatus)
     memset(pStatus, 0, sizeof(*pStatus));
 
     // In-memory tree
-    uint64_t inMem = BPGetDataCnt(pTs->memTree);
+    uint64_t inMem = pTs->memTree ? BPGetDataCnt(pTs->memTree) : 0;
     pStatus->inMemoryRecords = inMem;
-    pStatus->inMemoryFillPct = (pTs->maxRecordsPerLevel > 0)
-                               ? (inMem * 100 / (uint64_t)pTs->maxRecordsPerLevel)
+    pStatus->inMemoryFillPct = (pTs->maxMemoryRecords > 0)
+                               ? (inMem * 100 / pTs->maxMemoryRecords)
                                : 0;
 
     // Per-file aggregates

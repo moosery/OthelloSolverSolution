@@ -33,7 +33,7 @@ TSRc TSIterOpen(PTS pTs, PTSI* ppIter)
     RWLockWriteLock("TSIterOpen", &pTs->storeLock);
 
     // Flush in-memory tree so the snapshot is complete.
-    if (BPGetDataCnt(pTs->memTree) > 0)
+    if (pTs->memTree && BPGetDataCnt(pTs->memTree) > 0)
     {
         TSRc fr = TSI_FlushMemTree(pTs);
         if (fr != TS_RC_Success)

@@ -6,6 +6,7 @@
 typedef struct _RWLock
 {
 	char lockName[LOCKNAME_SIZE + 1];
+	char _pad[7];                       // explicit padding: lockName[33] ends at byte 32; pRwLock needs 8-byte alignment at byte 40
 	std::shared_mutex *pRwLock;
 } RWLock, * PRWLock;
 

@@ -3,9 +3,11 @@
 void BoardFlip(PBOARD pBoard, PBOARD pResult)
 {
     pResult->usBoardInfo = pBoard->usBoardInfo;
+    pResult->_pad1[0] = pResult->_pad1[1] = pResult->_pad1[2] = 0;
     pResult->ullPossibleMoves = 0;
     pResult->ullCellColors = 0;
     pResult->ullCellsInUse = 0;
+    pResult->_pad2[0] = pResult->_pad2[1] = pResult->_pad2[2] = 0;
 
     if (GETBOARDNEXTPLAYER(pBoard) == BLACK)
     {

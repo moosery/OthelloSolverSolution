@@ -6,4 +6,5 @@
 #include "FileAndDirUtils.h"
 #include "Mem.h"
 #include "RWLock.h"
+#include "SysMemInfo.h"
 #include "ThreadPool.h"

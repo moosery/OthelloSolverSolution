@@ -5,6 +5,7 @@
   </Configurations>
   <Project Path="BoardsToProcess/BoardsToProcess.vcxproj" Id="dee9fce2-2b64-4335-868d-42162868edbd" />
   <Project Path="BPlusTree/BPlusTree.vcxproj" Id="dbe8b48d-fd07-4534-acdf-7c4368845aae" />
+  <Project Path="BPlusTreeArena/BPlusTreeArena.vcxproj" Id="77f4ffcc-e592-4e1a-adad-b202114be622" />
   <Project Path="BPlusTreeTester/BPlusTreeTester.vcxproj" Id="2911d3c9-f76c-407b-a9b2-cb13cf53c340" />
   <Project Path="BPlusTreeTester2/BPlusTreeTester2.vcxproj" Id="db0485a8-9ca8-4c55-b994-3e7346e5a9c0" />
   <Project Path="OthelloBasics/OthelloBasics.vcxproj" Id="2cc52c70-80f3-4700-9e46-0f6b1c077667" />

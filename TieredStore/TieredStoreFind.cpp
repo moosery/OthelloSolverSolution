@@ -10,7 +10,7 @@ TSRc TSFind(PTS pTs, const void* keyRecord, void* outRecord)
 
     TSRc result = TS_RC_Not_Found;
 
-    if (BPFindEqualKey(pTs->memTree, const_cast<void*>(keyRecord), outRecord) == BP_RC_Success)
+    if (pTs->memTree && BPFindEqualKey(pTs->memTree, const_cast<void*>(keyRecord), outRecord) == BP_RC_Success)
     {
         result = TS_RC_Success;
     }

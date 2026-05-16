@@ -1,6 +1,7 @@
 #pragma once
 #include <stdio.h>
 #include "Mem.h"
+#include <ArenaMem.h>
 #include "RWLock.h"
 #include "Error.h"
 
@@ -111,6 +112,7 @@ typedef struct _BPIdxInfo
 typedef struct _BPTree
 {
 	RWLock		rwTreeLock;
+    PArenaMem   pArena;								/* The memory arena for this tree				*/
 	size_t		stDataSize;							/* The size of the user data area				*/
 	BPLL		llOrder;							/* Number of pointers (1 more than keys)        */
 	BPLL		llMinKeys;							/* Min number of keys per node                  */
@@ -133,12 +135,12 @@ void BPIdxInfoInit(PBPIdxInfo pInfo, size_t optionalSettings);
 BPRc BPIdxInfoAddFld(PBPIdxInfo pInfo, size_t stDataType, size_t stFldSize, size_t stFldOffset);
 
 
-void BPFreeNode(PBPIdxInfo pIdxInfo, PBPNode pNode);
-void BPFreeNodeButNotData(PBPIdxInfo pIdxInfo, PBPNode pNode);
+void BPFreeNode(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pNode);
+void BPFreeNodeButNotData(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pNode);
 BPRc BPAllocateNode(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode* ppNode, size_t nodeType);
 
 void BPFreeTree(PBPTree pTree, bool freeData);
-BPRc BPCreateTree(PBPTree* ppTree, BPLL llOrder, size_t maxMemoryBytes, size_t stIdxSettings, size_t stNumFlds, BPIdxFld idxFlds[], size_t stDataSize);
+BPRc BPCreateTree(PBPTree* ppTree, BPLL llOrder, size_t stIdxSettings, size_t stNumFlds, BPIdxFld idxFlds[], size_t stDataSize, PArenaMem pArena = nullptr);
 
 void BPPrintTree(FILE* fpOut, PBPTree pTree);
 void BPPrintNode(FILE* fpOut, PBPTree pTree, PBPNode pNode);

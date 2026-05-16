@@ -42,6 +42,12 @@
     <ClInclude Include="Utility.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ArenaMem.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SysMemInfo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BinSearchLE.cpp">
@@ -69,6 +75,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="BinSearchFile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ArenaMem.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

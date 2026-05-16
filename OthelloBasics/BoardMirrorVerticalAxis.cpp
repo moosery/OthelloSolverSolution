@@ -26,9 +26,11 @@ static unsigned long long mirrorBytewise(unsigned long long x)
 void BoardMirrorVerticalAxis(PBOARD pBoard, PBOARD pResult)
 {
     pResult->usBoardInfo      = pBoard->usBoardInfo;
+    pResult->_pad1[0] = pResult->_pad1[1] = pResult->_pad1[2] = 0;
     pResult->ullCellsInUse    = mirrorBytewise(pBoard->ullCellsInUse);
     pResult->ullCellColors    = mirrorBytewise(pBoard->ullCellColors);
     pResult->ullPossibleMoves = mirrorBytewise(pBoard->ullPossibleMoves);
+    pResult->_pad2[0] = pResult->_pad2[1] = pResult->_pad2[2] = 0;
 }
 
 #else
@@ -39,7 +41,9 @@ void BoardMirrorVerticalAxis(PBOARD pBoard, PBOARD pResult)
     int endIdx = GETBOARDENDIDX(pBoard);
 
     pResult->usBoardInfo = pBoard->usBoardInfo;
+    pResult->_pad1[0] = pResult->_pad1[1] = pResult->_pad1[2] = 0;
     pResult->ullPossibleMoves = 0;
+    pResult->_pad2[0] = pResult->_pad2[1] = pResult->_pad2[2] = 0;
 
     for (int row = startIdx; row < endIdx; row++)
     {
