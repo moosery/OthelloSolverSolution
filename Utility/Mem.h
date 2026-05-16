@@ -6,5 +6,5 @@ void MemFree(void* pPtr);
 size_t MemSize();
 void MemStatsPrint(FILE *fpOut);
 void MemCheck(FILE *fpOut, const char *pszStr);
-void RMemCpy(void* pDest, void* pSrc, size_t numBytes);
+
 

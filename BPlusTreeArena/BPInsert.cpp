@@ -107,7 +107,7 @@ BPRc BPInsertIntoNotFullNode(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pNode, 
 		RWLockWriteUnlock("BPInsertIntoNotFullNode-idx", &pIdxInfo->rwIdxLock);
 
 		/* Now copy things down.  Remember, we know we can do this since it has space! */
-		RMemCpy(&(pNode->ppDataPtrArray[idxToInsert + 1]), &(pNode->ppDataPtrArray[idxToInsert]), numToMoveDown * sizeof(char*));
+		memmove(&(pNode->ppDataPtrArray[idxToInsert + 1]), &(pNode->ppDataPtrArray[idxToInsert]), numToMoveDown * sizeof(char*));
 		pNode->ppDataPtrArray[idxToInsert] = (char*)pData;
 		(pNode->llNumInNode)++;
 
@@ -145,9 +145,9 @@ BPRc BPInsertIntoNotFullNode(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pNode, 
 
 				idxToInsert = (-idxToInsert) - 1;
 				BPLL numtoCopyDown = pNode->llNumInNode - idxToInsert;
-				RMemCpy(&(pNode->ppDataPtrArray[idxToInsert + 1]), &(pNode->ppDataPtrArray[idxToInsert]), numtoCopyDown * sizeof(char*));
+				memmove(&(pNode->ppDataPtrArray[idxToInsert + 1]), &(pNode->ppDataPtrArray[idxToInsert]), numtoCopyDown * sizeof(char*));
 				pNode->ppDataPtrArray[idxToInsert] = (char *) pKeyToStore;
-				RMemCpy(&(pNode->ppChildArray[idxToInsert + 2]), &(pNode->ppChildArray[idxToInsert+1]), numtoCopyDown * sizeof(PBPNode));
+				memmove(&(pNode->ppChildArray[idxToInsert + 2]), &(pNode->ppChildArray[idxToInsert+1]), numtoCopyDown * sizeof(PBPNode));
 				pNode->ppChildArray[idxToInsert + 1] = pNewNode;
 				(pNode->llNumInNode)++;
 

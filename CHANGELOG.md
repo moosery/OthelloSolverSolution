@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2.1.1] - 2026-05-16
+
+### Fixed
+- `BPlusTree` / `BPlusTreeArena`: replaced all `RMemCpy` calls (right-shift overlapping copies in insert path) with `memmove`; replaced all same-array left-shift `memcpy` calls in delete path (`BPDelete.cpp`) with `memmove` — both were undefined behaviour per C standard even though MSVC happened not to corrupt data in practice
+- `Utility` / `Mem.h` / `Mem.cpp`: removed `RMemCpy` declaration and definition entirely; standard `memmove` handles both shift directions correctly
+
+---
+
 ## [v2.1.0] - 2026-05-16
 
 ### Added

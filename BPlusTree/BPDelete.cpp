@@ -37,7 +37,7 @@ BPRc BPRemoveFromNonUnderflowLeaf(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pL
 	/* Otherwise simply remove the data.  */
 	BPLL numToCopyDown = (pLeafNode->llNumInNode - idxOfInterest) - 1;
 
-	memcpy(&(pLeafNode->ppDataPtrArray[idxOfInterest]), &(pLeafNode->ppDataPtrArray[idxOfInterest + 1]), numToCopyDown * sizeof(char*));
+	memmove(&(pLeafNode->ppDataPtrArray[idxOfInterest]), &(pLeafNode->ppDataPtrArray[idxOfInterest + 1]), numToCopyDown * sizeof(char*));
 	(pLeafNode->llNumInNode)--;
 
 	if (idxOfInterest == 0)
@@ -131,8 +131,8 @@ BPRc BPMergeOrStealChildKeyNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pPa
 		(pRightChild->llNumInNode)--;
 
 		/* Now shift EVERYTHING down in the right key node */
-		memcpy(&(pRightChild->ppDataPtrArray[0]), &(pRightChild->ppDataPtrArray[1]), pRightChild->llNumInNode * sizeof(char*));
-		memcpy(&(pRightChild->ppChildArray[0]), &(pRightChild->ppChildArray[1]), (pRightChild->llNumInNode+1) * sizeof(PBPNode));
+		memmove(&(pRightChild->ppDataPtrArray[0]), &(pRightChild->ppDataPtrArray[1]), pRightChild->llNumInNode * sizeof(char*));
+		memmove(&(pRightChild->ppChildArray[0]), &(pRightChild->ppChildArray[1]), (pRightChild->llNumInNode+1) * sizeof(PBPNode));
 
 		/* Gotta fix the parentage of the child moved */
 		RWLockWriteLock("BPMergeOrStealChildKeyNodes-childchild for parentage", &(pChild->ppChildArray[pChild->llNumInNode]->rwNodeLock));
@@ -169,8 +169,8 @@ BPRc BPMergeOrStealChildKeyNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pPa
 		}
 #endif
 		/* We gotta shift everything to the right in the child. */
-		RMemCpy(&(pChild->ppDataPtrArray[1]), &(pChild->ppDataPtrArray[0]), pChild->llNumInNode * sizeof(char*));
-		RMemCpy(&(pChild->ppChildArray[1]), &(pChild->ppChildArray[0]), (pChild->llNumInNode+1) * sizeof(PBPNode));
+		memmove(&(pChild->ppDataPtrArray[1]), &(pChild->ppDataPtrArray[0]), pChild->llNumInNode * sizeof(char*));
+		memmove(&(pChild->ppChildArray[1]), &(pChild->ppChildArray[0]), (pChild->llNumInNode+1) * sizeof(PBPNode));
 
 		/* Add the parent's key value to the child */
 		pChild->ppDataPtrArray[0] = pParent->ppDataPtrArray[childTraversalIdx - 1];
@@ -247,8 +247,8 @@ BPRc BPMergeOrStealChildKeyNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pPa
 			(pLeftChild->llNumInNode) += (1 + pChild->llNumInNode);
 
 			/* Now nuke the entry from the parent */
-			memcpy(&(pParent->ppDataPtrArray[childTraversalIdx - 1]), &(pParent->ppDataPtrArray[childTraversalIdx]), ((pParent->llNumInNode - childTraversalIdx)) * sizeof(char*));
-			memcpy(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx)) * sizeof(PBPNode));
+			memmove(&(pParent->ppDataPtrArray[childTraversalIdx - 1]), &(pParent->ppDataPtrArray[childTraversalIdx]), ((pParent->llNumInNode - childTraversalIdx)) * sizeof(char*));
+			memmove(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx)) * sizeof(PBPNode));
 			(pParent->llNumInNode)--;
 
 			/* Fix left/right sibling ptrs */
@@ -320,15 +320,15 @@ BPRc BPMergeOrStealChildKeyNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pPa
 		{
 			/* We will merge the child into the right node. */
 			/* Move the contents of the right node all the way down! */
-			RMemCpy(&(pRightChild->ppDataPtrArray[pChild->llNumInNode + 1]), &(pRightChild->ppDataPtrArray[0]), pRightChild->llNumInNode * sizeof(char*));
-			RMemCpy(&(pRightChild->ppChildArray[pChild->llNumInNode + 1]), &(pRightChild->ppChildArray[0]), (pRightChild->llNumInNode + 1) * sizeof(PBPNode));
+			memmove(&(pRightChild->ppDataPtrArray[pChild->llNumInNode + 1]), &(pRightChild->ppDataPtrArray[0]), pRightChild->llNumInNode * sizeof(char*));
+			memmove(&(pRightChild->ppChildArray[pChild->llNumInNode + 1]), &(pRightChild->ppChildArray[0]), (pRightChild->llNumInNode + 1) * sizeof(PBPNode));
 
 			/* Now copy the parent's key into the llNumInNode position */
 			pRightChild->ppDataPtrArray[pChild->llNumInNode] = pParent->ppDataPtrArray[childTraversalIdx];
 			/* Move the contents of the parent down. */
-			memcpy(&(pParent->ppDataPtrArray[childTraversalIdx]), &(pParent->ppDataPtrArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx) - 1) * sizeof(char*));
+			memmove(&(pParent->ppDataPtrArray[childTraversalIdx]), &(pParent->ppDataPtrArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx) - 1) * sizeof(char*));
 			/* We need to keep the right child's ptr in the parent and destroy the child's ptr ... so copy stuff down there as well */
-			memcpy(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx)) * sizeof(PBPNode));
+			memmove(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx)) * sizeof(PBPNode));
 
 			(pParent->llNumInNode)--;
 
@@ -416,7 +416,7 @@ BPRc BPMergeOrStealChildLeafNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pP
 		/* Increase the child's count */
 		(pChild->llNumInNode)++;
 		/* Now copy down the contents of the right child */
-		memcpy(&(pRightChild->ppDataPtrArray[0]), &(pRightChild->ppDataPtrArray[1]), (pRightChild->llNumInNode - 1) * sizeof(char*));
+		memmove(&(pRightChild->ppDataPtrArray[0]), &(pRightChild->ppDataPtrArray[1]), (pRightChild->llNumInNode - 1) * sizeof(char*));
 		/* Remove one from the right child */
 		(pRightChild->llNumInNode)--;
 
@@ -456,7 +456,7 @@ BPRc BPMergeOrStealChildLeafNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pP
 		}
 #endif
 		/* We gotta shift everything to the right in the child. */
-		RMemCpy(&(pChild->ppDataPtrArray[1]), &(pChild->ppDataPtrArray[0]), pChild->llNumInNode * sizeof(char*));
+		memmove(&(pChild->ppDataPtrArray[1]), &(pChild->ppDataPtrArray[0]), pChild->llNumInNode * sizeof(char*));
 		/* Add the left's last key value to the child */
 		pChild->ppDataPtrArray[0] = pLeftChild->ppDataPtrArray[pLeftChild->llNumInNode - 1];
 		/* Increase the child's count */
@@ -532,8 +532,8 @@ BPRc BPMergeOrStealChildLeafNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pP
 				pRightChild->pLeftSibling = pLeftChild;
 
 			/* Remove the child from the parent */
-			memcpy(&(pParent->ppDataPtrArray[childTraversalIdx - 1]), &(pParent->ppDataPtrArray[childTraversalIdx]), (pParent->llNumInNode - childTraversalIdx) * sizeof(char*));
-			memcpy(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), (pParent->llNumInNode - childTraversalIdx) * sizeof(PBPNode));
+			memmove(&(pParent->ppDataPtrArray[childTraversalIdx - 1]), &(pParent->ppDataPtrArray[childTraversalIdx]), (pParent->llNumInNode - childTraversalIdx) * sizeof(char*));
+			memmove(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), (pParent->llNumInNode - childTraversalIdx) * sizeof(PBPNode));
 
 			/* Decrement the parent count */
 			(pParent->llNumInNode)--;
@@ -592,7 +592,7 @@ BPRc BPMergeOrStealChildLeafNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pP
 		{
 			/* We will merge the child into the right node. */
 			/* Move the contents of the right node all the way down! */
-			RMemCpy(&(pRightChild->ppDataPtrArray[pChild->llNumInNode]), &(pRightChild->ppDataPtrArray[0]), pRightChild->llNumInNode * sizeof(char*));
+			memmove(&(pRightChild->ppDataPtrArray[pChild->llNumInNode]), &(pRightChild->ppDataPtrArray[0]), pRightChild->llNumInNode * sizeof(char*));
 			/* Now copy all the left junk into the right junk */
 			memcpy(&(pRightChild->ppDataPtrArray[0]), &(pChild->ppDataPtrArray[0]), (pChild->llNumInNode) * sizeof(char*));
 			/* Bump the size of the right child */
@@ -606,8 +606,8 @@ BPRc BPMergeOrStealChildLeafNodes(PBPTree pTree, PBPIdxInfo pIdxInfo, PBPNode pP
 				pLeftChild->pRightSibling = pRightChild;
 
 			/* Remove the child from the parent */
-			memcpy(&(pParent->ppDataPtrArray[childTraversalIdx]), &(pParent->ppDataPtrArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx) - 1) * sizeof(char*));
-			memcpy(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), (pParent->llNumInNode - childTraversalIdx) * sizeof(PBPNode));
+			memmove(&(pParent->ppDataPtrArray[childTraversalIdx]), &(pParent->ppDataPtrArray[childTraversalIdx + 1]), ((pParent->llNumInNode - childTraversalIdx) - 1) * sizeof(char*));
+			memmove(&(pParent->ppChildArray[childTraversalIdx]), &(pParent->ppChildArray[childTraversalIdx + 1]), (pParent->llNumInNode - childTraversalIdx) * sizeof(PBPNode));
 
 			/* Decrement the parent count */
 			(pParent->llNumInNode)--;

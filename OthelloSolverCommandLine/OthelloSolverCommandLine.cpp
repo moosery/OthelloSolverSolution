@@ -22,7 +22,7 @@
 #  include <ArenaMem.h>
 #endif
 
-#define APP_VERSION "2.1.0"
+#define APP_VERSION "2.1.1"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 15 * 1024 * 1024 * 1024ULL; // 15GB per disk file
 constexpr auto MAX_MEMORY_PER_STORE             = 12ULL * 1024 * 1024 * 1024;   // 12GB in-memory flush threshold (3 stores x 12GB = 36GB peak)

@@ -40,19 +40,7 @@ typedef struct _statsInfo
 	size_t numAllocated;
 }STATSINFO, * PSTATSINFO;
 
-void RMemCpy(void* pDest, void* pSrc, size_t numBytes)
-{
-	char* pcD = (((char*)pDest) + (numBytes - 1));
-	char* pcS = (((char*)pSrc) + (numBytes - 1));
 
-	while (numBytes > 0)
-	{
-		*pcD = *pcS;
-		numBytes--;
-		pcD--;
-		pcS--;
-	}
-}
 void MemStatsPrint(FILE *fpOut)
 {
 #ifdef NOTRACK
