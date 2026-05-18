@@ -5,6 +5,25 @@
 #include <stdint.h>
 #include <vector>
 #include <algorithm>
+#include <io.h>         // _open_osfhandle, _fdopen, _O_RDONLY
+
+// Open a file with FILE_FLAG_SEQUENTIAL_SCAN so Windows prefetches aggressively.
+// Use only for large sequential-scan paths (merge input/output); not for random-access fopen.
+static FILE* OpenSeq(const char* path, bool forWrite)
+{
+    DWORD access = forWrite ? GENERIC_WRITE              : GENERIC_READ;
+    DWORD share  = forWrite ? 0                          : FILE_SHARE_READ;
+    DWORD creat  = forWrite ? CREATE_ALWAYS              : OPEN_EXISTING;
+    DWORD flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+    HANDLE h = CreateFileA(path, access, share, nullptr, creat, flags, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return nullptr;
+    int osfd = _open_osfhandle((intptr_t)h, forWrite ? 0 : _O_RDONLY);
+    if (osfd == -1) { CloseHandle(h); return nullptr; }
+    FILE* f = _fdopen(osfd, forWrite ? "wb" : "rb");
+    if (!f) { _close(osfd); return nullptr; }
+    setvbuf(f, nullptr, _IOFBF, 4 * 1024 * 1024);
+    return f;
+}
 
 // ==================== File descriptor / store cleanup ====================
 
@@ -207,9 +226,8 @@ static bool InitCursorFile(MergeCursor* c, _TieredStore* ts, const TSFileDesc* d
     c->current.resize((size_t)ts->recordSize);
     c->slotBuf.resize((size_t)TS_SLOT_SIZE(ts->recordSize));
 
-    if (fopen_s(&c->file, desc->path, "rb") != 0 || !c->file)
-        return false;
-    setvbuf(c->file, nullptr, _IOFBF, 4 * 1024 * 1024);
+    c->file = OpenSeq(desc->path, false);
+    if (!c->file) return false;
 
     // Slots begin at byte 0 — no header to skip.
     AdvanceCursor(c);
@@ -314,10 +332,8 @@ static TSRc DoMerge(_TieredStore*              ts,
 
     for (int i = 0; i < numOut && openOk; i++)
     {
-        if (fopen_s(&files[i], outDescs[i]->path, "wb") != 0 || !files[i])
-            openOk = false;
-        else
-            setvbuf(files[i], nullptr, _IOFBF, 4 * 1024 * 1024);
+        files[i] = OpenSeq(outDescs[i]->path, true);
+        if (!files[i]) openOk = false;
     }
     if (!openOk)
     {

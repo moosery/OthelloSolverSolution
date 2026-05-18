@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.3.7] - 2026-05-18
+
+### Changed
+- `TieredStoreHybrid`: `FILE_FLAG_SEQUENTIAL_SCAN` on all merge file opens — added `OpenSeq()` helper that uses `CreateFileA` + `_open_osfhandle` + `_fdopen` with `FILE_FLAG_SEQUENTIAL_SCAN`; tells Windows to prefetch aggressively for sequential reads and deprioritize caching of written pages; used for all cursor input files (`InitCursorFile`) and all merge output files (`DoMerge`); random-access paths (`TSI_DeleteFromFile`, `TSI_UpdateInFile`, binary search) continue to use plain `fopen_s`; `setvbuf(4 MB)` is now applied inside `OpenSeq` so both hints are always paired
+
+---
+
 ## [v2.3.6] - 2026-05-18
 
 ### Changed
