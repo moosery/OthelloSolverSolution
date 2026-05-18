@@ -42,6 +42,8 @@ void TSI_FreeStore(_TieredStore* ts)
 
     if (ts->metaStore) { TSClose(&ts->metaStore); }
     if (ts->memTree) { BPFreeTree(ts->memTree, true); ts->memTree = nullptr; }
+    if (ts->pMemArena && ts->pMemArena != ts->externalArena)
+        ArenaMemDestroy(ts->pMemArena);
     ts->pMemArena = nullptr;
     if (ts->files)
     {
