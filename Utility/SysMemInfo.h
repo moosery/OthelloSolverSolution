@@ -19,22 +19,29 @@ inline uint64_t ParseMemorySize(const char* s)
     return n;
 }
 
-// Returns the total memory budget for arenas based on available physical RAM.
-// Caps at 95% of total physical RAM regardless of mode or specified value.
+// Fraction of free (available) physical RAM to use per memory mode.
+// Adjust these compile-time constants to tune memory pressure.
+static constexpr double BUDGET_PCT_MAX         = 0.90;  // leave ~10% of free RAM untouched
+static constexpr double BUDGET_PCT_RECOMMENDED = 0.75;  // leave ~25% of free RAM untouched
+static constexpr double BUDGET_PCT_CAP         = 0.90;  // hard ceiling: never exceed this
+
+// Returns the total memory budget based on currently available (free) physical RAM.
+// All modes are relative to free RAM, so the result adapts to whatever else is running.
+// MM_SPECIFIED is still capped at BUDGET_PCT_CAP of free RAM to prevent OOM.
 inline uint64_t CalcMemoryBudget(MemoryMode mode, uint64_t specifiedBytes = 0)
 {
     MEMORYSTATUSEX ms = {};
     ms.dwLength = sizeof(ms);
     GlobalMemoryStatusEx(&ms);
 
-    uint64_t cap = (uint64_t)(ms.ullTotalPhys * 0.95);
+    uint64_t cap = (uint64_t)(ms.ullAvailPhys * BUDGET_PCT_CAP);
 
     uint64_t budget;
     switch (mode)
     {
-    case MM_USE_MAX:   budget = (uint64_t)(ms.ullAvailPhys * 0.95); break;
-    case MM_SPECIFIED: budget = specifiedBytes;                      break;
-    default:           budget = (uint64_t)(ms.ullAvailPhys * 0.75); break;
+    case MM_USE_MAX:   budget = (uint64_t)(ms.ullAvailPhys * BUDGET_PCT_MAX);         break;
+    case MM_SPECIFIED: budget = specifiedBytes;                                         break;
+    default:           budget = (uint64_t)(ms.ullAvailPhys * BUDGET_PCT_RECOMMENDED);  break;
     }
 
     if (budget > cap) budget = cap;

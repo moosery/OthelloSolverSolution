@@ -31,7 +31,11 @@ void TSI_FreeStore(_TieredStore* ts)
 
     // bgTree should be NULL after the wait, but guard defensively.
     if (ts->bgTree) { BPFreeTree(ts->bgTree, true); ts->bgTree = nullptr; }
-    if (ts->spareArena) { ArenaMemDestroy(ts->spareArena); ts->spareArena = nullptr; }
+    // Only destroy the spare if it was dynamically allocated by this store.
+    // If it equals externalArena, it was provided by the caller and must not be freed here.
+    if (ts->spareArena && ts->spareArena != ts->externalArena)
+        ArenaMemDestroy(ts->spareArena);
+    ts->spareArena = nullptr;
 
     delete ts->bgCV;    ts->bgCV    = nullptr;
     delete ts->bgMutex; ts->bgMutex = nullptr;
@@ -681,7 +685,7 @@ static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
     {
         if (!ts->spareArena)
             ts->spareArena = job->arena;
-        else
+        else if (job->arena != ts->externalArena)
             ArenaMemDestroy(job->arena);
     }
 
@@ -720,7 +724,7 @@ void TSI_TriggerBgFlush(_TieredStore* ts)
     if (ts->pMemArena)
     {
         newArena       = ts->spareArena ? ts->spareArena
-                                        : ArenaMemCreate(ts->maxMemoryBytes);
+                                        : ArenaMemCreate(ArenaMemSize(ts->pMemArena));
         ts->spareArena = nullptr;
     }
     ts->pMemArena = newArena;

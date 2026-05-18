@@ -18,14 +18,11 @@
 #include "SolverWorker.h"
 #include <OthelloBasics.h>
 #include <TierdStore.h>
-#ifdef TS_USE_BPTREE_ARENA
-#  include <ArenaMem.h>
-#endif
+#include <ArenaMem.h>
 
 #define APP_VERSION "2.3.0"
 
-constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 15 * 1024 * 1024 * 1024ULL; // 15GB per disk file
-constexpr auto MAX_MEMORY_PER_STORE             = 12ULL * 1024 * 1024 * 1024;   // 12GB in-memory flush threshold (3 stores x 12GB = 36GB peak)
+constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
 typedef struct SolverConfig
 {
@@ -36,7 +33,10 @@ typedef struct SolverConfig
     bool        restart;
     MemoryMode  memMode;
     uint64_t    specifiedMemBytes;
-    uint64_t    memBudgetBytes;     // computed in main() after arena sizing
+    uint64_t    memBudgetBytes;     // free RAM × mode pct (computed in main())
+    uint64_t    gpuPinnedBytes;     // estimated GPU pinned host memory (computed in main())
+    uint64_t    arenaTotalBytes;    // budget after GPU + overhead (computed in main())
+    int         chunkPoolThreads;   // merge chunk thread pool size (computed in main())
 } SolverConfig, * PSolverConfig;
 
 // Levels index piece count: level k holds boards with k+4 pieces on the board.
@@ -51,7 +51,6 @@ static const TSKeyFld k_moveKeyFlds[] = {
     { 0, offsetof(MOVE, ullCellsInUseResult), TS_DATATYPE_BYTE }
 };
 
-#ifdef TS_USE_BPTREE_ARENA
 // Pre-allocated arena pool.  At most 2 board stores and 1 move store are open
 // simultaneously (forward pass); back-prop opens 2 board + 1 move.  Pool of 3
 // is sufficient with margin.
@@ -92,12 +91,11 @@ static PArenaMem AcquireMoveArena(int level)
 
 static void ReleaseBoardArena(int level) { g_boardLevelArena[level] = nullptr; }
 static void ReleaseMoveArena(int level)  { g_moveLevelArena[level]  = nullptr; }
-#endif
 
 // ==================== Forward declarations ====================
 
-void doRestartProcess(PSolverConfig pConfig);
-void doStartProcess(PSolverConfig pConfig);
+void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo);
+void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo);
 void doBackPropagation(int deepestLevel, int maxLevel);
 void processArgs(int argc, char* argv[], PSolverConfig pConfig);
 void usage();
@@ -111,6 +109,7 @@ struct LevelRecord
     long long newBoardsOut;
     long long totalChildren;    // total legal moves generated (= move edges in move store)
     long long terminalBoardsOut;// boards at this level with no legal moves (game over)
+    int       maxMovesInLevel;  // max legal moves seen for any single board at this level
     long long elapsedNs;
     long long predictedNs;      // prediction made for this level; 0 = none
 };
@@ -258,10 +257,18 @@ static void doReportResults(
     ReportLine(rf, "%s", sep);
     ReportLine(rf, "Configuration\n");
     ReportLine(rf, "  Board Size:     %dx%d\n", pConfig->boardSize, pConfig->boardSize);
-    ReportLine(rf, "  Num Threads:    %d\n",    pConfig->numThreads);
+    ReportLine(rf, "  Workers:        %d\n",    pConfig->numThreads);
+    ReportLine(rf, "  Merge Threads:  %d\n",    pConfig->chunkPoolThreads);
     ReportLine(rf, "  Num Rotations:  %d\n",    pConfig->numRotations);
     ReportLine(rf, "  Output Dir:     %s\n",    GetFullDirPathForRun());
     ReportLine(rf, "  GPU Device:     %s\n",    gpuDeviceName ? gpuDeviceName : "unknown");
+    ReportLine(rf, "  Memory:         %.1f GB free -> %.1f GB budget\n",
+               pConfig->memBudgetBytes  / (1024.0*1024*1024),
+               pConfig->arenaTotalBytes / (1024.0*1024*1024));
+    ReportLine(rf, "                  %.2f GB/board-store  |  %.2f GB/move-store  (%d slots)\n",
+               g_boardMemPerStore / (1024.0*1024*1024),
+               g_moveMemPerStore  / (1024.0*1024*1024),
+               k_arenaPoolSize * 2 * 2);
     ReportLine(rf, "%s", sep);
     ReportLine(rf, "Results\n");
     ReportLine(rf, "  Black Wins:     %llu\n", blackWins);
@@ -292,23 +299,23 @@ static void doReportResults(
     ReportLine(rf, "  Boards/sec:       %lld\n", brdsPerSec);
     ReportLine(rf, "  Ns/Board:         %lld\n", nsPerBrd);
     ReportLine(rf, "\n  Level Analysis:\n");
-    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %11s %11s %8s\n",
-        "Lv", "BoardsIn", "NewBoards", "Dups", "Mvs", "Ends", "Pred(s)", "Tm(s)", "ns/brd");
-    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %11s %11s %8s\n",
-        "--", "--------", "---------", "----", "---", "----", "-------", "-----", "------");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
+        "Lv", "BoardsIn", "NewBoards", "Dups", "Mvs", "Ends", "MaxMv", "Pred(s)", "Tm(s)", "ns/brd");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
+        "--", "--------", "---------", "----", "---", "----", "-----", "-------", "-----", "------");
     for (const LevelRecord& r : levels)
     {
         long long dups   = r.totalChildren - r.newBoardsOut;
         double    elpS   = r.elapsedNs / 1e9;
         long long nsPerB = (r.boardsIn > 0) ? r.elapsedNs / r.boardsIn : 0;
         if (r.predictedNs > 0)
-            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %11.3f %11.3f %8lld\n",
+            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %6d %11.3f %11.3f %8lld\n",
                 r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
-                r.predictedNs / 1e9, elpS, nsPerB);
+                r.maxMovesInLevel, r.predictedNs / 1e9, elpS, nsPerB);
         else
-            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %11s %11.3f %8lld\n",
+            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %6d %11s %11.3f %8lld\n",
                 r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
-                "---", elpS, nsPerB);
+                r.maxMovesInLevel, "---", elpS, nsPerB);
     }
     ReportLine(rf, "%s", sep);
 
@@ -326,16 +333,10 @@ static void CreateBoardStore(int level)
     if (fs::exists(path)) fs::remove_all(path);
     CreateFullPath(path);
     const char* dirs[1] = { path };
-#ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(BOARD), g_boardMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, BoardWinsMergeFn,
                        &g_tieredBoardStores[level], AcquireBoardArena(level));
-#else
-    TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                       sizeof(BOARD), MAX_MEMORY_PER_STORE, MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER,
-                       BoardWinsMergeFn, &g_tieredBoardStores[level]);
-#endif
     if (rc != TS_RC_Success)
     { LogErrorf("TSCreate board store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -348,16 +349,10 @@ static void CreateMoveStore(int level)
     if (fs::exists(path)) fs::remove_all(path);
     CreateFullPath(path);
     const char* dirs[1] = { path };
-#ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(MOVE), g_moveMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, nullptr,
                        &g_tieredMoveStores[level], AcquireMoveArena(level));
-#else
-    TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                       sizeof(MOVE), MAX_MEMORY_PER_STORE, MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER,
-                       nullptr, &g_tieredMoveStores[level]);
-#endif
     if (rc != TS_RC_Success)
     { LogErrorf("TSCreate move store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -366,13 +361,8 @@ static void OpenBoardStore(int level)
 {
     char path[MAX_PATH];
     strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(level), _TRUNCATE);
-#ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSOpen(path, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                      BoardWinsMergeFn, &g_tieredBoardStores[level], AcquireBoardArena(level));
-#else
-    TSRc rc = TSOpen(path, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                     BoardWinsMergeFn, &g_tieredBoardStores[level]);
-#endif
     if (rc != TS_RC_Success)
     { LogErrorf("TSOpen board store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -381,13 +371,8 @@ static void OpenMoveStore(int level)
 {
     char path[MAX_PATH];
     strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(level), _TRUNCATE);
-#ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSOpen(path, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                      nullptr, &g_tieredMoveStores[level], AcquireMoveArena(level));
-#else
-    TSRc rc = TSOpen(path, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                     nullptr, &g_tieredMoveStores[level]);
-#endif
     if (rc != TS_RC_Success)
     { LogErrorf("TSOpen move store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -395,17 +380,13 @@ static void OpenMoveStore(int level)
 static void CloseBoardStore(int level)
 {
     if (g_tieredBoardStores[level]) { TSClose(&g_tieredBoardStores[level]); }
-#ifdef TS_USE_BPTREE_ARENA
     ReleaseBoardArena(level);
-#endif
 }
 
 static void CloseMoveStore(int level)
 {
     if (g_tieredMoveStores[level]) { TSClose(&g_tieredMoveStores[level]); }
-#ifdef TS_USE_BPTREE_ARENA
     ReleaseMoveArena(level);
-#endif
 }
 
 // ==================== Back-propagation ====================
@@ -632,12 +613,12 @@ static void RunSolverCore(
     }
     LogPrintf("  Started:       %s\n\n", startDtBuf);
 
-    LogPrintf("%4s %13s %13s %13s %13s %8s %11s %11s %8s %11s  %s\n",
+    LogPrintf("%4s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s  %s\n",
               "Lv", "BoardsIn", "NewBoards", "Dups", "Mvs", "Ends",
-              "Pred(s)", "Tm(s)", "ns/brd", "Nxt(s)", "DateTime");
-    LogPrintf("%4s %13s %13s %13s %13s %8s %11s %11s %8s %11s\n",
+              "MaxMv", "Pred(s)", "Tm(s)", "ns/brd", "Nxt(s)", "DateTime");
+    LogPrintf("%4s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s\n",
               "--", "--------", "---------", "----", "---", "----",
-              "-------", "-----", "------", "------");
+              "-----", "-------", "-----", "------", "------");
 
     auto wallStart = std::chrono::high_resolution_clock::now();
 
@@ -767,6 +748,7 @@ static void RunSolverCore(
         rec.newBoardsOut       = levelStats.newBoards.load();
         rec.totalChildren      = levelStats.totalChildren.load();
         rec.terminalBoardsOut  = levelStats.terminalBoards.load();
+        rec.maxMovesInLevel    = levelStats.maxMovesInLevel.load();
         rec.elapsedNs          = elapsedNs;
         rec.predictedNs        = thisPredNs;
         levelHistory.push_back(rec);
@@ -810,9 +792,9 @@ static void RunSolverCore(
         else
             snprintf(nxtBuf, sizeof(nxtBuf), "%11s", "---");
 
-        LogPrintf("%4d %13lld %13lld %13lld %13lld %8lld %s %11.3f %8lld %s  %s\n",
+        LogPrintf("%4d %13lld %13lld %13lld %13lld %8lld %6d %s %11.3f %8lld %s  %s\n",
                   level, boardsIn, rec.newBoardsOut, dups,
-                  rec.totalChildren, rec.terminalBoardsOut,
+                  rec.totalChildren, rec.terminalBoardsOut, rec.maxMovesInLevel,
                   predBuf, elpS, nsPerBd, nxtBuf, dtBuf);
 
         // Sliding window: close board[level] and move[level]; board[level+1] stays open.
@@ -882,7 +864,7 @@ static void RunSolverCore(
 
 // ==================== Fresh start ====================
 
-void doStartProcess(PSolverConfig pConfig)
+void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
 {
     if (!CreateFullPathForRun(pConfig->outputDir, pConfig->boardSize))
     {
@@ -893,15 +875,18 @@ void doStartProcess(PSolverConfig pConfig)
     LogOpen(GetFullDirPathForRun());
     LogPrintf("OthelloSolverCommandLine v" APP_VERSION " starting\n");
     LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
-    LogPrintf("  Num Threads:   %d\n",    pConfig->numThreads);
     LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
     LogPrintf("  Output Dir:    %s\n",    GetFullDirPathForRun());
-#ifdef TS_USE_BPTREE_ARENA
-    LogPrintf("  Memory Budget: %.1f GB  (%.1f GB/board-store  %.1f GB/move-store)\n",
-              pConfig->memBudgetBytes / (1024.0*1024*1024),
-              g_boardMemPerStore      / (1024.0*1024*1024),
-              g_moveMemPerStore       / (1024.0*1024*1024));
-#endif
+    LogPrintf("  Memory:        %.1f GB free -> %.1f GB budget\n",
+              pConfig->memBudgetBytes  / (1024.0*1024*1024),
+              pConfig->arenaTotalBytes / (1024.0*1024*1024));
+    LogPrintf("                 %.2f GB GPU pinned  |  1.0 GB overhead  |  %.1f GB arenas\n",
+              pConfig->gpuPinnedBytes  / (1024.0*1024*1024),
+              pConfig->arenaTotalBytes / (1024.0*1024*1024));
+    LogPrintf("                 %.2f GB/board-store  |  %.2f GB/move-store  (%d slots)\n",
+              g_boardMemPerStore / (1024.0*1024*1024),
+              g_moveMemPerStore  / (1024.0*1024*1024),
+              k_arenaPoolSize * 2 * 2);
 
     SetBoardSizeForRun(pConfig->boardSize);
 
@@ -921,9 +906,14 @@ void doStartProcess(PSolverConfig pConfig)
     }
     free(firstBoard);
 
-    GpuDeviceInfo gpuInfo = QueryGpuDevice();
-    LogPrintf("  GPU Device:    %s\n",  gpuInfo.name);
+    LogPrintf("  GPU Device:    %s (compute %d.%d)\n", gpuInfo.name, gpuInfo.computeCapabilityMajor, gpuInfo.computeCapabilityMinor);
+    LogPrintf("               %d SMs x %d threads/SM  |  %d async copy engines\n",
+              gpuInfo.smCount, gpuInfo.maxThreadsPerSM, gpuInfo.asyncEngineCount);
+    LogPrintf("               L2 = %d KB  |  VRAM = %.1f GB\n",
+              gpuInfo.l2CacheSizeBytes / 1024, (double)gpuInfo.totalGlobalMemBytes / (1024.0*1024*1024));
     LogPrintf("  Batch Size:    %d\n",  gpuInfo.optimalBatchSize);
+    LogPrintf("  Workers:       %d  (GPU recommended: %d)\n", pConfig->numThreads, gpuInfo.recommendedWorkerCount);
+    LogPrintf("  Merge Threads: %d\n", pConfig->chunkPoolThreads);
     LogPrintf("\n");
 
     RunSolverCore(pConfig, gpuInfo, 0, numLevels);
@@ -932,7 +922,7 @@ void doStartProcess(PSolverConfig pConfig)
 
 // ==================== Restart ====================
 
-void doRestartProcess(PSolverConfig pConfig)
+void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
 {
     namespace fs = std::filesystem;
 
@@ -945,7 +935,7 @@ void doRestartProcess(PSolverConfig pConfig)
     if (!fs::exists(outPath))
     {
         printf("Output dir not found: %s  Starting fresh.\n", pConfig->outputDir);
-        doStartProcess(pConfig);
+        doStartProcess(pConfig, gpuInfo);
         return;
     }
 
@@ -963,7 +953,7 @@ void doRestartProcess(PSolverConfig pConfig)
     if (latestTimestamp.empty())
     {
         printf("No previous run found in %s  Starting fresh.\n", pConfig->outputDir);
-        doStartProcess(pConfig);
+        doStartProcess(pConfig, gpuInfo);
         return;
     }
 
@@ -978,14 +968,17 @@ void doRestartProcess(PSolverConfig pConfig)
     LogPrintf("OthelloSolverCommandLine v" APP_VERSION " restarting\n");
     LogPrintf("  Run Dir:       %s\n", GetFullDirPathForRun());
     LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
-    LogPrintf("  Num Threads:   %d\n",    pConfig->numThreads);
     LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
-#ifdef TS_USE_BPTREE_ARENA
-    LogPrintf("  Memory Budget: %.1f GB  (%.1f GB/board-store  %.1f GB/move-store)\n",
-              pConfig->memBudgetBytes / (1024.0*1024*1024),
-              g_boardMemPerStore      / (1024.0*1024*1024),
-              g_moveMemPerStore       / (1024.0*1024*1024));
-#endif
+    LogPrintf("  Memory:        %.1f GB free -> %.1f GB budget\n",
+              pConfig->memBudgetBytes  / (1024.0*1024*1024),
+              pConfig->arenaTotalBytes / (1024.0*1024*1024));
+    LogPrintf("                 %.2f GB GPU pinned  |  1.0 GB overhead  |  %.1f GB arenas\n",
+              pConfig->gpuPinnedBytes  / (1024.0*1024*1024),
+              pConfig->arenaTotalBytes / (1024.0*1024*1024));
+    LogPrintf("                 %.2f GB/board-store  |  %.2f GB/move-store  (%d slots)\n",
+              g_boardMemPerStore / (1024.0*1024*1024),
+              g_moveMemPerStore  / (1024.0*1024*1024),
+              k_arenaPoolSize * 2 * 2);
 
     // If back-prop already completed, just report it and exit.
     if (BackpropSentinelExists())
@@ -1020,7 +1013,7 @@ void doRestartProcess(PSolverConfig pConfig)
     {
         LogPrintf("No checkpointed levels found; starting fresh run.\n");
         LogClose();
-        doStartProcess(pConfig);
+        doStartProcess(pConfig, gpuInfo);
         return;
     }
 
@@ -1032,9 +1025,14 @@ void doRestartProcess(PSolverConfig pConfig)
     // RunSolverCore at the start of that level's iteration (deleting any partial data).
     OpenBoardStore(resumeFromLevel);
 
-    GpuDeviceInfo gpuInfo = QueryGpuDevice();
-    LogPrintf("  GPU Device:    %s\n",  gpuInfo.name);
+    LogPrintf("  GPU Device:    %s (compute %d.%d)\n", gpuInfo.name, gpuInfo.computeCapabilityMajor, gpuInfo.computeCapabilityMinor);
+    LogPrintf("               %d SMs x %d threads/SM  |  %d async copy engines\n",
+              gpuInfo.smCount, gpuInfo.maxThreadsPerSM, gpuInfo.asyncEngineCount);
+    LogPrintf("               L2 = %d KB  |  VRAM = %.1f GB\n",
+              gpuInfo.l2CacheSizeBytes / 1024, (double)gpuInfo.totalGlobalMemBytes / (1024.0*1024*1024));
     LogPrintf("  Batch Size:    %d\n",  gpuInfo.optimalBatchSize);
+    LogPrintf("  Workers:       %d  (GPU recommended: %d)\n", pConfig->numThreads, gpuInfo.recommendedWorkerCount);
+    LogPrintf("  Merge Threads: %d\n", pConfig->chunkPoolThreads);
     LogPrintf("\n");
 
     RunSolverCore(pConfig, gpuInfo, resumeFromLevel, numLevels);
@@ -1087,12 +1085,10 @@ void processArgs(int argc, char* argv[], PSolverConfig pConfig)
 
 void usage()
 {
-    int hw = (int)std::thread::hardware_concurrency();
-    if (hw < 1) hw = 1;
     printf("OthelloSolverCommandLine: Command-line Othello solver.\n");
     printf("Usage: OthelloSolverCommandLine [help] [boardSize numThreads numRotations outputDir] [restart]\n");
     printf("  boardSize:    4, 6, or 8 (default=4)\n");
-    printf("  numThreads:   Number of CPU worker threads (default=%d)\n", hw);
+    printf("  numThreads:   Number of GPU worker threads (default=GPU recommended count)\n");
     printf("  numRotations: Number of symmetries to consider (default=8, max=16)\n");
     printf("  outputDir:    Directory for solver output and restart persistence\n");
     printf("                (default=D:\\CommandLineSolverDataDir)\n");
@@ -1107,25 +1103,43 @@ void usage()
 
 int main(int argc, char* argv[])
 {
-    int defaultThreads = (int)std::thread::hardware_concurrency();
-    if (defaultThreads < 1) defaultThreads = 1;
+    GpuDeviceInfo gpuInfo = QueryGpuDevice();
 
-    SolverConfig config = { 6, defaultThreads, 16, "D:\\CommandLineSolverDataDir", false, MM_RECOMMENDED, 0, 0 };
+    int defaultThreads = gpuInfo.recommendedWorkerCount;
+
+    SolverConfig config = { 6, defaultThreads, 16, "D:\\CommandLineSolverDataDir", false, MM_RECOMMENDED, 0, 0, 0, 0 };
 
     if (argc > 1)
         processArgs(argc, argv, &config);
 
-#ifdef TS_USE_BPTREE_ARENA
+    int totalCores    = (int)std::thread::hardware_concurrency();
+    if (totalCores < 1) totalCores = 1;
+    int remaining = totalCores - config.numThreads - 3 - 1;
+    config.chunkPoolThreads = remaining > 1 ? remaining : 1;
+
     {
         uint64_t budget = CalcMemoryBudget(config.memMode, config.specifiedMemBytes);
         config.memBudgetBytes = budget;
 
-        // Split budget evenly across all arenas (board + move pools combined).
-        // Total physical allocation = budget; each arena gets an equal share.
-        uint64_t perArena = budget / (uint64_t)(k_arenaPoolSize * 2);
+        // GPU pinned host memory per worker: input boards + result slots + output counts.
+        int maxMoves = (config.boardSize == 4) ? 6 : (config.boardSize == 6) ? 20 : 28;
+        uint64_t gpuPinnedPerWorker = (uint64_t)gpuInfo.optimalBatchSize *
+            (sizeof(BOARD) + (size_t)maxMoves * sizeof(GpuResult) + sizeof(int));
+        config.gpuPinnedBytes = gpuPinnedPerWorker * (uint64_t)config.numThreads;
 
-        // Back-compute the data bytes from the total arena size (data + node overhead).
-        // node overhead = (dataBytes / recordSize) * 10  →  arenaBytes = dataBytes * (recordSize+10)/recordSize
+        // Reserve headroom for OS, thread stacks, and general process overhead.
+        static constexpr uint64_t k_processOverhead = 1ULL * 1024 * 1024 * 1024; // 1 GB
+
+        config.arenaTotalBytes = (budget > config.gpuPinnedBytes + k_processOverhead)
+            ? budget - config.gpuPinnedBytes - k_processOverhead
+            : budget / 2;
+
+        // Each store needs 2 arenas: 1 active + 1 spare (created on first flush, same size).
+        // Slots = k_arenaPoolSize stores × 2 types (board+move) × 2 (active+spare).
+        static constexpr int k_arenaSlots = k_arenaPoolSize * 2 * 2;
+        uint64_t perArena = config.arenaTotalBytes / k_arenaSlots;
+
+        // Back-compute data bytes from arena size (node overhead = 10 bytes per record).
         g_boardMemPerStore = perArena * sizeof(BOARD) / (sizeof(BOARD) + 10);
         g_moveMemPerStore  = perArena * sizeof(MOVE)  / (sizeof(MOVE)  + 10);
 
@@ -1146,20 +1160,17 @@ int main(int argc, char* argv[])
             { fprintf(stderr, "Move arena %d alloc failed (size=%zu)\n", i, moveArenaSize); return 1; }
         }
     }
-#endif
 
     if (config.restart)
-        doRestartProcess(&config);
+        doRestartProcess(&config, gpuInfo);
     else
-        doStartProcess(&config);
+        doStartProcess(&config, gpuInfo);
 
-#ifdef TS_USE_BPTREE_ARENA
     for (int i = 0; i < k_arenaPoolSize; i++)
     {
         if (g_boardArenaPool[i]) { ArenaMemDestroy(g_boardArenaPool[i]); g_boardArenaPool[i] = nullptr; }
         if (g_moveArenaPool[i])  { ArenaMemDestroy(g_moveArenaPool[i]);  g_moveArenaPool[i]  = nullptr; }
     }
-#endif
 
     return 0;
 }

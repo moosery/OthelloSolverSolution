@@ -122,15 +122,6 @@ GpuDeviceInfo QueryGpuDevice()
     if (w > 8) w = 8;
     info.recommendedWorkerCount = w;
 
-    printf("GPU  : %s (compute %d.%d)\n", p.name, p.major, p.minor);
-    printf("       %d SMs x %d threads/SM  |  %d async copy engines\n",
-           p.multiProcessorCount, p.maxThreadsPerMultiProcessor, p.asyncEngineCount);
-    printf("       L2 = %d KB  |  VRAM = %.1f GB\n",
-           p.l2CacheSize / 1024,
-           (double)p.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
-    printf("       optimal batch = %d boards  |  recommended workers = %d\n",
-           info.optimalBatchSize, info.recommendedWorkerCount);
-
     return info;
 }
 

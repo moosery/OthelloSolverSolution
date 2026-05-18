@@ -44,6 +44,13 @@ void WorkerProcessBatch(
         exit(1);
     }
 
+    // Track per-level max legal moves (lock-free atomic max).
+    {
+        int cur = pLevelStats->maxMovesInLevel.load(std::memory_order_relaxed);
+        while (actualMax > cur &&
+               !pLevelStats->maxMovesInLevel.compare_exchange_weak(cur, actualMax, std::memory_order_relaxed));
+    }
+
     // Track run-wide max legal moves.
     {
         std::lock_guard<std::mutex> lk(pRunStats->maxMovesMtx);

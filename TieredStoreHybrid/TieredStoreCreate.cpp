@@ -86,7 +86,8 @@ static TSRc TSI_CreateStore(
     }
     ts->mergePool->Start();
 
-    ts->pMemArena = pArena;
+    ts->pMemArena    = pArena;
+    ts->externalArena = pArena;
     BPRc rc = BPCreateTree(&ts->memTree, 256, (size_t)ts->maxMemoryBytes,
                            idxSettings, (size_t)numKeyFlds, (BPIdxFld*)keyFlds, recordSize,
                            pArena);

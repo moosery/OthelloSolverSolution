@@ -185,7 +185,8 @@ struct _TieredStore
 
     // In-memory B+ tree
     PBPTree       memTree;
-    PArenaMem     pMemArena;    // arena backing the in-memory tree (NULL = malloc mode)
+    PArenaMem     pMemArena;     // arena backing the in-memory tree (NULL = malloc mode)
+    PArenaMem     externalArena; // arena passed by caller at create/open; never destroyed by the store
 
     // File registry — array of pointers, grown on demand
     TSFileDesc**  files;

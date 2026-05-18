@@ -13,6 +13,7 @@ struct WorkerLevelStats
     std::atomic<int>        newBoards{0};      // new unique child boards inserted
     std::atomic<long long>  totalChildren{0};  // total children generated (new + dups)
     std::atomic<long long>  terminalBoards{0}; // boards with no legal moves (game over)
+    std::atomic<int>        maxMovesInLevel{0};// max legal moves seen for any board at this level
 };
 
 // Run-wide stats accumulated across all levels.
