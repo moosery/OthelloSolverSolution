@@ -5,7 +5,9 @@
 #include <stdint.h>
 #include <vector>
 #include <algorithm>
-#include <io.h>         // _open_osfhandle, _fdopen, _O_RDONLY
+#include <io.h>         // _open_osfhandle, _fdopen
+#include <fcntl.h>      // _O_RDONLY
+#include <future>
 
 // Open a file with FILE_FLAG_SEQUENTIAL_SCAN so Windows prefetches aggressively.
 // Use only for large sequential-scan paths (merge input/output); not for random-access fopen.
@@ -165,6 +167,8 @@ struct MergeCursor
     FILE*                file;
     int64_t              slotsLeft;
     std::vector<uint8_t> slotBuf;      // recordSize + 1 bytes (record first, flags last)
+    // Partition range (nullptr = no bound); stop when key >= hiKey
+    const uint8_t*       hiKey;
 };
 
 static void AdvanceCursor(MergeCursor* c)
@@ -174,6 +178,9 @@ static void AdvanceCursor(MergeCursor* c)
     if (c->isMemory)
     {
         if (BPIterate(&c->iter, c->current.data()) != BP_RC_Success)
+            { c->done = true; return; }
+        if (c->hiKey && BPKeyCmpPPRaw(c->ts->numKeyFlds, c->ts->idxSettings,
+                (BPIdxFld*)c->ts->keyFlds, c->current.data(), c->hiKey) >= 0)
             c->done = true;
         return;
     }
@@ -191,13 +198,17 @@ static void AdvanceCursor(MergeCursor* c)
         if (!(c->slotBuf[c->ts->recordSize] & TS_FLAG_TOMBSTONE))
         {
             memcpy(c->current.data(), c->slotBuf.data(), c->ts->recordSize);
+            if (c->hiKey && BPKeyCmpPPRaw(c->ts->numKeyFlds, c->ts->idxSettings,
+                    (BPIdxFld*)c->ts->keyFlds, c->current.data(), c->hiKey) >= 0)
+                { c->done = true; return; }
             return;
         }
     }
     c->done = true;
 }
 
-static bool InitCursorTree(MergeCursor* c, _TieredStore* ts, PBPTree tree)
+static bool InitCursorTree(MergeCursor* c, _TieredStore* ts, PBPTree tree,
+                            const uint8_t* loKey = nullptr, const uint8_t* hiKey = nullptr)
 {
     c->ts          = ts;
     c->done        = false;
@@ -205,17 +216,26 @@ static bool InitCursorTree(MergeCursor* c, _TieredStore* ts, PBPTree tree)
     c->iterStarted = false;
     c->file        = nullptr;
     c->slotsLeft   = 0;
+    c->hiKey       = hiKey;
     c->current.resize((size_t)ts->recordSize);
 
-    BPIterateStart(tree, &c->iter);
+    // BPIterateStartFrom positions directly at loKey, avoiding a full scan from the start.
+    if (loKey)
+        BPIterateStartFrom(tree, &c->iter, const_cast<uint8_t*>(loKey), true);
+    else
+        BPIterateStart(tree, &c->iter);
     c->iterStarted = true;
 
     if (BPIterate(&c->iter, c->current.data()) != BP_RC_Success)
         c->done = true;
+    else if (c->hiKey && BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                        (BPIdxFld*)ts->keyFlds, c->current.data(), c->hiKey) >= 0)
+        c->done = true;
     return !c->done;
 }
 
-static bool InitCursorFile(MergeCursor* c, _TieredStore* ts, const TSFileDesc* desc)
+static bool InitCursorFile(MergeCursor* c, _TieredStore* ts, const TSFileDesc* desc,
+                            const uint8_t* hiKey = nullptr)
 {
     c->ts          = ts;
     c->done        = false;
@@ -223,6 +243,7 @@ static bool InitCursorFile(MergeCursor* c, _TieredStore* ts, const TSFileDesc* d
     c->iterStarted = false;
     c->file        = nullptr;
     c->slotsLeft   = (int64_t)desc->slotCount;
+    c->hiKey       = hiKey;
     c->current.resize((size_t)ts->recordSize);
     c->slotBuf.resize((size_t)TS_SLOT_SIZE(ts->recordSize));
 
@@ -238,6 +259,190 @@ static void CloseCursor(MergeCursor* c)
 {
     if (c->iterStarted) { BPIterateStop(&c->iter); c->iterStarted = false; }
     if (c->file)        { fclose(c->file); c->file = nullptr; }
+}
+
+// ==================== Intra-merge parallelism ====================
+//
+// For large merges (total > 2*maxFileRecords), divide the key range into N partitions
+// at file-minKey boundaries and run each partition as an independent sub-merge on its own
+// OS thread via std::async.  The calling thread runs partition 0; the pool is not used
+// (avoids nested-job deadlock).  B+ tree iteration is safe from multiple concurrent
+// readers because BPIterate holds only read locks.
+
+#define TS_MAX_MERGE_PARTITIONS 8
+
+static int ComputeNumParts(_TieredStore* ts, int numSrcFiles, int64_t total)
+{
+    if (total <= 2 * (int64_t)ts->maxFileRecords) return 1;
+    int poolThreads = ts->mergePool ? (int)ts->mergePool->NumThreads() : 1;
+    int n = poolThreads / 2;
+    if (n > numSrcFiles)             n = numSrcFiles;
+    if (n > TS_MAX_MERGE_PARTITIONS) n = TS_MAX_MERGE_PARTITIONS;
+    return (n < 2) ? 1 : n;
+}
+
+// Returns N-1 file minKeys that split srcFiles into N roughly equal-record partitions.
+static void ComputePartitionKeys(_TieredStore* ts,
+                                  std::vector<TSFileDesc*>& srcFiles,
+                                  int numParts,
+                                  std::vector<const uint8_t*>& splitKeys)
+{
+    std::vector<TSFileDesc*> sorted = srcFiles;
+    std::sort(sorted.begin(), sorted.end(), [ts](TSFileDesc* a, TSFileDesc* b) {
+        return BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                             a->minKey, b->minKey) < 0;
+    });
+    int64_t totalLive = 0;
+    for (auto* f : sorted) totalLive += (int64_t)f->liveCount;
+    if (totalLive == 0) return;
+
+    int64_t cumulative = 0;
+    int part = 0;
+    for (int i = 0; i < (int)sorted.size() && part < numParts - 1; i++)
+    {
+        cumulative += (int64_t)sorted[i]->liveCount;
+        if (cumulative * numParts >= totalLive * (part + 1))
+        {
+            if (i + 1 < (int)sorted.size())
+            {
+                splitKeys.push_back(sorted[i + 1]->minKey);
+                part++;
+            }
+        }
+    }
+}
+
+struct PartitionJob
+{
+    _TieredStore*            ts;
+    PBPTree                  memTree;
+    const uint8_t*           loKey;      // nullptr = no lower bound
+    const uint8_t*           hiKey;      // nullptr = no upper bound
+    std::vector<TSFileDesc*> partFiles;
+    std::vector<TSFileDesc*> outSlice;
+};
+
+static TSRc DoMerge(_TieredStore* ts, std::vector<MergeCursor*>& cursors,
+                    std::vector<TSFileDesc*>& outDescs);  // defined after this section
+
+static TSRc RunPartitionMerge(PartitionJob& pj)
+{
+    std::vector<MergeCursor*> cursors;
+    bool ok = true;
+
+    if (pj.memTree)
+    {
+        MergeCursor* mc = new (std::nothrow) MergeCursor();
+        if (!mc) { ok = false; }
+        else
+        {
+            InitCursorTree(mc, pj.ts, pj.memTree, pj.loKey, pj.hiKey);
+            if (!mc->done) cursors.push_back(mc);
+            else           { CloseCursor(mc); delete mc; }
+        }
+    }
+
+    if (ok)
+    {
+        for (TSFileDesc* fd : pj.partFiles)
+        {
+            MergeCursor* fc = new (std::nothrow) MergeCursor();
+            if (!fc) { ok = false; break; }
+            if (!InitCursorFile(fc, pj.ts, fd, pj.hiKey))
+                { CloseCursor(fc); delete fc; ok = false; break; }
+            if (!fc->done) cursors.push_back(fc);
+            else           { CloseCursor(fc); delete fc; }
+        }
+    }
+
+    TSRc rc = ok ? DoMerge(pj.ts, cursors, pj.outSlice) : TS_RC_IO_Error;
+    for (auto* c : cursors) { CloseCursor(c); delete c; }
+    return rc;
+}
+
+static TSRc DoParallelMerge(_TieredStore*             ts,
+                              PBPTree                   memTree,
+                              std::vector<TSFileDesc*>& srcFiles,
+                              std::vector<TSFileDesc*>& outDescs)
+{
+    int numSrcFiles = (int)srcFiles.size();
+    int64_t total = memTree ? (int64_t)BPGetDataCnt(memTree) : 0;
+    for (auto* f : srcFiles) total += (int64_t)f->liveCount;
+
+    int numParts = ComputeNumParts(ts, numSrcFiles, total);
+
+    std::vector<const uint8_t*> splitKeys;
+    if (numParts > 1)
+    {
+        ComputePartitionKeys(ts, srcFiles, numParts, splitKeys);
+        if ((int)splitKeys.size() < numParts - 1)
+            numParts = (int)splitKeys.size() + 1;
+    }
+
+    if (numParts <= 1)
+    {
+        PartitionJob pj;
+        pj.ts        = ts;
+        pj.memTree   = memTree;
+        pj.loKey     = nullptr;
+        pj.hiKey     = nullptr;
+        pj.partFiles = srcFiles;
+        pj.outSlice  = outDescs;
+        return RunPartitionMerge(pj);
+    }
+
+    // Sort source files by minKey for partition assignment.
+    std::vector<TSFileDesc*> sortedFiles = srcFiles;
+    std::sort(sortedFiles.begin(), sortedFiles.end(), [ts](TSFileDesc* a, TSFileDesc* b) {
+        return BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                             a->minKey, b->minKey) < 0;
+    });
+
+    // Build one PartitionJob per partition; distribute output descs evenly.
+    int numOut = (int)outDescs.size();
+    std::vector<PartitionJob> jobs(numParts);
+    for (int p = 0; p < numParts; p++)
+    {
+        jobs[p].ts      = ts;
+        jobs[p].memTree = memTree;
+        jobs[p].loKey   = (p == 0)            ? nullptr : splitKeys[p - 1];
+        jobs[p].hiKey   = (p == numParts - 1) ? nullptr : splitKeys[p];
+        int s = (numOut * p)       / numParts;
+        int e = (numOut * (p + 1)) / numParts;
+        for (int i = s; i < e; i++)
+            jobs[p].outSlice.push_back(outDescs[i]);
+    }
+
+    // Assign each source file wholly to the partition that owns its key range.
+    for (TSFileDesc* fd : sortedFiles)
+    {
+        int p = 0;
+        for (int i = 0; i < (int)splitKeys.size(); i++)
+        {
+            if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                              fd->minKey, splitKeys[i]) >= 0)
+                p = i + 1;
+            else
+                break;
+        }
+        jobs[p].partFiles.push_back(fd);
+    }
+
+    // Partitions 1..N-1 run on OS threads; partition 0 runs on the calling thread.
+    std::vector<std::future<TSRc>> futures;
+    futures.reserve(numParts - 1);
+    for (int p = 1; p < numParts; p++)
+        futures.push_back(std::async(std::launch::async,
+                                     [&jobs, p]() { return RunPartitionMerge(jobs[p]); }));
+
+    TSRc rc = RunPartitionMerge(jobs[0]);
+
+    for (auto& fut : futures)
+    {
+        TSRc r = fut.get();
+        if (r != TS_RC_Success) rc = r;
+    }
+    return rc;
 }
 
 // ==================== k-way merge: helpers ====================
@@ -438,54 +643,29 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
     for (int idx : overlapIndices)
         total += (int64_t)ts->files[idx]->liveCount;
 
-    std::vector<MergeCursor*> cursors;
-    bool cursorOk = true;
-
-    MergeCursor* memCursor = new (std::nothrow) MergeCursor();
-    if (!memCursor) return TS_RC_Out_Of_Memory;
-    InitCursorTree(memCursor, ts, ts->memTree);
-    if (!memCursor->done)
-        cursors.push_back(memCursor);
-    else
-        { CloseCursor(memCursor); delete memCursor; }
-
+    std::vector<TSFileDesc*> srcFiles;
+    srcFiles.reserve(overlapIndices.size());
     for (int idx : overlapIndices)
-    {
-        MergeCursor* fc = new (std::nothrow) MergeCursor();
-        if (!fc) { cursorOk = false; break; }
-        if (!InitCursorFile(fc, ts, ts->files[idx]))
-            { CloseCursor(fc); delete fc; cursorOk = false; break; }
-        if (!fc->done)
-            cursors.push_back(fc);
-        else
-            { CloseCursor(fc); delete fc; }
-    }
-
-    if (!cursorOk)
-    {
-        for (auto* c : cursors) { CloseCursor(c); delete c; }
-        return TS_RC_IO_Error;
-    }
+        srcFiles.push_back(ts->files[idx]);
 
     int numOutFiles = (int)((total + (int64_t)ts->maxFileRecords - 1) / (int64_t)ts->maxFileRecords);
     if (numOutFiles < 1) numOutFiles = 1;
+    int numParts    = ComputeNumParts(ts, (int)srcFiles.size(), total);
+    int numOutAlloc = numOutFiles + numParts;
     std::vector<TSFileDesc*> outDescs;
-    outDescs.reserve(numOutFiles);
-    for (int i = 0; i < numOutFiles; i++)
+    outDescs.reserve(numOutAlloc);
+    for (int i = 0; i < numOutAlloc; i++)
     {
         TSFileDesc* d = MakeOutputDesc(ts);
         if (!d)
         {
-            for (auto* c : cursors) { CloseCursor(c); delete c; }
             for (auto* od : outDescs) TSI_FreeFileDesc(ts, od);
             return TS_RC_Out_Of_Memory;
         }
         outDescs.push_back(d);
     }
 
-    TSRc mrc = DoMerge(ts, cursors, outDescs);
-
-    for (auto* c : cursors) { CloseCursor(c); delete c; }
+    TSRc mrc = DoParallelMerge(ts, ts->memTree, srcFiles, outDescs);
 
     if (mrc != TS_RC_Success)
     {
@@ -571,7 +751,8 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
 
     int numOutFiles = (int)((total + (int64_t)ts->maxFileRecords - 1) / (int64_t)ts->maxFileRecords);
     if (numOutFiles < 1) numOutFiles = 1;
-    for (int i = 0; i < numOutFiles; i++)
+    int numParts = ComputeNumParts(ts, (int)overlapIndices.size(), total);
+    for (int i = 0; i < numOutFiles + numParts; i++)
     {
         TSFileDesc* d = MakeOutputDesc(ts);
         if (!d)
@@ -617,38 +798,7 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
 
 static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
 {
-    std::vector<MergeCursor*> cursors;
-    bool cursorOk = true;
-
-    {
-        MergeCursor* mc = new (std::nothrow) MergeCursor();
-        if (!mc) { cursorOk = false; }
-        else
-        {
-            InitCursorTree(mc, ts, job->tree);
-            if (!mc->done) cursors.push_back(mc);
-            else           { CloseCursor(mc); delete mc; }
-        }
-    }
-
-    if (cursorOk)
-    {
-        for (TSFileDesc* fd : job->srcFiles)
-        {
-            MergeCursor* fc = new (std::nothrow) MergeCursor();
-            if (!fc) { cursorOk = false; break; }
-            if (!InitCursorFile(fc, ts, fd))
-                { CloseCursor(fc); delete fc; cursorOk = false; break; }
-            if (!fc->done) cursors.push_back(fc);
-            else           { CloseCursor(fc); delete fc; }
-        }
-    }
-
-    TSRc mrc = cursorOk
-        ? DoMerge(ts, cursors, job->outDescs)
-        : TS_RC_IO_Error;
-
-    for (auto* c : cursors) { CloseCursor(c); delete c; }
+    TSRc mrc = DoParallelMerge(ts, job->tree, job->srcFiles, job->outDescs);
 
     // Delete source files from disk and free their descriptors.
     for (TSFileDesc* fd : job->srcFiles)

@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.3.8] - 2026-05-18
+
+### Changed
+- `TieredStoreHybrid`: intra-merge parallelism — large merges (total records > 2 × maxFileRecords) are now split into N independent partitions (N = min(poolThreads/2, numSrcFiles, 8)) and run concurrently via `std::async(std::launch::async)` rather than sequentially; partition key boundaries are derived from source-file minKeys (whole files are assigned to one partition, so no binary-search seek within files is needed); the memory-tree cursor for each partition uses `BPIterateStartFrom` to jump directly to its lower bound instead of scanning from the start; partitions 1..N-1 run on OS threads, partition 0 runs on the calling thread (avoids nested-job deadlock with the shared merge pool); `TSI_PrepMergeJob` and `TSI_FlushMemTree` pre-allocate `numOutFiles + numParts` output descriptors so every partition is guaranteed at least one output file; empty output files (partitions that produce zero records after deduplication) are dropped as before; expected speedup for level 14+ merges: ~4× (from ~7 min to ~1–2 min per merge)
+
+---
+
 ## [v2.3.7] - 2026-05-18
 
 ### Changed
