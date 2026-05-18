@@ -137,9 +137,7 @@ struct TSMergeJob
     PBPTree                   tree;       // in-memory tree to merge (not yet freed)
     PArenaMem                 arena;      // tree's arena (NULL = malloc mode)
     std::vector<TSFileDesc*>  srcFiles;   // on-disk files being merged (removed after merge)
-    TSFileDesc*               desc1;      // output file 1
-    TSFileDesc*               desc2;      // output file 2 (NULL = no split)
-    int64_t                   total;      // expected total live record count
+    std::vector<TSFileDesc*>  outDescs;   // N output file descriptors (1 per maxFileRecords chunk)
     ClockTick                 startTime;  // for statMergeNs
 };
 

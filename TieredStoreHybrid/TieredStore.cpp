@@ -254,6 +254,8 @@ static TSFileDesc* MakeOutputDesc(_TieredStore* ts)
     desc->minKey   = new (std::nothrow) uint8_t[(size_t)ts->recordSize];
     desc->maxKey   = new (std::nothrow) uint8_t[(size_t)ts->recordSize];
     if (!desc->minKey || !desc->maxKey) { TSI_FreeFileDesc(ts, desc); return nullptr; }
+    memset(desc->minKey, 0, (size_t)ts->recordSize);
+    memset(desc->maxKey, 0, (size_t)ts->recordSize);
 
     sprintf_s(desc->path, MAX_PATH, "%s\\%s_%016llx%s",
               ts->dirs[dirIndex], ts->baseName, fileId, TS_DATA_FILE_EXT);
@@ -300,36 +302,35 @@ static bool WriteFooter(FILE* f, const TSFileDesc* desc, int recordSize,
 
 static TSRc DoMerge(_TieredStore*              ts,
                     std::vector<MergeCursor*>& cursors,
-                    int64_t                    total,
-                    TSFileDesc*                desc1,
-                    TSFileDesc*                desc2)   // nullptr = no split
+                    std::vector<TSFileDesc*>&  outDescs)
 {
-    int64_t splitAt = (desc2 != nullptr) ? (total / 2) : INT64_MAX;
+    int numOut = (int)outDescs.size();
+    std::vector<FILE*> files(numOut, nullptr);
+    bool openOk = true;
 
-    FILE* f1 = nullptr;
-    FILE* f2 = nullptr;
-    bool  ok = true;
-
-    if (fopen_s(&f1, desc1->path, "wb") != 0 || !f1)
-        return TS_RC_IO_Error;
-
-    if (desc2)
+    for (int i = 0; i < numOut && openOk; i++)
     {
-        if (fopen_s(&f2, desc2->path, "wb") != 0 || !f2)
+        if (fopen_s(&files[i], outDescs[i]->path, "wb") != 0 || !files[i])
+            openOk = false;
+    }
+    if (!openOk)
+    {
+        for (int i = 0; i < numOut; i++)
         {
-            fclose(f1);
-            remove(desc1->path);
-            return TS_RC_IO_Error;
+            if (files[i]) fclose(files[i]);
+            remove(outDescs[i]->path);
         }
+        return TS_RC_IO_Error;
     }
 
     // Slots begin at byte 0 — no header written up front.
 
     std::vector<uint8_t> merged((size_t)ts->recordSize);
-    uint8_t flag         = 0;    // merge output is always live
-    int64_t written1     = 0, written2     = 0;
-    int64_t totalWritten = 0;
-    bool    first1       = true, first2    = true;
+    uint8_t              flag = 0;   // merge output is always live
+    std::vector<int64_t> written(numOut, 0);
+    std::vector<bool>    firstRec(numOut, true);
+    int  curIdx = 0;
+    bool ok     = true;
 
     while (ok)
     {
@@ -359,45 +360,38 @@ static TSRc DoMerge(_TieredStore*              ts,
             }
         }
 
-        bool  inFile1  = (totalWritten < splitAt);
-        FILE* outF     = inFile1 ? f1 : f2;
+        // Advance to next output file when current reaches maxFileRecords.
+        if (curIdx + 1 < numOut && written[curIdx] >= (int64_t)ts->maxFileRecords)
+            curIdx++;
 
-        if (fwrite(merged.data(), ts->recordSize, 1, outF) != 1 ||
-            fwrite(&flag,         1,              1, outF) != 1)
+        if (fwrite(merged.data(), ts->recordSize, 1, files[curIdx]) != 1 ||
+            fwrite(&flag,         1,              1, files[curIdx]) != 1)
         {
             ok = false;
             break;
         }
 
-        TSFileDesc* outDesc = inFile1 ? desc1 : desc2;
-        bool&       firstF  = inFile1 ? first1 : first2;
-
-        if (firstF) { memcpy(outDesc->minKey, merged.data(), ts->recordSize); firstF = false; }
-        memcpy(outDesc->maxKey, merged.data(), ts->recordSize);
-
-        if (inFile1) written1++;
-        else         written2++;
-        totalWritten++;
+        if (firstRec[curIdx]) { memcpy(outDescs[curIdx]->minKey, merged.data(), ts->recordSize); firstRec[curIdx] = false; }
+        memcpy(outDescs[curIdx]->maxKey, merged.data(), ts->recordSize);
+        written[curIdx]++;
     }
 
-    // Append footer(s) at the end of each output file.
-    if (ok)
-        ok = WriteFooter(f1, desc1, ts->recordSize, written1);
-    if (ok && f2)
-        ok = WriteFooter(f2, desc2, ts->recordSize, written2);
+    // Append footer to every output file (empty files get slotCount=0 footer; caller drops them).
+    for (int i = 0; i < numOut && ok; i++)
+        ok = WriteFooter(files[i], outDescs[i], ts->recordSize, written[i]);
 
-    fclose(f1);
-    if (f2) fclose(f2);
+    for (int i = 0; i < numOut; i++)
+        if (files[i]) fclose(files[i]);
 
     if (!ok)
     {
-        remove(desc1->path);
-        if (desc2) remove(desc2->path);
+        for (int i = 0; i < numOut; i++)
+            remove(outDescs[i]->path);
         return TS_RC_IO_Error;
     }
 
-    desc1->slotCount = desc1->liveCount = (uint64_t)written1;
-    if (desc2) desc2->slotCount = desc2->liveCount = (uint64_t)written2;
+    for (int i = 0; i < numOut; i++)
+        outDescs[i]->slotCount = outDescs[i]->liveCount = (uint64_t)written[i];
     return TS_RC_Success;
 }
 
@@ -452,54 +446,52 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
         return TS_RC_IO_Error;
     }
 
-    bool        doSplit = (total > (int64_t)ts->maxFileRecords);
-    TSFileDesc* desc1   = MakeOutputDesc(ts);
-    TSFileDesc* desc2   = doSplit ? MakeOutputDesc(ts) : nullptr;
-
-    if (!desc1 || (doSplit && !desc2))
+    int numOutFiles = (int)((total + (int64_t)ts->maxFileRecords - 1) / (int64_t)ts->maxFileRecords);
+    if (numOutFiles < 1) numOutFiles = 1;
+    std::vector<TSFileDesc*> outDescs;
+    outDescs.reserve(numOutFiles);
+    for (int i = 0; i < numOutFiles; i++)
     {
-        for (auto* c : cursors) { CloseCursor(c); delete c; }
-        TSI_FreeFileDesc(ts, desc1);
-        TSI_FreeFileDesc(ts, desc2);
-        return TS_RC_Out_Of_Memory;
+        TSFileDesc* d = MakeOutputDesc(ts);
+        if (!d)
+        {
+            for (auto* c : cursors) { CloseCursor(c); delete c; }
+            for (auto* od : outDescs) TSI_FreeFileDesc(ts, od);
+            return TS_RC_Out_Of_Memory;
+        }
+        outDescs.push_back(d);
     }
 
-    TSRc mrc = DoMerge(ts, cursors, total, desc1, desc2);
+    TSRc mrc = DoMerge(ts, cursors, outDescs);
 
     for (auto* c : cursors) { CloseCursor(c); delete c; }
 
     if (mrc != TS_RC_Success)
     {
-        TSI_FreeFileDesc(ts, desc1);
-        TSI_FreeFileDesc(ts, desc2);
+        for (auto* od : outDescs) TSI_FreeFileDesc(ts, od);
         return mrc;
     }
 
-    if (desc2 && desc2->slotCount == 0)
+    // Drop any empty output files (heavy deduplication can leave trailing files empty).
+    for (int i = (int)outDescs.size() - 1; i >= 0; i--)
     {
-        remove(desc2->path);
-        TSI_FreeFileDesc(ts, desc2);
-        desc2 = nullptr;
+        if (outDescs[i]->slotCount == 0)
+        {
+            remove(outDescs[i]->path);
+            TSI_FreeFileDesc(ts, outDescs[i]);
+            outDescs.erase(outDescs.begin() + i);
+        }
     }
-    splitOccurred = (desc2 != nullptr);
+    splitOccurred = (outDescs.size() > 1);
 
     TSI_RemoveFiles(ts, overlapIndices);
 
-    TSRc rrc = TSI_RegisterFile(ts, desc1);
-    if (rrc != TS_RC_Success)
+    for (auto* od : outDescs)
     {
-        remove(desc1->path);
-        if (desc2) { remove(desc2->path); TSI_FreeFileDesc(ts, desc2); }
-        TSI_FreeFileDesc(ts, desc1);
-        return rrc;
-    }
-    if (desc2)
-    {
-        rrc = TSI_RegisterFile(ts, desc2);
+        TSRc rrc = TSI_RegisterFile(ts, od);
         if (rrc != TS_RC_Success)
         {
-            remove(desc2->path);
-            TSI_FreeFileDesc(ts, desc2);
+            remove(od->path);
             return rrc;
         }
     }
@@ -555,18 +547,19 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
     int64_t total = (int64_t)count;
     for (int idx : overlapIndices)
         total += (int64_t)ts->files[idx]->liveCount;
-    job->total = total;
 
-    bool doSplit = (total > (int64_t)ts->maxFileRecords);
-    job->desc1  = MakeOutputDesc(ts);
-    job->desc2  = doSplit ? MakeOutputDesc(ts) : nullptr;
-
-    if (!job->desc1 || (doSplit && !job->desc2))
+    int numOutFiles = (int)((total + (int64_t)ts->maxFileRecords - 1) / (int64_t)ts->maxFileRecords);
+    if (numOutFiles < 1) numOutFiles = 1;
+    for (int i = 0; i < numOutFiles; i++)
     {
-        TSI_FreeFileDesc(ts, job->desc1);
-        TSI_FreeFileDesc(ts, job->desc2);
-        delete job;
-        return nullptr;
+        TSFileDesc* d = MakeOutputDesc(ts);
+        if (!d)
+        {
+            for (auto* od : job->outDescs) TSI_FreeFileDesc(ts, od);
+            delete job;
+            return nullptr;
+        }
+        job->outDescs.push_back(d);
     }
 
     // Extract overlapping descriptors from the registry — we take ownership.
@@ -631,7 +624,7 @@ static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
     }
 
     TSRc mrc = cursorOk
-        ? DoMerge(ts, cursors, job->total, job->desc1, job->desc2)
+        ? DoMerge(ts, cursors, job->outDescs)
         : TS_RC_IO_Error;
 
     for (auto* c : cursors) { CloseCursor(c); delete c; }
@@ -644,37 +637,53 @@ static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
     }
     job->srcFiles.clear();
 
-    // Discard empty desc2 and clean up on failure.
-    if (mrc == TS_RC_Success && job->desc2 && job->desc2->slotCount == 0)
+    // Drop empty output files; on failure clean up everything.
+    if (mrc == TS_RC_Success)
     {
-        remove(job->desc2->path);
-        TSI_FreeFileDesc(ts, job->desc2);
-        job->desc2 = nullptr;
+        for (int i = (int)job->outDescs.size() - 1; i >= 0; i--)
+        {
+            if (job->outDescs[i]->slotCount == 0)
+            {
+                remove(job->outDescs[i]->path);
+                TSI_FreeFileDesc(ts, job->outDescs[i]);
+                job->outDescs.erase(job->outDescs.begin() + i);
+            }
+        }
     }
-    if (mrc != TS_RC_Success)
+    else
     {
-        if (job->desc1) { remove(job->desc1->path); TSI_FreeFileDesc(ts, job->desc1); job->desc1 = nullptr; }
-        if (job->desc2) { remove(job->desc2->path); TSI_FreeFileDesc(ts, job->desc2); job->desc2 = nullptr; }
+        for (auto* od : job->outDescs) { remove(od->path); TSI_FreeFileDesc(ts, od); }
+        job->outDescs.clear();
     }
 
     // Re-acquire write lock to register output files, recycle the arena, and clear bgTree.
     RWLockWriteLock("TSI_BackgroundMerge", &ts->storeLock);
 
     bool splitOccurred = false;
-    if (mrc == TS_RC_Success && job->desc1)
+    if (mrc == TS_RC_Success && !job->outDescs.empty())
     {
-        TSRc rrc = TSI_RegisterFile(ts, job->desc1);
-        if (rrc == TS_RC_Success)
+        splitOccurred = (job->outDescs.size() > 1);
+        for (int i = 0; i < (int)job->outDescs.size(); i++)
         {
-            job->desc1 = nullptr;
-            if (job->desc2)
+            TSRc rrc = TSI_RegisterFile(ts, job->outDescs[i]);
+            if (rrc == TS_RC_Success)
             {
-                rrc = TSI_RegisterFile(ts, job->desc2);
-                if (rrc == TS_RC_Success) { splitOccurred = true; job->desc2 = nullptr; }
+                job->outDescs[i] = nullptr;
+            }
+            else
+            {
+                // Leave already-registered files; clean up the rest.
+                for (int j = i; j < (int)job->outDescs.size(); j++)
+                {
+                    if (job->outDescs[j])
+                    {
+                        remove(job->outDescs[j]->path);
+                        TSI_FreeFileDesc(ts, job->outDescs[j]);
+                    }
+                }
+                break;
             }
         }
-        if (job->desc1) { remove(job->desc1->path); TSI_FreeFileDesc(ts, job->desc1); }
-        if (job->desc2) { remove(job->desc2->path); TSI_FreeFileDesc(ts, job->desc2); }
     }
 
     // BPFreeTree calls ArenaMemReset internally when an arena is attached, so

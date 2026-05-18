@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.3.3] - 2026-05-18
+
+### Fixed
+- `TieredStoreHybrid`: N-way file split — `DoMerge` previously capped output at 2 files (`desc1` + optional `desc2`); when total merged records exceeded `2 × maxFileRecords` the second file grew without bound, producing files 37–53× larger than the 1 GB target in the v2.3.2 6×6 run (Board/Level14 = 37 GB × 2, Board/Level15 = 53 GB × 2, Move/Level13 = 45 GB × 2); fixed by replacing the `desc1`/`desc2` pair with `std::vector<TSFileDesc*> outDescs` of `N = ceil(total / maxFileRecords)` output descriptors; `DoMerge` advances to the next descriptor when the current one reaches `maxFileRecords` records; empty trailing descriptors (possible after heavy deduplication) are cleaned up before registration; `TSMergeJob` struct updated to carry `outDescs` vector; both the synchronous (`TSI_FlushMemTree`) and background (`TSI_PrepMergeJob` / `TSI_BackgroundMerge`) merge paths updated; `statSplits` now counts any merge that produces more than one output file
+
+---
+
 ## [v2.3.2] - 2026-05-18
 
 ### Added
