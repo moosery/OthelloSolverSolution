@@ -105,7 +105,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\BPlusTree;..\Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\BPlusTreeHybrid;..\Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -121,7 +121,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\BPlusTree;..\Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\BPlusTreeHybrid;..\Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -132,8 +132,8 @@
     <ClCompile Include="BPlusTreeTester.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
+    <ProjectReference Include="..\BPlusTreeHybrid\BPlusTreeHybrid.vcxproj">
+      <Project>{7f9f0d90-47d0-4095-ad76-23e35d2da5c8}</Project>
     </ProjectReference>
     <ProjectReference Include="..\Utility\Utility.vcxproj">
       <Project>{b382b361-46d9-4bdc-a61d-cc9407068a04}</Project>

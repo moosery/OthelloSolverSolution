@@ -94,7 +94,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PreprocessorDefinitions>_WINDOWS;_DEBUG;%(PreprocessorDefinitions);_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..\Utility;..\OthelloBasics;..\BPlusTree</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\OthelloBasics;..\BPlusTreeHybrid</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -170,7 +170,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PreprocessorDefinitions>_WINDOWS;NDEBUG;%(PreprocessorDefinitions);_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..\Utility;..\OthelloBasics;..\BPlusTree</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\OthelloBasics;..\BPlusTreeHybrid</AdditionalIncludeDirectories>
       <Optimization>MaxSpeed</Optimization>
     </ClCompile>
     <Link>
@@ -213,8 +213,8 @@
     <Image Include="res\TempBoard.ico" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
+    <ProjectReference Include="..\BPlusTreeHybrid\BPlusTreeHybrid.vcxproj">
+      <Project>{7f9f0d90-47d0-4095-ad76-23e35d2da5c8}</Project>
     </ProjectReference>
     <ProjectReference Include="..\OthelloBasics\OthelloBasics.vcxproj">
       <Project>{0811ac57-4904-4c1d-b3a6-d562484b3d9f}</Project>

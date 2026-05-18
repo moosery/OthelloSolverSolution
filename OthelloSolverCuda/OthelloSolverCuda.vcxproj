@@ -48,7 +48,7 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;WIN64;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BoardsToProcess;..\BPlusTree;..\OthelloBasics;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BoardsToProcess;..\BPlusTreeHybrid;..\OthelloBasics;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -69,7 +69,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;WIN64;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BoardsToProcess;..\BPlusTree;..\OthelloBasics;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BoardsToProcess;..\BPlusTreeHybrid;..\OthelloBasics;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -97,8 +97,8 @@
     <ProjectReference Include="..\BoardsToProcess\BoardsToProcess.vcxproj">
       <Project>{dee9fce2-2b64-4335-868d-42162868edbd}</Project>
     </ProjectReference>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
+    <ProjectReference Include="..\BPlusTreeHybrid\BPlusTreeHybrid.vcxproj">
+      <Project>{7f9f0d90-47d0-4095-ad76-23e35d2da5c8}</Project>
     </ProjectReference>
     <ProjectReference Include="..\OthelloBasics\OthelloBasics.vcxproj">
       <Project>{2cc52c70-80f3-4700-9e46-0f6b1c077667}</Project>

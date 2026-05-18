@@ -107,7 +107,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions);_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\BoardsToProcess;..\OthelloBasics;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTreeHybrid;..\BoardsToProcess;..\OthelloBasics;</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -123,7 +123,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions);_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\BPlusTree;..\BoardsToProcess;..\OthelloBasics;..\Utility;..\BPlusTree;..\OthelloBasics;..\BoardsToProcess</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\BPlusTreeHybrid;..\BoardsToProcess;..\OthelloBasics;..\Utility;..\BPlusTree;..\OthelloBasics;..\BoardsToProcess</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -139,8 +139,8 @@
     <ProjectReference Include="..\BoardsToProcess\BoardsToProcess.vcxproj">
       <Project>{dee9fce2-2b64-4335-868d-42162868edbd}</Project>
     </ProjectReference>
-    <ProjectReference Include="..\BPlusTree\BPlusTree.vcxproj">
-      <Project>{dbe8b48d-fd07-4534-acdf-7c4368845aae}</Project>
+    <ProjectReference Include="..\BPlusTreeHybrid\BPlusTreeHybrid.vcxproj">
+      <Project>{7f9f0d90-47d0-4095-ad76-23e35d2da5c8}</Project>
     </ProjectReference>
     <ProjectReference Include="..\OthelloBasics\OthelloBasics.vcxproj">
       <Project>{2cc52c70-80f3-4700-9e46-0f6b1c077667}</Project>
