@@ -124,7 +124,7 @@ static bool CreateBTrees()
         s_shardArenas[i] = ArenaMemCreate(s_shardArenaBytes);
         if (!s_shardArenas[i]) return false;
         BPRc rc = BPCreateTree(&s_pBoards[i], 256,
-                               0, 1, fields, (int)sizeof(BoardEntry), s_shardArenas[i]);
+                               0, BP_IDX_SETTING_DEFAULT, 1, fields, (int)sizeof(BoardEntry), s_shardArenas[i]);
         if (rc != BP_RC_Success) return false;
     }
     return true;
@@ -577,7 +577,7 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
     if (isRestart)
 #ifdef TS_USE_BPTREE_ARENA
         tsRc = TSOpen(dirs[0].c_str(), k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
-                      s_tsArena, MergeUniqueRecord, &s_pTs);
+                      MergeUniqueRecord, &s_pTs, s_tsArena);
 #else
         tsRc = TSOpen(dirs[0].c_str(), k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
                       MergeUniqueRecord, &s_pTs);
@@ -587,9 +587,8 @@ static void ControllerThread(bool isRestart, int boardSize, int cpuDepth,
 #ifdef TS_USE_BPTREE_ARENA
         tsRc = TSCreate(dirPtrs.data(), (int)dirPtrs.size(),
                         k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,
-                        sizeof(UniqueRecord), s_tsArena,
-                        s_tsMaxMem, s_tsMaxMem,
-                        MergeUniqueRecord, &s_pTs);
+                        sizeof(UniqueRecord), s_tsMaxMem, s_tsMaxMem,
+                        MergeUniqueRecord, &s_pTs, s_tsArena);
 #else
         tsRc = TSCreate(dirPtrs.data(), (int)dirPtrs.size(),
                         k_uniqueKeyFlds, 3, TS_IDX_SETTING_DEFAULT,

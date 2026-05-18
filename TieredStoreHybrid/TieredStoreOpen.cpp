@@ -189,6 +189,17 @@ static TSRc TSI_OpenStore(
         TS_DPRINT("TSOpen: rebuilt %d files from meta-store", ts->numFiles);
     }
 
+    // Background merge infrastructure — heap-allocated to survive the memset above.
+    ts->bgMutex   = new (std::nothrow) std::mutex();
+    ts->bgCV      = new (std::nothrow) std::condition_variable();
+    ts->mergePool = new (std::nothrow) ThreadPool(1, std::string(ts->baseName));
+    if (!ts->bgMutex || !ts->bgCV || !ts->mergePool)
+    {
+        TSI_FreeStore(ts);
+        return TS_RC_Out_Of_Memory;
+    }
+    ts->mergePool->Start();
+
     ts->pMemArena = pArena;
     BPRc brc = BPCreateTree(&ts->memTree, 256, (size_t)ts->maxMemoryBytes,
                             idxSettings, (size_t)numKeyFlds, (BPIdxFld*)keyFlds, ts->recordSize,

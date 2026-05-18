@@ -5,7 +5,14 @@ TSRc TSUpdate(PTS pTs, const void* record)
 {
     if (!pTs || !record) return TS_RC_Invalid_Arg;
 
+    // Wait for any in-flight background merge before taking the write lock.
     RWLockWriteLock("TSUpdate", &pTs->storeLock);
+    while (pTs->bgPending)
+    {
+        RWLockWriteUnlock("TSUpdate", &pTs->storeLock);
+        TSI_WaitForBgMerge(pTs);
+        RWLockWriteLock("TSUpdate", &pTs->storeLock);
+    }
 
     // Reject if any iterator is live: TSIterNext reads file data without holding a lock,
     // so a concurrent multi-byte in-place write would be a data race.

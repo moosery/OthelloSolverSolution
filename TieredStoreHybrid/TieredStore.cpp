@@ -19,9 +19,25 @@ void TSI_FreeFileDesc(_TieredStore* ts, TSFileDesc* desc)
 void TSI_FreeStore(_TieredStore* ts)
 {
     if (!ts) return;
+
+    // Drain the background merge before tearing down anything.
+    if (ts->mergePool)
+    {
+        TSI_WaitForBgMerge(ts);
+        ts->mergePool->Stop();
+        delete ts->mergePool;
+        ts->mergePool = nullptr;
+    }
+
+    // bgTree should be NULL after the wait, but guard defensively.
+    if (ts->bgTree) { BPFreeTree(ts->bgTree, true); ts->bgTree = nullptr; }
+    if (ts->spareArena) { ArenaMemDestroy(ts->spareArena); ts->spareArena = nullptr; }
+
+    delete ts->bgCV;    ts->bgCV    = nullptr;
+    delete ts->bgMutex; ts->bgMutex = nullptr;
+
     if (ts->metaStore) { TSClose(&ts->metaStore); }
     if (ts->memTree) { BPFreeTree(ts->memTree, true); ts->memTree = nullptr; }
-    // pArena: BPFreeTree already called ArenaMemReset; caller manages the struct
     ts->pMemArena = nullptr;
     if (ts->files)
     {
@@ -153,7 +169,7 @@ static void AdvanceCursor(MergeCursor* c)
     c->done = true;
 }
 
-static bool InitCursorMemTree(MergeCursor* c, _TieredStore* ts)
+static bool InitCursorTree(MergeCursor* c, _TieredStore* ts, PBPTree tree)
 {
     c->ts          = ts;
     c->done        = false;
@@ -163,7 +179,7 @@ static bool InitCursorMemTree(MergeCursor* c, _TieredStore* ts)
     c->slotsLeft   = 0;
     c->current.resize((size_t)ts->recordSize);
 
-    BPIterateStart(ts->memTree, &c->iter);
+    BPIterateStart(tree, &c->iter);
     c->iterStarted = true;
 
     if (BPIterate(&c->iter, c->current.data()) != BP_RC_Success)
@@ -198,10 +214,10 @@ static void CloseCursor(MergeCursor* c)
 
 // ==================== k-way merge: helpers ====================
 
-static void GetMemTreeRange(_TieredStore* ts, uint8_t* outMin, uint8_t* outMax)
+static void GetTreeRange(_TieredStore* ts, PBPTree tree, uint8_t* outMin, uint8_t* outMax)
 {
-    BPFindFirstKey(ts->memTree, outMin);
-    BPFindLastKey(ts->memTree,  outMax);
+    BPFindFirstKey(tree, outMin);
+    BPFindLastKey(tree,  outMax);
 }
 
 static void FindOverlappingFiles(_TieredStore* ts,
@@ -392,7 +408,7 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
 
     std::vector<uint8_t> memMin((size_t)ts->recordSize);
     std::vector<uint8_t> memMax((size_t)ts->recordSize);
-    GetMemTreeRange(ts, memMin.data(), memMax.data());
+    GetTreeRange(ts, ts->memTree, memMin.data(), memMax.data());
 
     std::vector<int> overlapIndices;
     FindOverlappingFiles(ts, memMin.data(), memMax.data(), overlapIndices);
@@ -406,7 +422,7 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
 
     MergeCursor* memCursor = new (std::nothrow) MergeCursor();
     if (!memCursor) return TS_RC_Out_Of_Memory;
-    InitCursorMemTree(memCursor, ts);
+    InitCursorTree(memCursor, ts, ts->memTree);
     if (!memCursor->done)
         cursors.push_back(memCursor);
     else
@@ -495,6 +511,230 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
     if (splitOccurred) ts->statSplits++;
     ts->statMergeNs += (uint64_t)ClockNanosSinceStart(&ct);
     return TS_RC_Success;
+}
+
+// ==================== Background merge: wait ====================
+
+void TSI_WaitForBgMerge(_TieredStore* ts)
+{
+    std::unique_lock<std::mutex> lk(*ts->bgMutex);
+    ts->bgCV->wait(lk, [ts]{ return ts->bgPending == 0; });
+}
+
+// ==================== Background merge: prep job (called under write lock) ====================
+//
+// Extracts the current memTree and all overlapping disk files from the store's live
+// registry into a TSMergeJob.  Callers must NOT free the extracted file descriptors
+// (job->srcFiles owns them); the background thread will delete the files from disk
+// and free the descriptors after the merge completes.
+
+static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
+{
+    uint64_t count = BPGetDataCnt(ts->memTree);
+    if (count == 0) return nullptr;
+
+    TSMergeJob* job = new (std::nothrow) TSMergeJob();
+    if (!job) return nullptr;
+
+    job->tree  = ts->memTree;
+    job->arena = ts->pMemArena;
+
+    std::vector<uint8_t> memMin((size_t)ts->recordSize);
+    std::vector<uint8_t> memMax((size_t)ts->recordSize);
+    GetTreeRange(ts, job->tree, memMin.data(), memMax.data());
+
+    std::vector<int> overlapIndices;
+    FindOverlappingFiles(ts, memMin.data(), memMax.data(), overlapIndices);
+
+    int64_t total = (int64_t)count;
+    for (int idx : overlapIndices)
+        total += (int64_t)ts->files[idx]->liveCount;
+    job->total = total;
+
+    bool doSplit = (total > (int64_t)ts->maxFileRecords);
+    job->desc1  = MakeOutputDesc(ts);
+    job->desc2  = doSplit ? MakeOutputDesc(ts) : nullptr;
+
+    if (!job->desc1 || (doSplit && !job->desc2))
+    {
+        TSI_FreeFileDesc(ts, job->desc1);
+        TSI_FreeFileDesc(ts, job->desc2);
+        delete job;
+        return nullptr;
+    }
+
+    // Extract overlapping descriptors from the registry — we take ownership.
+    // Sort descending so earlier indices are still valid when we shift the array.
+    std::sort(overlapIndices.begin(), overlapIndices.end(), [](int a, int b){ return a > b; });
+    for (int idx : overlapIndices)
+    {
+        job->srcFiles.push_back(ts->files[idx]);
+        for (int j = idx; j < ts->numFiles - 1; j++)
+            ts->files[j] = ts->files[j + 1];
+        ts->numFiles--;
+    }
+
+    // Remove src files from the meta-store (still under the caller's write lock).
+    if (ts->metaStore)
+    {
+        int metaRecSize = (int)sizeof(TSManifestFileEntry) + 2 * ts->recordSize;
+        for (TSFileDesc* fd : job->srcFiles)
+        {
+            std::vector<uint8_t> keyBuf((size_t)metaRecSize, 0);
+            memcpy(keyBuf.data(), &fd->fileId, sizeof(uint64_t));
+            TSDelete(ts->metaStore, keyBuf.data());
+        }
+    }
+
+    ClockStart(&job->startTime);
+    return job;
+}
+
+// ==================== Background merge: worker (runs on bg thread) ====================
+//
+// Owns job->tree and job->srcFiles exclusively — no lock needed during I/O.
+// Re-acquires the write lock only at the end to register output files and clear bgTree.
+
+static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
+{
+    std::vector<MergeCursor*> cursors;
+    bool cursorOk = true;
+
+    {
+        MergeCursor* mc = new (std::nothrow) MergeCursor();
+        if (!mc) { cursorOk = false; }
+        else
+        {
+            InitCursorTree(mc, ts, job->tree);
+            if (!mc->done) cursors.push_back(mc);
+            else           { CloseCursor(mc); delete mc; }
+        }
+    }
+
+    if (cursorOk)
+    {
+        for (TSFileDesc* fd : job->srcFiles)
+        {
+            MergeCursor* fc = new (std::nothrow) MergeCursor();
+            if (!fc) { cursorOk = false; break; }
+            if (!InitCursorFile(fc, ts, fd))
+                { CloseCursor(fc); delete fc; cursorOk = false; break; }
+            if (!fc->done) cursors.push_back(fc);
+            else           { CloseCursor(fc); delete fc; }
+        }
+    }
+
+    TSRc mrc = cursorOk
+        ? DoMerge(ts, cursors, job->total, job->desc1, job->desc2)
+        : TS_RC_IO_Error;
+
+    for (auto* c : cursors) { CloseCursor(c); delete c; }
+
+    // Delete source files from disk and free their descriptors.
+    for (TSFileDesc* fd : job->srcFiles)
+    {
+        remove(fd->path);
+        TSI_FreeFileDesc(ts, fd);
+    }
+    job->srcFiles.clear();
+
+    // Discard empty desc2 and clean up on failure.
+    if (mrc == TS_RC_Success && job->desc2 && job->desc2->slotCount == 0)
+    {
+        remove(job->desc2->path);
+        TSI_FreeFileDesc(ts, job->desc2);
+        job->desc2 = nullptr;
+    }
+    if (mrc != TS_RC_Success)
+    {
+        if (job->desc1) { remove(job->desc1->path); TSI_FreeFileDesc(ts, job->desc1); job->desc1 = nullptr; }
+        if (job->desc2) { remove(job->desc2->path); TSI_FreeFileDesc(ts, job->desc2); job->desc2 = nullptr; }
+    }
+
+    // Re-acquire write lock to register output files, recycle the arena, and clear bgTree.
+    RWLockWriteLock("TSI_BackgroundMerge", &ts->storeLock);
+
+    bool splitOccurred = false;
+    if (mrc == TS_RC_Success && job->desc1)
+    {
+        TSRc rrc = TSI_RegisterFile(ts, job->desc1);
+        if (rrc == TS_RC_Success)
+        {
+            job->desc1 = nullptr;
+            if (job->desc2)
+            {
+                rrc = TSI_RegisterFile(ts, job->desc2);
+                if (rrc == TS_RC_Success) { splitOccurred = true; job->desc2 = nullptr; }
+            }
+        }
+        if (job->desc1) { remove(job->desc1->path); TSI_FreeFileDesc(ts, job->desc1); }
+        if (job->desc2) { remove(job->desc2->path); TSI_FreeFileDesc(ts, job->desc2); }
+    }
+
+    // BPFreeTree calls ArenaMemReset internally when an arena is attached, so
+    // job->arena is already reset and ready to be reused as spareArena.
+    BPFreeTree(job->tree, true);
+    ts->bgTree  = nullptr;
+    ts->bgArena = nullptr;
+
+    if (job->arena)
+    {
+        if (!ts->spareArena)
+            ts->spareArena = job->arena;
+        else
+            ArenaMemDestroy(job->arena);
+    }
+
+    ts->statMerges++;
+    if (splitOccurred) ts->statSplits++;
+    ts->statMergeNs += (uint64_t)ClockNanosSinceStart(&job->startTime);
+
+    RWLockWriteUnlock("TSI_BackgroundMerge", &ts->storeLock);
+
+    // Signal bgPending = 0 so callers blocked in TSI_WaitForBgMerge wake up.
+    {
+        std::lock_guard<std::mutex> lk(*ts->bgMutex);
+        ts->bgPending = 0;
+    }
+    ts->bgCV->notify_all();
+
+    delete job;
+}
+
+// ==================== Background merge: trigger (called under write lock) ====================
+//
+// Swaps the full memTree to bgTree, installs a fresh memTree, and queues the merge
+// job.  Returns immediately; the caller can continue inserting into the new memTree.
+
+void TSI_TriggerBgFlush(_TieredStore* ts)
+{
+    TSMergeJob* job = TSI_PrepMergeJob(ts);
+    if (!job) return;
+
+    // Promote current memTree to bgTree so TSFind can still search it during the merge.
+    ts->bgTree  = job->tree;
+    ts->bgArena = job->arena;
+
+    // Install a fresh memTree for continued inserts.
+    PArenaMem newArena = nullptr;
+    if (ts->pMemArena)
+    {
+        newArena       = ts->spareArena ? ts->spareArena
+                                        : ArenaMemCreate(ts->maxMemoryBytes);
+        ts->spareArena = nullptr;
+    }
+    ts->pMemArena = newArena;
+
+    ts->memTree = nullptr;
+    BPCreateTree(&ts->memTree, 256, (size_t)ts->maxMemoryBytes,
+                 ts->idxSettings, (size_t)ts->numKeyFlds,
+                 (BPIdxFld*)ts->keyFlds, ts->recordSize, newArena);
+
+    {
+        std::lock_guard<std::mutex> lk(*ts->bgMutex);
+        ts->bgPending = 1;
+    }
+    ts->mergePool->QueueJob([ts, job](){ TSI_BackgroundMerge(ts, job); });
 }
 
 // ==================== Binary search within a single sorted file ====================

@@ -105,7 +105,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\TieredStore;..\BPlusTreeArena;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\TieredStoreHybrid;..\BPlusTreeArena;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -121,7 +121,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Utility;..\TieredStore;..\BPlusTreeArena;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Utility;..\TieredStoreHybrid;..\BPlusTreeArena;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -132,11 +132,11 @@
     <ClCompile Include="TieredStoreTester.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BPlusTreeArena\BPlusTreeArena.vcxproj">
-      <Project>{77f4ffcc-e592-4e1a-adad-b202114be622}</Project>
+    <ProjectReference Include="..\BPlusTreeHybrid\BPlusTreeHybrid.vcxproj">
+      <Project>{7f9f0d90-47d0-4095-ad76-23e35d2da5c8}</Project>
     </ProjectReference>
-    <ProjectReference Include="..\TieredStore\TieredStore.vcxproj">
-      <Project>{b3dba222-f8f9-421c-9bad-0a6d4cadcbd5}</Project>
+    <ProjectReference Include="..\TieredStoreHybrid\TieredStoreHybrid.vcxproj">
+      <Project>{b33503f7-585b-4d82-b0aa-77676c9c9838}</Project>
     </ProjectReference>
     <ProjectReference Include="..\Utility\Utility.vcxproj">
       <Project>{1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1}</Project>

@@ -14,6 +14,12 @@ TSRc TSFind(PTS pTs, const void* keyRecord, void* outRecord)
     {
         result = TS_RC_Success;
     }
+    else if (pTs->bgTree && BPFindEqualKey(pTs->bgTree, const_cast<void*>(keyRecord), outRecord) == BP_RC_Success)
+    {
+        // bgTree holds the in-memory tree currently being merged to disk; it may contain
+        // records not yet visible in the file registry.
+        result = TS_RC_Success;
+    }
     else
     {
         for (int i = 0; i < pTs->numFiles; i++)

@@ -4,7 +4,15 @@ TSRc TSDelete(PTS pTs, const void* keyRecord)
 {
     if (!pTs || !keyRecord) return TS_RC_Invalid_Arg;
 
+    // Wait for any in-flight background merge before proceeding; a record currently in
+    // bgTree would be invisible to the file scan until the merge completes.
     RWLockWriteLock("TSDelete", &pTs->storeLock);
+    while (pTs->bgPending)
+    {
+        RWLockWriteUnlock("TSDelete", &pTs->storeLock);
+        TSI_WaitForBgMerge(pTs);
+        RWLockWriteLock("TSDelete", &pTs->storeLock);
+    }
 
     if (pTs->memTree)
         BPDeleteDataAndFree(pTs->memTree, const_cast<void*>(keyRecord));

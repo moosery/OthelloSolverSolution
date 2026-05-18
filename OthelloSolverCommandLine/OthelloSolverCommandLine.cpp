@@ -22,7 +22,7 @@
 #  include <ArenaMem.h>
 #endif
 
-#define APP_VERSION "2.1.1"
+#define APP_VERSION "2.3.0"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 15 * 1024 * 1024 * 1024ULL; // 15GB per disk file
 constexpr auto MAX_MEMORY_PER_STORE             = 12ULL * 1024 * 1024 * 1024;   // 12GB in-memory flush threshold (3 stores x 12GB = 36GB peak)
@@ -328,9 +328,9 @@ static void CreateBoardStore(int level)
     const char* dirs[1] = { path };
 #ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                       sizeof(BOARD), AcquireBoardArena(level), g_boardMemPerStore,
+                       sizeof(BOARD), g_boardMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, BoardWinsMergeFn,
-                       &g_tieredBoardStores[level]);
+                       &g_tieredBoardStores[level], AcquireBoardArena(level));
 #else
     TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(BOARD), MAX_MEMORY_PER_STORE, MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER,
@@ -350,9 +350,9 @@ static void CreateMoveStore(int level)
     const char* dirs[1] = { path };
 #ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                       sizeof(MOVE), AcquireMoveArena(level), g_moveMemPerStore,
+                       sizeof(MOVE), g_moveMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, nullptr,
-                       &g_tieredMoveStores[level]);
+                       &g_tieredMoveStores[level], AcquireMoveArena(level));
 #else
     TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(MOVE), MAX_MEMORY_PER_STORE, MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER,
@@ -368,7 +368,7 @@ static void OpenBoardStore(int level)
     strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(level), _TRUNCATE);
 #ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSOpen(path, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                     AcquireBoardArena(level), BoardWinsMergeFn, &g_tieredBoardStores[level]);
+                     BoardWinsMergeFn, &g_tieredBoardStores[level], AcquireBoardArena(level));
 #else
     TSRc rc = TSOpen(path, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                      BoardWinsMergeFn, &g_tieredBoardStores[level]);
@@ -383,7 +383,7 @@ static void OpenMoveStore(int level)
     strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(level), _TRUNCATE);
 #ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSOpen(path, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                     AcquireMoveArena(level), nullptr, &g_tieredMoveStores[level]);
+                     nullptr, &g_tieredMoveStores[level], AcquireMoveArena(level));
 #else
     TSRc rc = TSOpen(path, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                      nullptr, &g_tieredMoveStores[level]);

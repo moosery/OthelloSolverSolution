@@ -8,7 +8,14 @@ TSRc TSEnumerate(PTS pTs, TS_ENUM_FN enumFn, void* ctx)
     // Write lock: we flush the in-memory tree before enumerating so that every
     // record appears exactly once (on disk).  Without the flush a key present in
     // both the tree and an older disk file would be returned twice.
+    // Wait for any in-flight background merge first so the file registry is complete.
     RWLockWriteLock("TSEnumerate", &pTs->storeLock);
+    while (pTs->bgPending)
+    {
+        RWLockWriteUnlock("TSEnumerate", &pTs->storeLock);
+        TSI_WaitForBgMerge(pTs);
+        RWLockWriteLock("TSEnumerate", &pTs->storeLock);
+    }
 
     TSRc result = TS_RC_Success;
 

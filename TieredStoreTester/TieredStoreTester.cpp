@@ -1,7 +1,7 @@
 // TieredStoreTester.cpp — comprehensive test suite for TieredStore
 // Includes the internal header so we can cast to _TieredStore* to read file paths
 // during the data-file-corruption tests.
-#include "../TieredStore/TieredStoreInternal.h"
+#include "../TieredStoreHybrid/TieredStoreInternal.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -93,7 +93,7 @@ static PTS CreateStore(const char* testName, int maxRec)
     uint64_t maxBytes = (uint64_t)maxRec * sizeof(TestRec);
 #ifdef TS_USE_BPTREE_ARENA
     TSRc rc = TSCreate(k_dirs, 1, k_keyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                       sizeof(TestRec), s_testArena, maxBytes, maxBytes, TRMerge, &ts);
+                       sizeof(TestRec), maxBytes, maxBytes, TRMerge, &ts, s_testArena);
 #else
     TSRc rc = TSCreate(k_dirs, 1, k_keyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(TestRec), maxBytes, maxBytes, TRMerge, &ts);
@@ -107,7 +107,7 @@ static PTS OpenStore(const char* testName)
 {
     PTS ts = nullptr;
 #ifdef TS_USE_BPTREE_ARENA
-    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, s_testArena, TRMerge, &ts);
+    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts, s_testArena);
 #else
     TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts);
 #endif
@@ -639,7 +639,7 @@ static bool TestCorruptManifest()
     // TSOpen must detect the bad magic and fail cleanly
     PTS ts = nullptr;
 #ifdef TS_USE_BPTREE_ARENA
-    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, s_testArena, TRMerge, &ts);
+    TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts, s_testArena);
 #else
     TSRc rc = TSOpen(k_dirs[0], k_keyFlds, 1, TS_IDX_SETTING_DEFAULT, TRMerge, &ts);
 #endif

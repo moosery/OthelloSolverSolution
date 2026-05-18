@@ -8,7 +8,17 @@ TSRc TSCheckpoint(PTS pTs)
 
     ClockTick ct;
     ClockStart(&ct);
+
+    // Acquire the write lock; if a background merge is in flight we must wait for it
+    // first so all data is in the file registry before we write the manifest.
+    // Loop because a new flush could be triggered between our wait and re-lock.
     RWLockWriteLock("TSCheckpoint", &pTs->storeLock);
+    while (pTs->bgPending)
+    {
+        RWLockWriteUnlock("TSCheckpoint", &pTs->storeLock);
+        TSI_WaitForBgMerge(pTs);
+        RWLockWriteLock("TSCheckpoint", &pTs->storeLock);
+    }
 
     TSRc result = TS_RC_Success;
 

@@ -30,7 +30,16 @@ TSRc TSIterOpen(PTS pTs, PTSI* ppIter)
 {
     if (!pTs || !ppIter) return TS_RC_Invalid_Arg;
 
+    // Wait for any in-flight background merge before taking the write lock so the
+    // snapshot includes all flushed data.  Loop because a new flush could be
+    // triggered between our wait and re-lock.
     RWLockWriteLock("TSIterOpen", &pTs->storeLock);
+    while (pTs->bgPending)
+    {
+        RWLockWriteUnlock("TSIterOpen", &pTs->storeLock);
+        TSI_WaitForBgMerge(pTs);
+        RWLockWriteLock("TSIterOpen", &pTs->storeLock);
+    }
 
     // Flush in-memory tree so the snapshot is complete.
     if (pTs->memTree && BPGetDataCnt(pTs->memTree) > 0)

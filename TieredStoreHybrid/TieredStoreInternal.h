@@ -5,8 +5,12 @@
 #include "../BPlusTreeHybrid/BP.h"
 #include "RWLock.h"
 #include "ClockTick.h"
+#include "../Utility/ThreadPool.h"
 #include <stdint.h>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <vector>
 #include <windows.h>
 
 // ==================== Debug output ====================
@@ -123,13 +127,31 @@ typedef struct _TSFileDesc
     uint8_t* maxKey;         // heap-allocated: recordSize bytes; largest live key
 } TSFileDesc;
 
+// ==================== Background merge job ====================
+//
+// Captures everything needed for one flush+merge pass.
+// Allocated under write lock in TSI_PrepMergeJob; freed by TSI_BackgroundMerge.
+
+struct TSMergeJob
+{
+    PBPTree                   tree;       // in-memory tree to merge (not yet freed)
+    PArenaMem                 arena;      // tree's arena (NULL = malloc mode)
+    std::vector<TSFileDesc*>  srcFiles;   // on-disk files being merged (removed after merge)
+    TSFileDesc*               desc1;      // output file 1
+    TSFileDesc*               desc2;      // output file 2 (NULL = no split)
+    int64_t                   total;      // expected total live record count
+    ClockTick                 startTime;  // for statMergeNs
+};
+
 // ==================== Internal helper declarations ====================
 
 void  TSI_FreeFileDesc(_TieredStore* ts, TSFileDesc* desc);
 void  TSI_FreeStore(_TieredStore* ts);
 TSRc  TSI_RegisterFileArray(_TieredStore* ts, TSFileDesc* desc); // array only (used during TSOpen)
 TSRc  TSI_RegisterFile(_TieredStore* ts, TSFileDesc* desc);      // array + meta-store
-TSRc  TSI_FlushMemTree(_TieredStore* ts);
+TSRc  TSI_FlushMemTree(_TieredStore* ts);                        // synchronous flush (checkpoint/iter)
+void  TSI_WaitForBgMerge(_TieredStore* ts);                      // block until bgPending == 0
+void  TSI_TriggerBgFlush(_TieredStore* ts);                      // swap trees + queue bg job (write lock held)
 TSRc  TSI_FindInFile(const _TieredStore* ts, const TSFileDesc* desc,
                      const void* keyRecord, void* outRecord);
 TSRc  TSI_UpdateInFile(_TieredStore* ts, TSFileDesc* desc,
@@ -176,6 +198,16 @@ struct _TieredStore
     // Synchronization
     RWLock             storeLock;
     std::atomic<int>   activeIterCount;  // incremented by TSIterOpen, decremented by TSIterClose
+
+    // Background merge support
+    // bgMutex/bgCV are heap-allocated so they survive the memset(ts, 0) in TSI_CreateStore.
+    ThreadPool*              mergePool;   // 1-thread pool; started at create/open
+    std::mutex*              bgMutex;     // protects bgCV predicate only
+    std::condition_variable* bgCV;        // signaled when bgPending drops to 0
+    std::atomic<int>         bgPending;   // 0 = idle, 1 = merge in flight
+    PBPTree                  bgTree;      // in-memory tree currently being bg-merged (storeLock)
+    PArenaMem                bgArena;     // bgTree's arena; NULL if malloc mode (storeLock)
+    PArenaMem                spareArena;  // recycled arena ready for the next flush (storeLock)
 
     // Stats — always read/written while holding storeLock
     uint64_t      statInserts;

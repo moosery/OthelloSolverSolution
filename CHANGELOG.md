@@ -1,5 +1,19 @@
 # Changelog
 
+## [v2.3.0] - 2026-05-17
+
+### Added
+- `TieredStoreHybrid`: background merge — `TSInsert` now triggers an asynchronous flush via `TSI_TriggerBgFlush` instead of blocking on disk I/O; the full in-memory tree is swapped to `bgTree` under the write lock (fast), a fresh empty tree is installed for continued inserts, and the actual merge + file write runs on a dedicated 1-thread `ThreadPool` worker per store
+- `TieredStoreHybrid`: `bgTree` search in `TSFind` — reads check `memTree`, then `bgTree` (the tree being merged in the background), then disk files, so no records are invisible during an in-flight merge
+- `TieredStoreHybrid`: arena double-buffering — `spareArena` field recycles the flushed tree's arena (reset by `BPFreeTree`) for the next flush cycle; only one one-time allocation on the first flush; subsequent flushes alternate between two arenas at zero allocation cost
+- `TieredStoreHybrid`: `TSI_WaitForBgMerge` — callers that need a complete on-disk snapshot (`TSCheckpoint`, `TSEnumerate`, `TSIterOpen`, `TSUpdate`, `TSDelete`) wait for any in-flight merge to finish before proceeding, using a `condition_variable` signaled by the bg thread
+
+### Changed
+- `TieredStoreHybrid`: `TSCheckpoint`, `TSEnumerate`, `TSIterOpen`, `TSUpdate`, `TSDelete` all use a wait loop (`release write lock → wait for bg → re-acquire`) to avoid deadlock with the bg merge thread's own write-lock acquisition at finalization time
+- All `TSCreate`/`TSOpen`/`BPCreateTree` arena-mode call sites in `OthelloSolverCommandLine`, `OthelloSolverMFCandCUDA`, and `TieredStoreTester` corrected — `pArena` argument moved to the final (optional) position to match the current API signatures
+
+---
+
 ## [v2.2.0] - 2026-05-17
 
 ### Added
