@@ -12,6 +12,8 @@
 #include <string>
 #include <filesystem>
 #include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "Psapi.lib")
 #include <Utility.h>
 #include "InternalRoutines.h"
 #include "Logger.h"
@@ -20,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.3.0"
+#define APP_VERSION "2.3.2"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -91,6 +93,85 @@ static PArenaMem AcquireMoveArena(int level)
 
 static void ReleaseBoardArena(int level) { g_boardLevelArena[level] = nullptr; }
 static void ReleaseMoveArena(int level)  { g_moveLevelArena[level]  = nullptr; }
+
+// ==================== Memory stats thread ====================
+//
+// Wakes every 5 s and appends one line to memory_stats_YYYYMMDD_HHMMSS.log:
+//   DateTime            WorkSet(GB)    Commit(GB)   SysFree(GB)
+// WorkSet  = physical RAM this process is actively using (the leak signal)
+// Commit   = private committed virtual bytes (includes swapped pages)
+// SysFree  = system-wide free physical RAM
+// Started just after LogOpen, stopped just before LogClose; no solver contention.
+
+static std::thread              g_memStatsThread;
+static std::atomic<bool>        g_memStatsStop{false};
+static std::mutex               g_memStatsMtx;
+static std::condition_variable  g_memStatsCV;
+
+static void MemStatsThreadFn(std::string logPath)
+{
+    FILE* f = nullptr;
+    fopen_s(&f, logPath.c_str(), "w");
+    if (!f) return;
+
+    fprintf(f, "%-19s  %14s  %14s  %14s\n",
+            "DateTime", "WorkSet(GB)", "Commit(GB)", "SysFree(GB)");
+    fflush(f);
+
+    while (true)
+    {
+        auto wakeAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        {
+            std::unique_lock<std::mutex> lk(g_memStatsMtx);
+            g_memStatsCV.wait_until(lk, wakeAt, [] { return g_memStatsStop.load(); });
+        }
+        if (g_memStatsStop.load()) break;
+
+        PROCESS_MEMORY_COUNTERS_EX pmc;
+        pmc.cb = sizeof(pmc);
+        GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc));
+
+        MEMORYSTATUSEX ms;
+        ms.dwLength = sizeof(ms);
+        GlobalMemoryStatusEx(&ms);
+
+        time_t now = time(nullptr);
+        struct tm tmNow;
+        localtime_s(&tmNow, &now);
+        char tbuf[32];
+        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+
+        double workGB = (double)pmc.WorkingSetSize / (1024.0 * 1024 * 1024);
+        double commGB = (double)pmc.PrivateUsage   / (1024.0 * 1024 * 1024);
+        double freeGB = (double)ms.ullAvailPhys    / (1024.0 * 1024 * 1024);
+
+        fprintf(f, "%-19s  %14.3f  %14.3f  %14.3f\n", tbuf, workGB, commGB, freeGB);
+        fflush(f);
+    }
+
+    fclose(f);
+}
+
+static void StartMemStatsThread()
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char logPath[MAX_PATH];
+    snprintf(logPath, MAX_PATH, "%smemory_stats_%04d%02d%02d_%02d%02d%02d.log",
+             GetFullDirPathForRun(),
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
+    g_memStatsStop.store(false);
+    g_memStatsThread = std::thread(MemStatsThreadFn, std::string(logPath));
+}
+
+static void StopMemStatsThread()
+{
+    g_memStatsStop.store(true);
+    g_memStatsCV.notify_all();
+    if (g_memStatsThread.joinable())
+        g_memStatsThread.join();
+}
 
 // ==================== Forward declarations ====================
 
@@ -873,6 +954,7 @@ void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     }
 
     LogOpen(GetFullDirPathForRun());
+    StartMemStatsThread();
     LogPrintf("OthelloSolverCommandLine v" APP_VERSION " starting\n");
     LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
     LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
@@ -917,6 +999,7 @@ void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("\n");
 
     RunSolverCore(pConfig, gpuInfo, 0, numLevels);
+    StopMemStatsThread();
     LogClose();
 }
 
@@ -1019,6 +1102,7 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
 
     LogPrintf("Last fully checkpointed level: %d\n", resumeFromLevel);
     LogPrintf("Redoing BFS from level %d\n\n", resumeFromLevel);
+    StartMemStatsThread();
 
     // Sliding window: only open board[resumeFromLevel]; RunSolverCore handles the rest.
     // CreateMoveStore(resumeFromLevel) and CreateBoardStore(resumeFromLevel+1) happen inside
@@ -1036,6 +1120,7 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("\n");
 
     RunSolverCore(pConfig, gpuInfo, resumeFromLevel, numLevels);
+    StopMemStatsThread();
     LogClose();
 }
 

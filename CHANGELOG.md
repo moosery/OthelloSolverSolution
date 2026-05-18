@@ -1,5 +1,24 @@
 # Changelog
 
+## [v2.3.2] - 2026-05-18
+
+### Added
+- `OthelloSolverCommandLine`: background memory-stats logger — a dedicated 5-second polling thread appends one line per tick to `memory_stats_YYYYMMDD_HHMMSS.log` in the run output directory; columns: `DateTime`, `WorkSet(GB)` (physical RAM in use — the primary leak signal), `Commit(GB)` (private committed virtual bytes), `SysFree(GB)` (system-wide free physical RAM); timestamp format matches the per-level `DateTime` column in the main log so the two files can be correlated directly; thread uses `condition_variable::wait_until` for clean shutdown and holds no solver locks
+
+---
+
+## [v2.3.1] - 2026-05-18
+
+### Fixed
+- `TieredStoreHybrid`: arena pool slot destroyed on store close — `TSI_FreeStore` called `ArenaMemDestroy(ts->spareArena)` unconditionally; after exactly one background flush `spareArena` held the external pool arena passed by the caller, so destroying it freed the pool slot; the next `TSCreate` for the same level passed the freed pointer to `BPCreateTree`, left `memTree = null`, and the first `TSInsert` returned `TS_RC_Out_Of_Memory` (rc=3); fixed by adding `externalArena` field to `_TieredStore` (set at create/open to the caller-supplied arena) and guarding all `ArenaMemDestroy` calls with `ptr != ts->externalArena`; same guard applied in `TSI_BackgroundMerge`
+- `TieredStoreHybrid`: dynamic spare arena leaked on store close — after an odd number of background flushes `pMemArena` held a dynamically created arena (`ArenaMemCreate` in `TSI_TriggerBgFlush`); `BPFreeTree(tree, true)` resets the arena offset but does not free the heap allocation; `TSI_FreeStore` was nulling `pMemArena` without calling `ArenaMemDestroy`, leaking ~2.5 GB per store close with odd flush count (visible as a sawtooth upward trend); fixed by checking `pMemArena != externalArena` before destroying
+
+### Changed
+- `OthelloSolverCommandLine`: removed all 19 `#ifdef TS_USE_BPTREE_ARENA` / `#else` / `#endif` guards — arena path is now unconditional; dead non-arena `else` branches deleted; `MAX_MEMORY_PER_STORE` constant removed (was only referenced in the deleted branches)
+- `OthelloSolverCommandLine`: replaced UTF-8 `→` (U+2192) with ASCII `->` in memory banner format strings — the Windows console default code page rendered the 3-byte UTF-8 sequence as mojibake (`ΓåÆ`)
+
+---
+
 ## [v2.3.0] - 2026-05-17
 
 ### Added
