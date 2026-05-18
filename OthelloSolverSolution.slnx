@@ -6,6 +6,7 @@
   <Project Path="BoardsToProcess/BoardsToProcess.vcxproj" Id="dee9fce2-2b64-4335-868d-42162868edbd" />
   <Project Path="BPlusTree/BPlusTree.vcxproj" Id="dbe8b48d-fd07-4534-acdf-7c4368845aae" />
   <Project Path="BPlusTreeArena/BPlusTreeArena.vcxproj" Id="77f4ffcc-e592-4e1a-adad-b202114be622" />
+  <Project Path="BPlusTreeHybrid/BPlusTreeHybrid.vcxproj" Id="7f9f0d90-47d0-4095-ad76-23e35d2da5c8" />
   <Project Path="BPlusTreeTester/BPlusTreeTester.vcxproj" Id="2911d3c9-f76c-407b-a9b2-cb13cf53c340" />
   <Project Path="BPlusTreeTester2/BPlusTreeTester2.vcxproj" Id="db0485a8-9ca8-4c55-b994-3e7346e5a9c0" />
   <Project Path="OthelloBasics/OthelloBasics.vcxproj" Id="2cc52c70-80f3-4700-9e46-0f6b1c077667" />
@@ -19,6 +20,8 @@
   <Project Path="OthelloSolverMultithreaded/OthelloSolverMultithreaded.vcxproj" />
   <Project Path="OthelloSolverUsingBplusOnly/OthelloSolverUsingBplusOnly.vcxproj" Id="c044278e-6eb6-4713-a49a-9c77db194d36" />
   <Project Path="TieredStore/TieredStore.vcxproj" Id="b3dba222-f8f9-421c-9bad-0a6d4cadcbd5" />
+  <Project Path="TieredStoreAndBPlusTreeTester/TieredStoreAndBPlusTreeTester.vcxproj" />
+  <Project Path="TieredStoreHybrid/TieredStoreHybrid.vcxproj" Id="b33503f7-585b-4d82-b0aa-77676c9c9838" />
   <Project Path="TieredStoreTester/TieredStoreTester.vcxproj" Id="a7594965-78af-4873-a5af-0458ad653e9d" />
   <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
 </Solution>

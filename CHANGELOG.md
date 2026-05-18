@@ -1,5 +1,25 @@
 # Changelog
 
+## [v2.2.0] - 2026-05-17
+
+### Added
+- `BPlusTreeHybrid`: new project — single B+ tree library that accepts an optional `PArenaMem`; uses arena allocation when provided, `malloc`/`free` otherwise; replaces the separate `BPlusTree` + `BPlusTreeArena` compile-switch pair with a single runtime-selectable library
+- `TieredStoreHybrid`: new project — TieredStore variant backed by `BPlusTreeHybrid`; the optional `PArenaMem` passed to `TSCreate`/`TSOpen` flows through to the in-memory B+ tree; no compile switch required
+- `TieredStoreAndBPlusTreeTester`: new MFC dialog test application — comprehensive performance and correctness test suite for both `BPlusTreeHybrid` and `TieredStoreHybrid`:
+  - Test phases: Sequential Insert, Random Insert, Duplicate Insert, Find/Verify, Update, Delete, Mixed Slam (concurrent readers + writers), Bulk Insert (single-threaded large-scale)
+  - Verification phases: Integrity Check, Iterator Enumerate, Checkpoint+Reopen, Corrupt Open
+  - **Compare mode**: runs malloc and arena back-to-back using identical memory budgets; displays Ops/s, Avg ns, and speedup ratio side-by-side in the same result row
+  - N-run averaging: repeats each test set N times and posts averaged results
+  - Live stats panel: inserts/s, finds/s, active threads, progress bar, current phase
+  - Configurable: writer/reader threads, records/thread, key range, dup %, arena MB, node order, bulk record count
+  - Save results to UTF-8 text file with fixed-width columns and a test-parameters header; offers to open in Notepad on completion
+
+### Changed
+- `TieredStoreAndBPlusTreeTester` / `TestEngine`: Arena MB now controls the memory budget for **both** malloc and arena paths equally — malloc B+ tree uses `arenaSizeMB` and malloc TieredStore uses `arenaSizeMB × ¾`, matching arena mode; previously the malloc paths used hardcoded sizes (infinite for BP, 16 MB for TS), making malloc vs arena comparisons unfair
+- `Utility` / `Utility.h`: added `ArenaMem.h` to the umbrella include
+
+---
+
 ## [v2.1.1] - 2026-05-16
 
 ### Fixed
