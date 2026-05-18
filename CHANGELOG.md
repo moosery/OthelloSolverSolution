@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.3.4] - 2026-05-18
+
+### Added
+- `OthelloSolverCommandLine`: multi-directory output striping — `SolverConfig.outputDirs[4]` replaces the single `outputDir`; `outputDirs[0]` is the primary dir (logs, manifests, `.tsf` files); extra dirs receive the same timestamp/board-size subpath automatically; default is `{"D:\\CommandLineSolverDataDir", "C:\\CommandLineSolverDataDir"}` with `numOutputDirs=2`; overridden per-slot via `--data-dir2`, `--data-dir3`, `--data-dir4` CLI flags; not needed on `restart` (TieredStore manifests already record all dirs); `CreateBoardStore`/`CreateMoveStore` build the N-element `dirs[]` array for `TSCreate`, creating extra-drive subdirectories automatically
+
+---
+
 ## [v2.3.3] - 2026-05-18
 
 ### Fixed

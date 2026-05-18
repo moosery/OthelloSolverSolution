@@ -1,8 +1,10 @@
 #include <Utility.h>
 #include "InternalRoutines.h"
 
-constexpr char FULL_DIR_PATH_FORMAT[] = "%s\\%s\\BoardSize%dx%d\\";
 static char szFullDirPathForRun[MAX_FULL_PATH_NAME + 1];
+static char g_runSuffix[MAX_FULL_PATH_NAME + 1];      // "<timestamp>\BoardSize<N>x<N>\" — shared with extra dirs
+static char g_extraRunDirs[3][MAX_FULL_PATH_NAME + 1];
+static int  g_numExtraRunDirs = 0;
 
 /*
 * Name: SetFullDirPathForRun
@@ -20,14 +22,15 @@ static char szFullDirPathForRun[MAX_FULL_PATH_NAME + 1];
 */
 void SetFullDirPathForRun(const char* outputDir, int boardSize)
 {
-    char buffer[100];
+    char timestamp[64];
     time_t now = time(0);
     struct tm tstruct;
     localtime_s(&tstruct, &now);
 
-    strftime(buffer, sizeof(buffer), "%Y_%m_%d.%H_%M_%S", &tstruct);
-    snprintf(szFullDirPathForRun, sizeof(szFullDirPathForRun), FULL_DIR_PATH_FORMAT,
-        outputDir, buffer, boardSize, boardSize);
+    strftime(timestamp, sizeof(timestamp), "%Y_%m_%d.%H_%M_%S", &tstruct);
+    snprintf(g_runSuffix, sizeof(g_runSuffix), "%s\\BoardSize%dx%d\\", timestamp, boardSize, boardSize);
+    snprintf(szFullDirPathForRun, sizeof(szFullDirPathForRun), "%s\\%s", outputDir, g_runSuffix);
+    g_numExtraRunDirs = 0;
 }
 
 /*
@@ -128,3 +131,14 @@ char *GetFullFilePathBaseNameForMoveLevel(int boardLevel)
 
     return szFullFilePathForMoveLevel;
 }
+
+void SetExtraRunDirs(const char* const* baseDirs, int count)
+{
+    g_numExtraRunDirs = (count > 3) ? 3 : count;
+    for (int i = 0; i < g_numExtraRunDirs; i++)
+        snprintf(g_extraRunDirs[i], sizeof(g_extraRunDirs[i]), "%s\\%s", baseDirs[i], g_runSuffix);
+}
+
+int GetNumExtraRunDirs() { return g_numExtraRunDirs; }
+
+const char* GetExtraRunDir(int idx) { return g_extraRunDirs[idx]; }

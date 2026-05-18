@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.3.3"
+#define APP_VERSION "2.3.4"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -31,7 +31,8 @@ typedef struct SolverConfig
     int         boardSize;
     int         numThreads;
     int         numRotations;
-    const char* outputDir;
+    const char* outputDirs[4];      // [0] = primary (logs + manifests); [1..3] = extra .tsf data dirs
+    int         numOutputDirs;
     bool        restart;
     MemoryMode  memMode;
     uint64_t    specifiedMemBytes;
@@ -413,8 +414,19 @@ static void CreateBoardStore(int level)
     strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(level), _TRUNCATE);
     if (fs::exists(path)) fs::remove_all(path);
     CreateFullPath(path);
-    const char* dirs[1] = { path };
-    TSRc rc = TSCreate(dirs, 1, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+
+    char extraPaths[3][MAX_PATH];
+    const char* dirs[4];
+    dirs[0] = path;
+    int numDirs = 1;
+    for (int i = 0; i < GetNumExtraRunDirs(); i++)
+    {
+        snprintf(extraPaths[i], MAX_PATH, "%s\\Boards\\Level%d", GetExtraRunDir(i), level);
+        CreateFullPath(extraPaths[i]);
+        dirs[numDirs++] = extraPaths[i];
+    }
+
+    TSRc rc = TSCreate(dirs, numDirs, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(BOARD), g_boardMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, BoardWinsMergeFn,
                        &g_tieredBoardStores[level], AcquireBoardArena(level));
@@ -429,8 +441,19 @@ static void CreateMoveStore(int level)
     strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(level), _TRUNCATE);
     if (fs::exists(path)) fs::remove_all(path);
     CreateFullPath(path);
-    const char* dirs[1] = { path };
-    TSRc rc = TSCreate(dirs, 1, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
+
+    char extraPaths[3][MAX_PATH];
+    const char* dirs[4];
+    dirs[0] = path;
+    int numDirs = 1;
+    for (int i = 0; i < GetNumExtraRunDirs(); i++)
+    {
+        snprintf(extraPaths[i], MAX_PATH, "%s\\Moves\\Level%d", GetExtraRunDir(i), level);
+        CreateFullPath(extraPaths[i]);
+        dirs[numDirs++] = extraPaths[i];
+    }
+
+    TSRc rc = TSCreate(dirs, numDirs, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(MOVE), g_moveMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, nullptr,
                        &g_tieredMoveStores[level], AcquireMoveArena(level));
@@ -947,11 +970,13 @@ static void RunSolverCore(
 
 void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
 {
-    if (!CreateFullPathForRun(pConfig->outputDir, pConfig->boardSize))
+    if (!CreateFullPathForRun(pConfig->outputDirs[0], pConfig->boardSize))
     {
         ErrorPrint(stderr);
         exit(1);
     }
+    if (pConfig->numOutputDirs > 1)
+        SetExtraRunDirs(&pConfig->outputDirs[1], pConfig->numOutputDirs - 1);
 
     LogOpen(GetFullDirPathForRun());
     StartMemStatsThread();
@@ -959,6 +984,8 @@ void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("  Board Size:    %dx%d\n", pConfig->boardSize, pConfig->boardSize);
     LogPrintf("  Num Rotations: %d\n",    pConfig->numRotations);
     LogPrintf("  Output Dir:    %s\n",    GetFullDirPathForRun());
+    for (int i = 0; i < GetNumExtraRunDirs(); i++)
+        LogPrintf("  Data Dir %d:    %s\n", i + 2, GetExtraRunDir(i));
     LogPrintf("  Memory:        %.1f GB free -> %.1f GB budget\n",
               pConfig->memBudgetBytes  / (1024.0*1024*1024),
               pConfig->arenaTotalBytes / (1024.0*1024*1024));
@@ -1014,10 +1041,10 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     snprintf(boardSizeDirName, sizeof(boardSizeDirName), "BoardSize%dx%d",
              pConfig->boardSize, pConfig->boardSize);
 
-    fs::path outPath(pConfig->outputDir);
+    fs::path outPath(pConfig->outputDirs[0]);
     if (!fs::exists(outPath))
     {
-        printf("Output dir not found: %s  Starting fresh.\n", pConfig->outputDir);
+        printf("Output dir not found: %s  Starting fresh.\n", pConfig->outputDirs[0]);
         doStartProcess(pConfig, gpuInfo);
         return;
     }
@@ -1035,7 +1062,7 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
 
     if (latestTimestamp.empty())
     {
-        printf("No previous run found in %s  Starting fresh.\n", pConfig->outputDir);
+        printf("No previous run found in %s  Starting fresh.\n", pConfig->outputDirs[0]);
         doStartProcess(pConfig, gpuInfo);
         return;
     }
@@ -1043,7 +1070,7 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     // Point the path helpers at the existing run directory.
     char runDirBuf[MAX_PATH];
     snprintf(runDirBuf, MAX_PATH, "%s\\%s\\%s",
-             pConfig->outputDir, latestTimestamp.c_str(), boardSizeDirName);
+             pConfig->outputDirs[0], latestTimestamp.c_str(), boardSizeDirName);
     SetFullDirPathDirect(runDirBuf);
     SetBoardSizeForRun(pConfig->boardSize);
 
@@ -1152,12 +1179,27 @@ void processArgs(int argc, char* argv[], PSolverConfig pConfig)
             pConfig->memMode          = MM_SPECIFIED;
             pConfig->specifiedMemBytes = ParseMemorySize(argv[++i]);
         }
+        else if (strcmp(argv[i], "--data-dir2") == 0 && i + 1 < argc)
+        {
+            pConfig->outputDirs[1] = argv[++i];
+            if (pConfig->numOutputDirs < 2) pConfig->numOutputDirs = 2;
+        }
+        else if (strcmp(argv[i], "--data-dir3") == 0 && i + 1 < argc)
+        {
+            pConfig->outputDirs[2] = argv[++i];
+            if (pConfig->numOutputDirs < 3) pConfig->numOutputDirs = 3;
+        }
+        else if (strcmp(argv[i], "--data-dir4") == 0 && i + 1 < argc)
+        {
+            pConfig->outputDirs[3] = argv[++i];
+            if (pConfig->numOutputDirs < 4) pConfig->numOutputDirs = 4;
+        }
         else if (i + 3 < argc)
         {
-            pConfig->boardSize    = atoi(argv[i]);
-            pConfig->numThreads   = atoi(argv[i + 1]);
-            pConfig->numRotations = atoi(argv[i + 2]);
-            pConfig->outputDir    = argv[i + 3];
+            pConfig->boardSize       = atoi(argv[i]);
+            pConfig->numThreads      = atoi(argv[i + 1]);
+            pConfig->numRotations    = atoi(argv[i + 2]);
+            pConfig->outputDirs[0]   = argv[i + 3];
             i += 3;
         }
         else
@@ -1175,13 +1217,19 @@ void usage()
     printf("  boardSize:    4, 6, or 8 (default=4)\n");
     printf("  numThreads:   Number of GPU worker threads (default=GPU recommended count)\n");
     printf("  numRotations: Number of symmetries to consider (default=8, max=16)\n");
-    printf("  outputDir:    Directory for solver output and restart persistence\n");
+    printf("  outputDir:    Primary directory for output, logs, and restart persistence\n");
     printf("                (default=D:\\CommandLineSolverDataDir)\n");
     printf("  restart:      Optional flag to resume the most recent run\n");
     printf("Memory options (default: --use-recommended-memory):\n");
     printf("  --use-max-memory             Use ~95%% of available RAM for arenas\n");
     printf("  --use-recommended-memory     Use ~75%% of available RAM (default)\n");
     printf("  --max-memory <size>          Use specified amount (e.g. 34GB, 16000MB)\n");
+    printf("Data striping options (optional, for spreading .tsf files across drives):\n");
+    printf("  --data-dir2 <path>           Second drive base dir (e.g. C:\\OthelloData2)\n");
+    printf("  --data-dir3 <path>           Third drive base dir\n");
+    printf("  --data-dir4 <path>           Fourth drive base dir\n");
+    printf("  Extra dirs receive the same timestamp/boardSize subpath as outputDir.\n");
+    printf("  Not needed for restart (manifests remember all dirs).\n");
 }
 
 // ==================== Entry point ====================
@@ -1192,7 +1240,9 @@ int main(int argc, char* argv[])
 
     int defaultThreads = gpuInfo.recommendedWorkerCount;
 
-    SolverConfig config = { 6, defaultThreads, 16, "D:\\CommandLineSolverDataDir", false, MM_RECOMMENDED, 0, 0, 0, 0 };
+    SolverConfig config = { 6, defaultThreads, 16,
+        {"D:\\CommandLineSolverDataDir", "C:\\CommandLineSolverDataDir"},
+        2, false, MM_RECOMMENDED, 0, 0, 0, 0 };
 
     if (argc > 1)
         processArgs(argc, argv, &config);
