@@ -200,7 +200,8 @@ struct _TieredStore
 
     // Background merge support
     // bgMutex/bgCV are heap-allocated so they survive the memset(ts, 0) in TSI_CreateStore.
-    ThreadPool*              mergePool;   // 1-thread pool; started at create/open
+    ThreadPool*              mergePool;   // merge thread pool; may be caller-owned (see ownsPool)
+    bool                     ownsPool;    // true = we created it and must Stop()/delete on close
     std::mutex*              bgMutex;     // protects bgCV predicate only
     std::condition_variable* bgCV;        // signaled when bgPending drops to 0
     std::atomic<int>         bgPending;   // 0 = idle, 1 = merge in flight

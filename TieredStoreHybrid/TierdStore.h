@@ -3,10 +3,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Forward declaration only.  Callers that need ArenaMemCreate/Destroy must
-// #include "ArenaMem.h" (or "BP.h") directly.
+// Forward declarations only.
 struct ArenaMem;
 typedef struct ArenaMem* PArenaMem;
+class ThreadPool;
 
 // ==================== Return codes ====================
 
@@ -122,7 +122,8 @@ TSRc TSCreate(
     uint64_t        maxFileBytes,
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
-    PArenaMem       pArena = nullptr);   // nullptr = malloc mode
+    PArenaMem       pArena      = nullptr,   // nullptr = malloc mode
+    ThreadPool*     pMergePool  = nullptr);  // nullptr = create own 1-thread pool
 
 TSRc TSOpen(
     const char*     dir0,
@@ -131,7 +132,8 @@ TSRc TSOpen(
     size_t          idxSettings,
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
-    PArenaMem       pArena = nullptr);   // nullptr = malloc mode
+    PArenaMem       pArena      = nullptr,   // nullptr = malloc mode
+    ThreadPool*     pMergePool  = nullptr);  // nullptr = create own 1-thread pool
 
 // Flush in-memory tree, wait for all pending merges, write manifest, free all resources.
 TSRc TSClose(PTS* ppTs);

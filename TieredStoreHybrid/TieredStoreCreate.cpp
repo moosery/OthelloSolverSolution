@@ -17,7 +17,8 @@ static TSRc TSI_CreateStore(
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
     bool            createMetaStore,
-    PArenaMem       pArena = nullptr)
+    PArenaMem       pArena      = nullptr,
+    ThreadPool*     pMergePool  = nullptr)
 {
     if (!manifestPath || !dirs || numDirs < 1 ||
         !keyFlds || numKeyFlds < 1 || numKeyFlds > TS_MAX_KEY_FLDS ||
@@ -76,15 +77,22 @@ static TSRc TSI_CreateStore(
 
     // Background merge infrastructure — must be heap-allocated so they survive the
     // memset above and can be safely deleted in TSI_FreeStore.
-    ts->bgMutex   = new (std::nothrow) std::mutex();
-    ts->bgCV      = new (std::nothrow) std::condition_variable();
-    ts->mergePool = new (std::nothrow) ThreadPool(1, std::string(ts->baseName));
-    if (!ts->bgMutex || !ts->bgCV || !ts->mergePool)
+    ts->bgMutex = new (std::nothrow) std::mutex();
+    ts->bgCV    = new (std::nothrow) std::condition_variable();
+    if (!ts->bgMutex || !ts->bgCV) { TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
+
+    if (pMergePool)
     {
-        TSI_FreeStore(ts);
-        return TS_RC_Out_Of_Memory;
+        ts->mergePool = pMergePool;
+        ts->ownsPool  = false;
     }
-    ts->mergePool->Start();
+    else
+    {
+        ts->mergePool = new (std::nothrow) ThreadPool(1, std::string(ts->baseName));
+        if (!ts->mergePool) { TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
+        ts->ownsPool = true;
+        ts->mergePool->Start();
+    }
 
     ts->pMemArena    = pArena;
     ts->externalArena = pArena;
@@ -147,13 +155,15 @@ TSRc TSCreate(
     uint64_t        maxFileBytes,
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
-    PArenaMem       pArena)
+    PArenaMem       pArena,
+    ThreadPool*     pMergePool)
 {
     if (!dirs || numDirs < 1) return TS_RC_Invalid_Arg;
     char manifestPath[MAX_PATH];
     sprintf_s(manifestPath, MAX_PATH, "%s\\manifest.tsm", dirs[0]);
     return TSI_CreateStore(manifestPath, dirs, numDirs, keyFlds, numKeyFlds, idxSettings,
-                           recordSize, maxMemoryBytes, maxFileBytes, mergeFn, ppTs, true, pArena);
+                           recordSize, maxMemoryBytes, maxFileBytes, mergeFn, ppTs, true,
+                           pArena, pMergePool);
 }
 
 TSRc TSClose(PTS* ppTs)

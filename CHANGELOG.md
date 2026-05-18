@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2.3.5] - 2026-05-18
+
+### Changed
+- `TieredStoreHybrid`: shared merge thread pool — `TSCreate`/`TSOpen` now accept an optional `ThreadPool* pMergePool` (default `nullptr`); when a caller-provided pool is supplied the store uses it without owning it (`ownsPool = false`) so `TSClose` does not `Stop()`/`delete` it; when `nullptr` is passed the store creates its own private `ThreadPool(1)` as before (`ownsPool = true`); `TSI_FreeStore` always calls `TSI_WaitForBgMerge` before releasing the pool pointer regardless of ownership; meta-stores always pass `nullptr` (own private pool); forward declaration in `TierdStore.h` corrected from `struct ThreadPool` to `class ThreadPool` to match the definition in `ThreadPool.h` and avoid MSVC linker name-mangling mismatch
+- `OthelloSolverCommandLine`: wires `chunkPoolThreads` (~26 threads) to TieredStore — `doStartProcess` and `doRestartProcess` each create a `ThreadPool mergePool(chunkPoolThreads, "TSMerge")` before the first store opens and stop it after `RunSolverCore` returns (all stores are already closed at that point); all four store helpers (`CreateBoardStore`, `CreateMoveStore`, `OpenBoardStore`, `OpenMoveStore`) pass the global `g_mergePool` pointer to `TSCreate`/`TSOpen`; concurrent merges across board and move stores are now possible
+
+---
+
 ## [v2.3.4] - 2026-05-18
 
 ### Added

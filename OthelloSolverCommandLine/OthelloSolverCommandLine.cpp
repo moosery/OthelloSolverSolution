@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.3.4"
+#define APP_VERSION "2.3.5"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -44,8 +44,9 @@ typedef struct SolverConfig
 
 // Levels index piece count: level k holds boards with k+4 pieces on the board.
 // 8x8 worst case: 8*8-4+1 = 61 levels (level 0 = 4 pieces, level 60 = 64 pieces).
-PTS g_tieredBoardStores[61] = { 0 };
-PTS g_tieredMoveStores[61]  = { 0 };
+PTS         g_tieredBoardStores[61] = { 0 };
+PTS         g_tieredMoveStores[61]  = { 0 };
+ThreadPool* g_mergePool             = nullptr;
 
 static const TSKeyFld k_boardKeyFlds[] = {
     { 0, offsetof(BOARD, ullPossibleMoves), TS_DATATYPE_BYTE }
@@ -429,7 +430,7 @@ static void CreateBoardStore(int level)
     TSRc rc = TSCreate(dirs, numDirs, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(BOARD), g_boardMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, BoardWinsMergeFn,
-                       &g_tieredBoardStores[level], AcquireBoardArena(level));
+                       &g_tieredBoardStores[level], AcquireBoardArena(level), g_mergePool);
     if (rc != TS_RC_Success)
     { LogErrorf("TSCreate board store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -456,7 +457,7 @@ static void CreateMoveStore(int level)
     TSRc rc = TSCreate(dirs, numDirs, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
                        sizeof(MOVE), g_moveMemPerStore,
                        MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER, nullptr,
-                       &g_tieredMoveStores[level], AcquireMoveArena(level));
+                       &g_tieredMoveStores[level], AcquireMoveArena(level), g_mergePool);
     if (rc != TS_RC_Success)
     { LogErrorf("TSCreate move store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -466,7 +467,7 @@ static void OpenBoardStore(int level)
     char path[MAX_PATH];
     strncpy_s(path, GetFullFilePathBaseNameForBoardLevel(level), _TRUNCATE);
     TSRc rc = TSOpen(path, k_boardKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                     BoardWinsMergeFn, &g_tieredBoardStores[level], AcquireBoardArena(level));
+                     BoardWinsMergeFn, &g_tieredBoardStores[level], AcquireBoardArena(level), g_mergePool);
     if (rc != TS_RC_Success)
     { LogErrorf("TSOpen board store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -476,7 +477,7 @@ static void OpenMoveStore(int level)
     char path[MAX_PATH];
     strncpy_s(path, GetFullFilePathBaseNameForMoveLevel(level), _TRUNCATE);
     TSRc rc = TSOpen(path, k_moveKeyFlds, 1, TS_IDX_SETTING_DEFAULT,
-                     nullptr, &g_tieredMoveStores[level], AcquireMoveArena(level));
+                     nullptr, &g_tieredMoveStores[level], AcquireMoveArena(level), g_mergePool);
     if (rc != TS_RC_Success)
     { LogErrorf("TSOpen move store failed rc=%d level %d\n", (int)rc, level); exit(1); }
 }
@@ -1004,6 +1005,11 @@ void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
 
     int numLevels = (g_boardSize * g_boardSize - 4) + 1;
 
+    // Shared merge pool: all stores use one pool so merge I/O is parallelized.
+    ThreadPool mergePool(pConfig->chunkPoolThreads, "TSMerge");
+    mergePool.Start();
+    g_mergePool = &mergePool;
+
     // Sliding window: only create board[0] now; RunSolverCore opens/creates the rest.
     CreateBoardStore(0);
 
@@ -1026,6 +1032,8 @@ void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("\n");
 
     RunSolverCore(pConfig, gpuInfo, 0, numLevels);
+    g_mergePool = nullptr;
+    mergePool.Stop();
     StopMemStatsThread();
     LogClose();
 }
@@ -1131,6 +1139,11 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("Redoing BFS from level %d\n\n", resumeFromLevel);
     StartMemStatsThread();
 
+    // Shared merge pool: all stores use one pool so merge I/O is parallelized.
+    ThreadPool mergePool(pConfig->chunkPoolThreads, "TSMerge");
+    mergePool.Start();
+    g_mergePool = &mergePool;
+
     // Sliding window: only open board[resumeFromLevel]; RunSolverCore handles the rest.
     // CreateMoveStore(resumeFromLevel) and CreateBoardStore(resumeFromLevel+1) happen inside
     // RunSolverCore at the start of that level's iteration (deleting any partial data).
@@ -1147,6 +1160,8 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("\n");
 
     RunSolverCore(pConfig, gpuInfo, resumeFromLevel, numLevels);
+    g_mergePool = nullptr;
+    mergePool.Stop();
     StopMemStatsThread();
     LogClose();
 }

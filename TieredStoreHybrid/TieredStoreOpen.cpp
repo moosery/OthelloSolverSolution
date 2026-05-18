@@ -56,7 +56,8 @@ static TSRc TSI_OpenStore(
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
     bool            openMetaStore,
-    PArenaMem       pArena = nullptr)
+    PArenaMem       pArena      = nullptr,
+    ThreadPool*     pMergePool  = nullptr)
 {
     if (!manifestPath || !keyFlds || numKeyFlds < 1 || numKeyFlds > TS_MAX_KEY_FLDS || !ppTs)
         return TS_RC_Invalid_Arg;
@@ -190,15 +191,22 @@ static TSRc TSI_OpenStore(
     }
 
     // Background merge infrastructure — heap-allocated to survive the memset above.
-    ts->bgMutex   = new (std::nothrow) std::mutex();
-    ts->bgCV      = new (std::nothrow) std::condition_variable();
-    ts->mergePool = new (std::nothrow) ThreadPool(1, std::string(ts->baseName));
-    if (!ts->bgMutex || !ts->bgCV || !ts->mergePool)
+    ts->bgMutex = new (std::nothrow) std::mutex();
+    ts->bgCV    = new (std::nothrow) std::condition_variable();
+    if (!ts->bgMutex || !ts->bgCV) { TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
+
+    if (pMergePool)
     {
-        TSI_FreeStore(ts);
-        return TS_RC_Out_Of_Memory;
+        ts->mergePool = pMergePool;
+        ts->ownsPool  = false;
     }
-    ts->mergePool->Start();
+    else
+    {
+        ts->mergePool = new (std::nothrow) ThreadPool(1, std::string(ts->baseName));
+        if (!ts->mergePool) { TSI_FreeStore(ts); return TS_RC_Out_Of_Memory; }
+        ts->ownsPool = true;
+        ts->mergePool->Start();
+    }
 
     ts->pMemArena    = pArena;
     ts->externalArena = pArena;
@@ -224,11 +232,12 @@ TSRc TSOpen(
     size_t          idxSettings,
     TS_MERGE_FN     mergeFn,
     PTS*            ppTs,
-    PArenaMem       pArena)
+    PArenaMem       pArena,
+    ThreadPool*     pMergePool)
 {
     if (!dir0) return TS_RC_Invalid_Arg;
     char manifestPath[MAX_PATH];
     sprintf_s(manifestPath, MAX_PATH, "%s\\manifest.tsm", dir0);
     return TSI_OpenStore(manifestPath, keyFlds, numKeyFlds, idxSettings,
-                         mergeFn, ppTs, true, pArena);
+                         mergeFn, ppTs, true, pArena, pMergePool);
 }

@@ -24,8 +24,11 @@ void TSI_FreeStore(_TieredStore* ts)
     if (ts->mergePool)
     {
         TSI_WaitForBgMerge(ts);
-        ts->mergePool->Stop();
-        delete ts->mergePool;
+        if (ts->ownsPool)
+        {
+            ts->mergePool->Stop();
+            delete ts->mergePool;
+        }
         ts->mergePool = nullptr;
     }
 
