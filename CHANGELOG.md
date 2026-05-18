@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2.3.6] - 2026-05-18
+
+### Changed
+- `TieredStoreHybrid`: 4 MB stdio buffers on all merge I/O — `setvbuf(f, NULL, _IOFBF, 4*1024*1024)` added after every `fopen_s` in the merge path (both input cursors in `InitCursorFile` and output files in `DoMerge`); replaces stdio's default 8 KB buffer with 4 MB, reducing OS calls from ~200 records/call to ~100K records/call for sequential merge reads and writes
+- `TieredStoreHybrid`: combined slot write in `DoMerge` inner loop — previously wrote record bytes and flag byte in two separate `fwrite` calls; now sizes the merge buffer as `slotSize` bytes (record + flag), zeroes the flag byte at construction (merge output is always live), and writes the whole slot in a single `fwrite`
+
+---
+
 ## [v2.3.5] - 2026-05-18
 
 ### Changed

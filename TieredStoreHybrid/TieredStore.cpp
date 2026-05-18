@@ -209,6 +209,7 @@ static bool InitCursorFile(MergeCursor* c, _TieredStore* ts, const TSFileDesc* d
 
     if (fopen_s(&c->file, desc->path, "rb") != 0 || !c->file)
         return false;
+    setvbuf(c->file, nullptr, _IOFBF, 4 * 1024 * 1024);
 
     // Slots begin at byte 0 — no header to skip.
     AdvanceCursor(c);
@@ -315,6 +316,8 @@ static TSRc DoMerge(_TieredStore*              ts,
     {
         if (fopen_s(&files[i], outDescs[i]->path, "wb") != 0 || !files[i])
             openOk = false;
+        else
+            setvbuf(files[i], nullptr, _IOFBF, 4 * 1024 * 1024);
     }
     if (!openOk)
     {
@@ -328,8 +331,8 @@ static TSRc DoMerge(_TieredStore*              ts,
 
     // Slots begin at byte 0 — no header written up front.
 
-    std::vector<uint8_t> merged((size_t)ts->recordSize);
-    uint8_t              flag = 0;   // merge output is always live
+    int                  slotSize = TS_SLOT_SIZE(ts->recordSize);
+    std::vector<uint8_t> merged((size_t)slotSize, 0);  // last byte = flag, stays 0 (always live)
     std::vector<int64_t> written(numOut, 0);
     std::vector<bool>    firstRec(numOut, true);
     int  curIdx = 0;
@@ -367,8 +370,7 @@ static TSRc DoMerge(_TieredStore*              ts,
         if (curIdx + 1 < numOut && written[curIdx] >= (int64_t)ts->maxFileRecords)
             curIdx++;
 
-        if (fwrite(merged.data(), ts->recordSize, 1, files[curIdx]) != 1 ||
-            fwrite(&flag,         1,              1, files[curIdx]) != 1)
+        if (fwrite(merged.data(), (size_t)slotSize, 1, files[curIdx]) != 1)
         {
             ok = false;
             break;
