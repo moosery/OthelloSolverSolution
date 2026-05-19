@@ -1,5 +1,14 @@
 # Changelog
 
+## [v2.3.10] - 2026-05-19
+
+### Changed
+- `TieredStoreHybrid`: replaced the k-way merge strategy with per-file independent 2-way merges — on every B+tree flush, disk files are sorted by minKey to establish non-overlapping key zones; for each zone `[file.minKey, nextFile.minKey)` the B+tree is peeked (via `BPIterateStartFrom`) to see if it has any records in that range; if yes, a 2-way merge (B+tree slice + that one file) is run producing 1–2 output files; if no, the file is left completely untouched (zero I/O); B+tree records before all files produce a new pre-zone file; files are **never merged with each other** — they already carry disjoint key ranges so merging them would only burn disk bandwidth with zero benefit; this eliminates the original `FindOverlappingFiles` + `DoParallelMerge(all overlapping files)` pattern that caused files with non-overlapping key ranges to be read and rewritten whenever the B+tree's range happened to span them all
+- `TieredStoreHybrid`: removed intra-merge parallelism (`DoParallelMerge`, `RunPartitionMerge`, `ComputeNumParts`, `ComputePartitionKeys`, `PartitionJob`) — no longer applicable now that each merge is a simple 2-way operation between one B+tree slice and one file; the partition machinery assumed multiple source files that could be distributed among threads, which no longer occurs
+- `TieredStoreInternal.h`: `TSMergeJob` restructured — replaces flat `srcFiles` + `outDescs` vectors with `std::vector<TSFileMergeSlice> slices` where each slice carries its own `srcFile`, `loKey`, `hiKey`, and `outDescs`; allows `TSI_PrepMergeJob` to capture per-zone routing at prep time and `TSI_BackgroundMerge` to process each slice independently
+
+---
+
 ## [v2.3.9] - 2026-05-19
 
 ### Added

@@ -127,6 +127,22 @@ typedef struct _TSFileDesc
     uint8_t* maxKey;         // heap-allocated: recordSize bytes; largest live key
 } TSFileDesc;
 
+// ==================== Per-slice merge descriptor ====================
+//
+// One entry per key-space zone that needs merging during a flush.
+// srcFile is the existing disk file covering this zone (nullptr for the pre-zone before all
+// files).  loKey/hiKey bound the B+tree cursor served to this slice.  outDescs are
+// pre-allocated output file descriptors (up to 2: one for in-range records, one if the
+// file splits).  Files with no B+tree records in their zone are left untouched.
+
+struct TSFileMergeSlice
+{
+    TSFileDesc*              srcFile;   // file being merged; nullptr = pre-zone (B+tree only)
+    std::vector<uint8_t>     loKey;     // B+tree lower bound (empty = start of tree)
+    std::vector<uint8_t>     hiKey;     // B+tree upper bound (empty = end of tree)
+    std::vector<TSFileDesc*> outDescs;  // pre-allocated output file descriptors
+};
+
 // ==================== Background merge job ====================
 //
 // Captures everything needed for one flush+merge pass.
@@ -134,11 +150,10 @@ typedef struct _TSFileDesc
 
 struct TSMergeJob
 {
-    PBPTree                   tree;       // in-memory tree to merge (not yet freed)
-    PArenaMem                 arena;      // tree's arena (NULL = malloc mode)
-    std::vector<TSFileDesc*>  srcFiles;   // on-disk files being merged (removed after merge)
-    std::vector<TSFileDesc*>  outDescs;   // N output file descriptors (1 per maxFileRecords chunk)
-    ClockTick                 startTime;  // for statMergeNs
+    PBPTree                       tree;       // in-memory tree to merge (not yet freed)
+    PArenaMem                     arena;      // tree's arena (NULL = malloc mode)
+    std::vector<TSFileMergeSlice> slices;     // one per zone needing a merge
+    ClockTick                     startTime;  // for statMergeNs
 };
 
 // ==================== Internal helper declarations ====================
