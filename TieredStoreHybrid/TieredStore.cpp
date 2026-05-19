@@ -556,8 +556,9 @@ static TSRc DoMerge(_TieredStore*              ts,
     std::vector<uint8_t> merged((size_t)slotSize, 0);  // last byte = flag, stays 0 (always live)
     std::vector<int64_t> written(numOut, 0);
     std::vector<bool>    firstRec(numOut, true);
-    int  curIdx = 0;
-    bool ok     = true;
+    int      curIdx    = 0;
+    bool     ok        = true;
+    int64_t  localDups = 0;
 
     while (ok)
     {
@@ -584,6 +585,7 @@ static TSRc DoMerge(_TieredStore*              ts,
                 if (ts->mergeFn != nullptr)
                     ts->mergeFn(merged.data(), cursors[i]->current.data());
                 AdvanceCursor(cursors[i]);
+                localDups++;
             }
         }
 
@@ -601,6 +603,9 @@ static TSRc DoMerge(_TieredStore*              ts,
         memcpy(outDescs[curIdx]->maxKey, merged.data(), ts->recordSize);
         written[curIdx]++;
     }
+
+    if (localDups > 0)
+        ts->statDups.fetch_add((uint64_t)localDups, std::memory_order_relaxed);
 
     // Append footer to every output file (empty files get slotCount=0 footer; caller drops them).
     for (int i = 0; i < numOut && ok; i++)

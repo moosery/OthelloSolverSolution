@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.3.8"
+#define APP_VERSION "2.3.9"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -195,6 +195,7 @@ struct LevelRecord
     int       maxMovesInLevel;  // max legal moves seen for any single board at this level
     long long elapsedNs;
     long long predictedNs;      // prediction made for this level; 0 = none
+    long long dupBoards;        // true duplicates: B+tree dups + merge-time dups in board[level+1]
 };
 
 // ==================== Helpers ====================
@@ -314,7 +315,8 @@ static void doReportResults(
     if (!rf)
         LogErrorf("Warning: could not write results file %s\n", resultsPath);
 
-    long long dupBoards  = totalChildren - totalUniqueBoards;
+    long long dupBoards  = 0;
+    for (const LevelRecord& r : levels) dupBoards += r.dupBoards;
     long long wallMs     = wallNs / 1000000LL;
     long long nsPerBrd   = (totalBoardsProcessed > 0) ? wallNs / totalBoardsProcessed : 0;
     long long brdsPerSec = (wallNs > 0)
@@ -382,22 +384,28 @@ static void doReportResults(
     ReportLine(rf, "  Boards/sec:       %lld\n", brdsPerSec);
     ReportLine(rf, "  Ns/Board:         %lld\n", nsPerBrd);
     ReportLine(rf, "\n  Level Analysis:\n");
-    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
-        "Lv", "BoardsIn", "NewBoards", "Dups", "Mvs", "Ends", "MaxMv", "Pred(s)", "Tm(s)", "ns/brd");
-    ReportLine(rf, "  %2s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
-        "--", "--------", "---------", "----", "---", "----", "-----", "-------", "-----", "------");
+    ReportLine(rf, "  Column key:\n");
+    ReportLine(rf, "    BoardsIn[N]  = (NewBoards[N-1] - Dups[N-1]) + Pass[N]\n");
+    ReportLine(rf, "    Pass[N]      = pass moves found and worked within level N; their children go into NewBoards[N]\n");
+    ReportLine(rf, "    Mvs[N]       = NewBoards[N] + Pass[N]  (all moves generated)\n");
+    ReportLine(rf, "    NewBoards[N] = gross inserts into next level (includes dups; net unique = NewBoards - Dups)\n");
+    ReportLine(rf, "    e.g. lv4->5: (105 - 9) + 2 = 98 = BoardsIn[5]\n\n");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
+        "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "Mvs", "Ends", "MaxMv", "Pred(s)", "Tm(s)", "ns/brd");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
+        "--", "--------", "---------", "----", "----", "---", "----", "-----", "-------", "-----", "------");
     for (const LevelRecord& r : levels)
     {
-        long long dups   = r.totalChildren - r.newBoardsOut;
-        double    elpS   = r.elapsedNs / 1e9;
-        long long nsPerB = (r.boardsIn > 0) ? r.elapsedNs / r.boardsIn : 0;
+        double    elpS    = r.elapsedNs / 1e9;
+        long long nsPerB  = (r.boardsIn > 0) ? r.elapsedNs / r.boardsIn : 0;
+        long long rPasses = r.totalChildren - r.newBoardsOut;
         if (r.predictedNs > 0)
-            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %6d %11.3f %11.3f %8lld\n",
-                r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
+            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %13lld %8lld %6d %11.3f %11.3f %8lld\n",
+                r.level, r.boardsIn, r.newBoardsOut, rPasses, r.dupBoards, r.totalChildren, r.terminalBoardsOut,
                 r.maxMovesInLevel, r.predictedNs / 1e9, elpS, nsPerB);
         else
-            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %8lld %6d %11s %11.3f %8lld\n",
-                r.level, r.boardsIn, r.newBoardsOut, dups, r.totalChildren, r.terminalBoardsOut,
+            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %13lld %8lld %6d %11s %11.3f %8lld\n",
+                r.level, r.boardsIn, r.newBoardsOut, rPasses, r.dupBoards, r.totalChildren, r.terminalBoardsOut,
                 r.maxMovesInLevel, "---", elpS, nsPerB);
     }
     ReportLine(rf, "%s", sep);
@@ -718,11 +726,18 @@ static void RunSolverCore(
     }
     LogPrintf("  Started:       %s\n\n", startDtBuf);
 
-    LogPrintf("%4s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s  %s\n",
-              "Lv", "BoardsIn", "NewBoards", "Dups", "Mvs", "Ends",
+    LogPrintf("  Column key:\n");
+    LogPrintf("    BoardsIn[N]  = (NewBoards[N-1] - Dups[N-1]) + Pass[N]\n");
+    LogPrintf("    Pass[N]      = pass moves found and worked within level N; their children go into NewBoards[N]\n");
+    LogPrintf("    Mvs[N]       = NewBoards[N] + Pass[N]  (all moves generated)\n");
+    LogPrintf("    NewBoards[N] = gross inserts into next level (includes dups; net unique = NewBoards - Dups)\n");
+    LogPrintf("    e.g. lv4->5: (105 - 9) + 2 = 98 = BoardsIn[5]\n\n");
+
+    LogPrintf("%4s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s  %s\n",
+              "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "Mvs", "Ends",
               "MaxMv", "Pred(s)", "Tm(s)", "ns/brd", "Nxt(s)", "DateTime");
-    LogPrintf("%4s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s\n",
-              "--", "--------", "---------", "----", "---", "----",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s\n",
+              "--", "--------", "---------", "----", "----", "---", "----",
               "-----", "-------", "-----", "------", "------");
 
     auto wallStart = std::chrono::high_resolution_clock::now();
@@ -846,16 +861,26 @@ static void RunSolverCore(
         TSCheckpoint(g_tieredBoardStores[level]);
         TSCheckpoint(g_tieredMoveStores[level]);
 
+        // Flush board[level+1] and read its true duplicate count (B+tree + merge dups).
+        // TSCheckpoint waits for all background merges so the count is complete.
+        long long trueDups = 0;
+        if (level < maxLevel && g_tieredBoardStores[level + 1])
+        {
+            TSCheckpoint(g_tieredBoardStores[level + 1]);
+            trueDups = (long long)TSGetDupCount(g_tieredBoardStores[level + 1]);
+        }
+
         // Record stats.
         LevelRecord rec;
-        rec.level         = level;
-        rec.boardsIn      = boardsIn;
+        rec.level              = level;
+        rec.boardsIn           = boardsIn;
         rec.newBoardsOut       = levelStats.newBoards.load();
         rec.totalChildren      = levelStats.totalChildren.load();
         rec.terminalBoardsOut  = levelStats.terminalBoards.load();
         rec.maxMovesInLevel    = levelStats.maxMovesInLevel.load();
         rec.elapsedNs          = elapsedNs;
         rec.predictedNs        = thisPredNs;
+        rec.dupBoards          = trueDups;
         levelHistory.push_back(rec);
 
         totalBoardsProcessed += boardsIn;
@@ -867,7 +892,7 @@ static void RunSolverCore(
         // Per-level log line.
         double    elpS    = elapsedNs / 1e9;
         long long nsPerBd = (boardsIn > 0) ? elapsedNs / boardsIn : 0;
-        long long dups    = rec.totalChildren - rec.newBoardsOut;
+        long long dups    = trueDups;
         double    predS   = (thisPredNs > 0) ? thisPredNs / 1e9 : 0.0;
 
         nextLevelPredNs = 0;
@@ -897,8 +922,9 @@ static void RunSolverCore(
         else
             snprintf(nxtBuf, sizeof(nxtBuf), "%11s", "---");
 
-        LogPrintf("%4d %13lld %13lld %13lld %13lld %8lld %6d %s %11.3f %8lld %s  %s\n",
-                  level, boardsIn, rec.newBoardsOut, dups,
+        long long passes = rec.totalChildren - rec.newBoardsOut;
+        LogPrintf("%4d %13lld %13lld %13lld %13lld %13lld %8lld %6d %s %11.3f %8lld %s  %s\n",
+                  level, boardsIn, rec.newBoardsOut, passes, dups,
                   rec.totalChildren, rec.terminalBoardsOut, rec.maxMovesInLevel,
                   predBuf, elpS, nsPerBd, nxtBuf, dtBuf);
 
@@ -1256,8 +1282,8 @@ int main(int argc, char* argv[])
     int defaultThreads = gpuInfo.recommendedWorkerCount;
 
     SolverConfig config = { 6, defaultThreads, 16,
-        {"D:\\CommandLineSolverDataDir", "C:\\CommandLineSolverDataDir"},
-        2, false, MM_RECOMMENDED, 0, 0, 0, 0 };
+        {"D:\\CommandLineSolverDataDir", "D:\\CommandLineSolverDataDir2", "D:\\CommandLineSolverDataDir3", "D:\\CommandLineSolverDataDir4"},
+        4, false, MM_RECOMMENDED, 0, 0, 0, 0 };
 
     if (argc > 1)
         processArgs(argc, argv, &config);

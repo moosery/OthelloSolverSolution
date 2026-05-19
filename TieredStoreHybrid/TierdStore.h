@@ -165,6 +165,12 @@ TSRc TSDelete(PTS pTs, const void* keyRecord);
 // Fill pStatus with a snapshot of current statistics.
 TSRc TSStatus(PTS pTs, TSStatusBlock* pStatus);
 
+// Returns the cumulative count of duplicate records suppressed by this store —
+// B+tree-level duplicates (same key already in the in-memory tree) plus
+// merge-time duplicates (same key found in two source files/tree during a flush).
+// The counter is never reset; call before closing the store to get the lifetime total.
+uint64_t TSGetDupCount(PTS pTs);
+
 // Enumerate all live records in the store (unspecified order).
 // Flushes the in-memory tree to disk first so each record appears exactly once.
 // enumFn is called while the write lock is held — do not call other TS functions from it.

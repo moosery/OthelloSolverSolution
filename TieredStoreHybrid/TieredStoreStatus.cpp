@@ -72,3 +72,9 @@ TSRc TSStatus(PTS pTs, TSStatusBlock* pStatus)
     RWLockReadUnlock("TSStatus", &pTs->storeLock);
     return TS_RC_Success;
 }
+
+uint64_t TSGetDupCount(PTS pTs)
+{
+    if (!pTs) return 0;
+    return pTs->statDups.load(std::memory_order_relaxed);
+}

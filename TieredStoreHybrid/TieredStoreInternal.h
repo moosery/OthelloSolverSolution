@@ -209,7 +209,7 @@ struct _TieredStore
     PArenaMem                bgArena;     // bgTree's arena; NULL if malloc mode (storeLock)
     PArenaMem                spareArena;  // recycled arena ready for the next flush (storeLock)
 
-    // Stats — always read/written while holding storeLock
+    // Stats — always read/written while holding storeLock (except statDups)
     uint64_t      statInserts;
     uint64_t      statInsertNs;
     uint64_t      statFinds;
@@ -220,4 +220,8 @@ struct _TieredStore
     uint64_t      statSplits;
     uint64_t      statCheckpoints;
     uint64_t      statCheckpointNs;
+
+    // Duplicate counter — incremented lock-free from both insert and merge paths.
+    // Use fetch_add(n, relaxed); read with load(relaxed).
+    std::atomic<uint64_t> statDups;
 };

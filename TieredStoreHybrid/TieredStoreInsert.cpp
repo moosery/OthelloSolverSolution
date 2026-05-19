@@ -46,6 +46,7 @@ TSRc TSInsert(PTS pTs, const void* record)
             if (pTs->mergeFn != nullptr)
                 pTs->mergeFn(buf.data(), record);
             BPUpdate(pTs->memTree, buf.data());
+            pTs->statDups.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {

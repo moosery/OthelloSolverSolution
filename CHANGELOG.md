@@ -1,5 +1,17 @@
 # Changelog
 
+## [v2.3.9] - 2026-05-19
+
+### Added
+- `TieredStoreHybrid`: true duplicate counter — `std::atomic<uint64_t> statDups` added to `_TieredStore`; incremented lock-free from two paths: (1) `TSInsert` when `BPInsertCopy` returns `BP_RC_Duplicate_Found` (B+tree-level dup, key already in the in-memory tree), and (2) `DoMerge` inner loop when consecutive cursors compare equal (merge-time dup, same key in two source files/tree during a flush); merge path uses a local accumulator and a single `fetch_add` per merge to minimize atomic traffic; `TSGetDupCount(PTS)` API added to `TierdStore.h` and implemented in `TieredStoreStatus.cpp`
+- `OthelloSolverCommandLine`: `Pass` column in level reports — `Pass[N] = totalChildren[N] - newBoardsOut[N]` (pass moves generated and worked within level N; their children land in `NewBoards[N]`); added to both the live progress table and the final summary level-analysis table; `Mvs = NewBoards + Pass` holds exactly at every row
+- `OthelloSolverCommandLine`: column-key legend printed before the level table in both live output and saved results file — explains `BoardsIn[N] = (NewBoards[N-1] - Dups[N-1]) + Pass[N]`, the role of `Pass`, and includes the hardcoded 4×4 lv4→5 example `(105 - 9) + 2 = 98`
+
+### Fixed
+- `OthelloSolverCommandLine`: `Dups` column was previously computed as `totalChildren - newBoardsOut`, which captured pass moves rather than true duplicates (because `TSInsert` always returned `TS_RC_Success` for dups, so `newBoardsOut` counted both unique and duplicate boards); replaced with `TSCheckpoint(board[level+1])` + `TSGetDupCount(board[level+1])` to read the true count of duplicates suppressed by the TieredStore across both insert-time and merge-time deduplication paths; the 6×6 run now correctly shows millions of dups at deeper levels (e.g. 132 M at level 12) that were previously invisible
+
+---
+
 ## [v2.3.8] - 2026-05-18
 
 ### Changed
