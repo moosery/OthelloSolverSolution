@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2.4.1] - 2026-05-19
+
+### Fixed
+- `OthelloSolverCommandLine` / `SolverWorker`: `WorkerLevelStats::newBoards` was `std::atomic<int>` (signed 32-bit, max ~2.1 B); at level 14 of the 6×6 solve (~2.87 B new boards) it overflowed to a large negative value, which cascaded into the `Pass` column (`totalChildren - newBoardsOut`) printing an impossibly large positive number; fixed by widening to `std::atomic<long long>`, matching `totalChildren` and `terminalBoards`
+- `OthelloSolverCommandLine`: removed spurious `(int)` cast on `passBatch.size()` before accumulating into `long long boardsIn`; the cast was harmless in practice (pass batches are bounded by `batchSize`) but incorrect and masked the same class of overflow
+
+---
+
 ## [v2.4.0] - 2026-05-19
 
 ### Added

@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.3.10"
+#define APP_VERSION "2.4.1"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -824,7 +824,7 @@ static void RunSolverCore(
             {
                 int end = (std::min)(ps + batchSize, (int)passes.size());
                 std::vector<BOARD> passBatch(passes.begin() + ps, passes.begin() + end);
-                boardsIn      += (int)passBatch.size();
+                boardsIn      += passBatch.size();
                 gpuDispatches += 1;
 
                 WorkerGpuContext* pCtx;
