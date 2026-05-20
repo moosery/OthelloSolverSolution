@@ -552,8 +552,9 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
         {
             // Use B+tree level walker to find natural partition boundaries.
             std::vector<void*> outKeys;
+            BPLL targetPartitions = (BPLL)((count + ts->maxFileRecords - 1) / ts->maxFileRecords);
             BPGetLevelStartKeys(ts->memTree, &ts->memTree->keyInfo,
-                                (BPLL)ts->maxFileRecords, outKeys);
+                                targetPartitions, outKeys);
             int N = (int)outKeys.size();
             // Copy raw pointers into owned buffers — pointers only valid while tree is alive.
             std::vector<std::vector<uint8_t>> keyBufs(N);
@@ -791,8 +792,9 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
         else
         {
             std::vector<void*> outKeys;
+            BPLL targetPartitions = (BPLL)((count + ts->maxFileRecords - 1) / ts->maxFileRecords);
             BPGetLevelStartKeys(ts->memTree, &ts->memTree->keyInfo,
-                                (BPLL)ts->maxFileRecords, outKeys);
+                                targetPartitions, outKeys);
             int N = (int)outKeys.size();
             std::vector<std::vector<uint8_t>> keyBufs(N);
             for (int i = 0; i < N; i++)
@@ -979,11 +981,9 @@ static void TSI_RunSliceJob(_TieredStore* ts, TSMergeJob* job, int sliceIdx)
     {
         for (auto* od : slice.outDescs) { remove(od->path); TSI_FreeFileDesc(ts, od); }
         slice.outDescs.clear();
-        if (slice.srcFile) {
-            remove(slice.srcFile->path);
-            TSI_FreeFileDesc(ts, slice.srcFile);
-            slice.srcFile = nullptr;
-        }
+        // Leave slice.srcFile intact on failure — it is the last surviving copy of its data.
+        // (It has already been extracted from the live registry; TSI_FinalizeJob will
+        //  need to decide what to do with unmerged source files if anyFailed is set.)
         std::lock_guard<std::mutex> lk(job->collectMutex);
         job->anyFailed = true;
     }
@@ -1017,6 +1017,15 @@ static void TSI_FinalizeJob(_TieredStore* ts, TSMergeJob* job)
     {
         for (auto* od : job->toRegister)
             if (od) { remove(od->path); TSI_FreeFileDesc(ts, od); }
+        // Restore any source files that were extracted from the registry but not merged
+        // (srcFile is non-null on a slice whose DoMerge failed, so we kept it on disk).
+        // Re-inserting into ts->files[] makes the existing data accessible again for the
+        // current session.  The metaStore does not know about them (PrepMergeJob already
+        // deleted them from it), so they will be re-registered into the metaStore the
+        // next time a flush merges their key range, or orphaned on disk if the process
+        // restarts before that.
+        for (auto& s : job->slices)
+            if (s.srcFile) { TSI_RegisterFileArray(ts, s.srcFile); s.srcFile = nullptr; }
     }
 
     // BPFreeTree resets the arena internally; recycle it as spareArena for the next flush.
