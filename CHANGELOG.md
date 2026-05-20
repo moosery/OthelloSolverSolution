@@ -1,5 +1,17 @@
 # Changelog
 
+## [v2.4.0] - 2026-05-19
+
+### Added
+- `BPlusTreeHybrid`: `BPGetLevelStartKeys` — new API that walks the B+tree internal node levels to find natural partition boundaries; descends the leftmost path counting siblings at each level and stops at the deepest level where sibling count ≤ `targetNodeCount`; for each non-first sibling at that level descends to its leftmost leaf to retrieve the true subtree minimum key (a key node's `ppDataPtrArray[0]` is a child separator, not the subtree minimum); returns raw `void*` pointers into live tree node data — caller must copy key bytes before the tree is freed or swapped; safe to call on a frozen snapshot tree with no concurrent writers
+- `Utility/Error.h`: `FATAL_TS_UNBALANCED_TREE` (RC_FATAL_BASE + 29) — fatal code raised when a level-walker partition contains more records than `maxFileRecords`, indicating the B+tree's internal structure is unexpectedly unbalanced
+
+### Changed
+- `TieredStoreHybrid`: fully parallel background flush (v2.4.0) — replaces the sequential per-slice loop in `TSI_BackgroundMerge` with one independent pool job per slice; all jobs are submitted simultaneously to `mergePool` and run concurrently; `TSMergeJob` gains `pendingSlices` (atomic countdown), `collectMutex` (guards `toRegister` and `anyFailed`), `toRegister` (output files collected by completed slices), `anyFailed`, and `splitOccurred`; the new `TSI_RunSliceJob` handles one slice's DoMerge + srcFile deletion + output collection; `TSI_FinalizeJob` is called by whichever slice completes last (countdown hits 0), re-acquires the write lock, registers all outputs, recycles the arena, and signals `bgPending = 0`; no file-file merges ever occur — files already carry non-overlapping key ranges, so each job is always a 2-way merge of a B+tree slice with at most one existing file
+- `TieredStoreHybrid`: new B+tree-walk routing in both `TSI_PrepMergeJob` and `TSI_FlushMemTree` — instead of per-file zones `[file.minKey, nextFile.minKey)`, the code now walks the B+tree forward key-by-key; for each current key an `upper_bound` search on the sorted file list finds whether the key falls inside an existing file's `[minKey, maxKey]` range (file merge) or in a gap between files (gap merge); file merges set the tree cursor's `hiKey` to the first B+tree key strictly after `file->maxKey` (via `BPIterateStartFrom(maxKey, returnEqual=false)`) so the boundary record is never excluded; gap merges scan linearly and split every `maxFileRecords` records using a peek-ahead to collect split boundaries before submitting slices; file cursors always read to EOF (no `hiKey` bound) since files carry disjoint ranges; the new no-files path uses `BPGetLevelStartKeys` when the tree exceeds `maxFileRecords` to split it into parallel partitions without any linear scan, with a `Fatal(FATAL_TS_UNBALANCED_TREE)` guard if any partition exceeds the record cap
+
+---
+
 ## [v2.3.10] - 2026-05-19
 
 ### Changed

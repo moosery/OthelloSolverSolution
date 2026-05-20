@@ -440,7 +440,6 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
     ClockStart(&ct);
     bool splitOccurred = false;
 
-    // Sort existing files by minKey to establish non-overlapping zones.
     std::vector<TSFileDesc*> sorted(ts->files, ts->files + ts->numFiles);
     std::sort(sorted.begin(), sorted.end(), [ts](TSFileDesc* a, TSFileDesc* b) {
         return BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
@@ -450,112 +449,207 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
     std::vector<TSFileDesc*> filesToRemove;
     std::vector<TSFileDesc*> newFiles;
 
-    // Peek: does the tree have any record in [loKey, hiKey)?
-    auto treeHasRecords = [&](const uint8_t* loKey, const uint8_t* hiKey) -> bool {
-        BPIterator peekIter;
-        std::vector<uint8_t> buf((size_t)ts->recordSize);
-        if (loKey)
-            BPIterateStartFrom(ts->memTree, &peekIter, const_cast<uint8_t*>(loKey), true);
-        else
-            BPIterateStart(ts->memTree, &peekIter);
-        bool found = (BPIterate(&peekIter, buf.data()) == BP_RC_Success);
-        if (found && hiKey &&
-            BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
-                          buf.data(), hiKey) >= 0)
-            found = false;
-        BPIterateStop(&peekIter);
-        return found;
-    };
-
-    // Merge B+tree slice [loKey, hiKey) with optional srcFile → write output file(s).
-    // numOut uses the full tree count as a conservative upper bound for one slice.
+    // Merge B+tree [loKey, hiKey) with optional srcFile → 1..numOut output files.
+    // File cursor always reads to EOF (no hiKey bound — files have non-overlapping ranges).
     auto mergeSlice = [&](const uint8_t* loKey, const uint8_t* hiKey,
-                          TSFileDesc* srcFile) -> TSRc {
-        int64_t total = (int64_t)count;
-        if (srcFile) total += (int64_t)srcFile->liveCount;
-        int numOut = (int)((total + (int64_t)ts->maxFileRecords - 1) / (int64_t)ts->maxFileRecords);
+                          TSFileDesc* srcFile, int numOut) -> TSRc {
         if (numOut < 1) numOut = 1;
-        numOut++;  // safety margin
-
         std::vector<TSFileDesc*> outDescs;
         outDescs.reserve((size_t)numOut);
         for (int i = 0; i < numOut; i++)
         {
             TSFileDesc* d = MakeOutputDesc(ts);
-            if (!d)
-            {
-                for (auto* od : outDescs) TSI_FreeFileDesc(ts, od);
-                return TS_RC_Out_Of_Memory;
-            }
+            if (!d) { for (auto* od : outDescs) TSI_FreeFileDesc(ts, od); return TS_RC_Out_Of_Memory; }
             outDescs.push_back(d);
         }
-
         std::vector<MergeCursor*> cursors;
         bool ok = true;
-
         MergeCursor* mc = new (std::nothrow) MergeCursor();
-        if (!mc) { ok = false; }
-        else
-        {
+        if (!mc) ok = false;
+        else {
             InitCursorTree(mc, ts, ts->memTree, loKey, hiKey);
             if (!mc->done) cursors.push_back(mc);
-            else           { CloseCursor(mc); delete mc; }
+            else { CloseCursor(mc); delete mc; }
         }
-
-        if (ok && srcFile)
-        {
+        if (ok && srcFile) {
             MergeCursor* fc = new (std::nothrow) MergeCursor();
-            if (!fc) { ok = false; }
-            else if (!InitCursorFile(fc, ts, srcFile, hiKey))
+            if (!fc) ok = false;
+            else if (!InitCursorFile(fc, ts, srcFile, nullptr))
                 { CloseCursor(fc); delete fc; ok = false; }
             else if (!fc->done) cursors.push_back(fc);
-            else                { CloseCursor(fc); delete fc; }
+            else { CloseCursor(fc); delete fc; }
         }
-
         TSRc mrc = ok ? DoMerge(ts, cursors, outDescs) : TS_RC_IO_Error;
         for (auto* c : cursors) { CloseCursor(c); delete c; }
-
-        if (mrc != TS_RC_Success)
-        {
+        if (mrc != TS_RC_Success) {
             for (auto* od : outDescs) { remove(od->path); TSI_FreeFileDesc(ts, od); }
             return mrc;
         }
-
-        // Drop empty output files.
-        for (int i = (int)outDescs.size() - 1; i >= 0; i--)
-        {
+        for (int i = (int)outDescs.size() - 1; i >= 0; i--) {
             if (outDescs[i]->slotCount == 0)
-            {
-                remove(outDescs[i]->path);
-                TSI_FreeFileDesc(ts, outDescs[i]);
-                outDescs.erase(outDescs.begin() + i);
-            }
+                { remove(outDescs[i]->path); TSI_FreeFileDesc(ts, outDescs[i]); outDescs.erase(outDescs.begin() + i); }
         }
         if (outDescs.size() > 1) splitOccurred = true;
-
         if (srcFile) filesToRemove.push_back(srcFile);
         for (auto* od : outDescs) newFiles.push_back(od);
         return TS_RC_Success;
     };
 
+    // Emit gap slices for B+tree records in [gapStart, gapEnd) that fall between files.
+    // Splits every maxFileRecords records into a separate output file.
+    auto flushGap = [&](const uint8_t* gapStart, const uint8_t* gapEnd) -> TSRc {
+        // Collect split boundaries by scanning the B+tree linearly.
+        std::vector<std::vector<uint8_t>> splitBounds;
+        {
+            BPIterator git;
+            BPIterateStartFrom(ts->memTree, &git, const_cast<uint8_t*>(gapStart), true);
+            std::vector<uint8_t> rec((size_t)ts->recordSize);
+            uint64_t sliceCount = 0;
+            while (BPIterate(&git, rec.data()) == BP_RC_Success)
+            {
+                if (gapEnd && BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                             (BPIdxFld*)ts->keyFlds, rec.data(), gapEnd) >= 0)
+                    break;
+                sliceCount++;
+                if (sliceCount == ts->maxFileRecords)
+                {
+                    std::vector<uint8_t> nextRec((size_t)ts->recordSize);
+                    bool hasNext = (BPIterate(&git, nextRec.data()) == BP_RC_Success);
+                    if (hasNext && !(gapEnd &&
+                        BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                      (BPIdxFld*)ts->keyFlds, nextRec.data(), gapEnd) >= 0))
+                    {
+                        splitBounds.push_back(nextRec);
+                        sliceCount = 1; // nextRec is first record of new chunk
+                    }
+                    else break;
+                }
+            }
+            BPIterateStop(&git);
+        }
+        const uint8_t* sliceStart = gapStart;
+        TSRc rc2 = TS_RC_Success;
+        for (auto& sb : splitBounds) {
+            if (rc2 != TS_RC_Success) break;
+            rc2 = mergeSlice(sliceStart, sb.data(), nullptr, 1);
+            sliceStart = sb.data();
+        }
+        if (rc2 == TS_RC_Success)
+            rc2 = mergeSlice(sliceStart, gapEnd, nullptr, 1);
+        return rc2;
+    };
+
     TSRc rc = TS_RC_Success;
 
-    // Pre-zone: B+tree records before the first file.
-    if (!sorted.empty() && treeHasRecords(nullptr, sorted[0]->minKey))
-        rc = mergeSlice(nullptr, sorted[0]->minKey, nullptr);
-
-    // Per-file zones.
-    for (int i = 0; i < (int)sorted.size() && rc == TS_RC_Success; i++)
+    if (sorted.empty())
     {
-        const uint8_t* loKey = sorted[i]->minKey;
-        const uint8_t* hiKey = (i + 1 < (int)sorted.size()) ? sorted[i + 1]->minKey : nullptr;
-        if (treeHasRecords(loKey, hiKey))
-            rc = mergeSlice(loKey, hiKey, sorted[i]);
-    }
+        // Case 1: no existing files.
+        if (count <= ts->maxFileRecords)
+        {
+            rc = mergeSlice(nullptr, nullptr, nullptr, 1);
+        }
+        else
+        {
+            // Use B+tree level walker to find natural partition boundaries.
+            std::vector<void*> outKeys;
+            BPGetLevelStartKeys(ts->memTree, &ts->memTree->keyInfo,
+                                (BPLL)ts->maxFileRecords, outKeys);
+            int N = (int)outKeys.size();
+            // Copy raw pointers into owned buffers — pointers only valid while tree is alive.
+            std::vector<std::vector<uint8_t>> keyBufs(N);
+            for (int i = 0; i < N; i++)
+                keyBufs[i].assign((uint8_t*)outKeys[i], (uint8_t*)outKeys[i] + ts->recordSize);
 
-    // No files at all: flush entire tree as new file(s).
-    if (sorted.empty() && rc == TS_RC_Success)
-        rc = mergeSlice(nullptr, nullptr, nullptr);
+            for (int i = 0; i <= N && rc == TS_RC_Success; i++)
+            {
+                const uint8_t* lo = (i == 0) ? nullptr : keyBufs[i - 1].data();
+                const uint8_t* hi = (i <  N) ? keyBufs[i].data() : nullptr;
+                // Count records in this partition (in-memory, no I/O).
+                uint64_t partCount = 0;
+                {
+                    BPIterator cit;
+                    std::vector<uint8_t> buf((size_t)ts->recordSize);
+                    if (lo) BPIterateStartFrom(ts->memTree, &cit, const_cast<uint8_t*>(lo), true);
+                    else    BPIterateStart(ts->memTree, &cit);
+                    while (BPIterate(&cit, buf.data()) == BP_RC_Success) {
+                        if (hi && BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                                (BPIdxFld*)ts->keyFlds, buf.data(), hi) >= 0)
+                            break;
+                        partCount++;
+                    }
+                    BPIterateStop(&cit);
+                }
+                if (partCount > ts->maxFileRecords)
+                    Fatal(FATAL_TS_UNBALANCED_TREE,
+                          "TSI_FlushMemTree: partition %d/%d has %llu records, max is %llu",
+                          i, N, (unsigned long long)partCount, (unsigned long long)ts->maxFileRecords);
+                rc = mergeSlice(lo, hi, nullptr, 1);
+            }
+        }
+    }
+    else
+    {
+        // Case 2: has files — walk B+tree forward, routing each key to its file or a gap.
+        std::vector<uint8_t> currentKeyBuf((size_t)ts->recordSize);
+        bool hasCurrentKey = false;
+        {
+            BPIterator si;
+            BPIterateStart(ts->memTree, &si);
+            if (BPIterate(&si, currentKeyBuf.data()) == BP_RC_Success) hasCurrentKey = true;
+            BPIterateStop(&si);
+        }
+
+        while (hasCurrentKey && rc == TS_RC_Success)
+        {
+            const uint8_t* currentKey = currentKeyBuf.data();
+
+            // upper_bound: find first file where minKey > currentKey, then step back.
+            int ubIdx = 0, ubHi = (int)sorted.size();
+            while (ubIdx < ubHi) {
+                int mid = (ubIdx + ubHi) / 2;
+                if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                                  sorted[mid]->minKey, currentKey) <= 0)
+                    ubIdx = mid + 1;
+                else
+                    ubHi = mid;
+            }
+            // ubIdx = first file with minKey > currentKey
+            int candidate = ubIdx - 1;
+            int fileIdx = -1;
+            if (candidate >= 0 &&
+                BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                              currentKey, sorted[candidate]->maxKey) <= 0)
+                fileIdx = candidate;
+
+            if (fileIdx >= 0)
+            {
+                TSFileDesc* file = sorted[fileIdx];
+                // Tree cursor hiKey = first B+tree key strictly after file->maxKey.
+                std::vector<uint8_t> hiKeyBuf((size_t)ts->recordSize);
+                const uint8_t* hiKey = nullptr;
+                {
+                    BPIterator hi3;
+                    BPIterateStartFrom(ts->memTree, &hi3, file->maxKey, false);
+                    if (BPIterate(&hi3, hiKeyBuf.data()) == BP_RC_Success) hiKey = hiKeyBuf.data();
+                    BPIterateStop(&hi3);
+                }
+                int64_t total = (int64_t)file->liveCount + (int64_t)count;
+                int numOut = (int)((total + (int64_t)ts->maxFileRecords - 1) /
+                                   (int64_t)ts->maxFileRecords) + 1;
+                rc = mergeSlice(currentKey, hiKey, file, numOut);
+                if (hiKey) currentKeyBuf = hiKeyBuf;
+                else       hasCurrentKey = false;
+            }
+            else
+            {
+                // currentKey is in a gap between files (or pre/post zone).
+                const uint8_t* gapEnd = (ubIdx < (int)sorted.size()) ? sorted[ubIdx]->minKey : nullptr;
+                rc = flushGap(currentKey, gapEnd);
+                if (gapEnd) memcpy(currentKeyBuf.data(), gapEnd, (size_t)ts->recordSize);
+                else        hasCurrentKey = false;
+            }
+        }
+    }
 
     if (rc != TS_RC_Success)
     {
@@ -563,29 +657,22 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
         return rc;
     }
 
-    // Remove merged source files from the registry (also deletes them from disk).
     if (!filesToRemove.empty())
     {
         std::vector<int> removeIndices;
         removeIndices.reserve(filesToRemove.size());
         for (TSFileDesc* f : filesToRemove)
-        {
             for (int i = 0; i < ts->numFiles; i++)
-            {
                 if (ts->files[i] == f) { removeIndices.push_back(i); break; }
-            }
-        }
         TSI_RemoveFiles(ts, removeIndices);
     }
 
-    // Register new output files.
     for (auto* nf : newFiles)
     {
         TSRc rrc = TSI_RegisterFile(ts, nf);
         if (rrc != TS_RC_Success) { remove(nf->path); return rrc; }
     }
 
-    // Reset the in-memory tree.
     BPFreeTree(ts->memTree, true);
     ts->memTree = nullptr;
     BPRc brc = BPCreateTree(&ts->memTree, 256, (size_t)ts->maxMemoryBytes,
@@ -626,58 +713,11 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
     job->tree  = ts->memTree;
     job->arena = ts->pMemArena;
 
-    // Sort existing files by minKey to establish non-overlapping zones.
     std::vector<TSFileDesc*> sorted(ts->files, ts->files + ts->numFiles);
     std::sort(sorted.begin(), sorted.end(), [ts](TSFileDesc* a, TSFileDesc* b) {
         return BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
                              a->minKey, b->minKey) < 0;
     });
-
-    // Peek: does the tree have any record in [loKey, hiKey)?
-    auto treeHasRecords = [&](const uint8_t* loKey, const uint8_t* hiKey) -> bool {
-        BPIterator peekIter;
-        std::vector<uint8_t> buf((size_t)ts->recordSize);
-        if (loKey)
-            BPIterateStartFrom(ts->memTree, &peekIter, const_cast<uint8_t*>(loKey), true);
-        else
-            BPIterateStart(ts->memTree, &peekIter);
-        bool found = (BPIterate(&peekIter, buf.data()) == BP_RC_Success);
-        if (found && hiKey &&
-            BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
-                          buf.data(), hiKey) >= 0)
-            found = false;
-        BPIterateStop(&peekIter);
-        return found;
-    };
-
-    // Add a slice for one merge zone.
-    // numOut = ceil((srcFile.liveCount + all-tree-records) / maxFileRecords) + 1 safety.
-    auto addSlice = [&](const uint8_t* loKey, const uint8_t* hiKey,
-                        TSFileDesc* srcFile) -> bool {
-        int64_t total = (int64_t)count;
-        if (srcFile) total += (int64_t)srcFile->liveCount;
-        int numOut = (int)((total + (int64_t)ts->maxFileRecords - 1) / (int64_t)ts->maxFileRecords);
-        if (numOut < 1) numOut = 1;
-        numOut++;  // safety margin
-
-        TSFileMergeSlice slice;
-        slice.srcFile = srcFile;
-        if (loKey) slice.loKey.assign(loKey, loKey + ts->recordSize);
-        if (hiKey) slice.hiKey.assign(hiKey, hiKey + ts->recordSize);
-
-        for (int i = 0; i < numOut; i++)
-        {
-            TSFileDesc* d = MakeOutputDesc(ts);
-            if (!d)
-            {
-                for (auto* od : slice.outDescs) TSI_FreeFileDesc(ts, od);
-                return false;
-            }
-            slice.outDescs.push_back(d);
-        }
-        job->slices.push_back(std::move(slice));
-        return true;
-    };
 
     auto cleanupOnFail = [&]() {
         for (auto& s : job->slices)
@@ -685,68 +725,190 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
         delete job;
     };
 
-    // Pre-zone: B+tree records before the first file.
-    if (!sorted.empty() && treeHasRecords(nullptr, sorted[0]->minKey))
-    {
-        if (!addSlice(nullptr, sorted[0]->minKey, nullptr)) { cleanupOnFail(); return nullptr; }
-    }
+    // Append one TSFileMergeSlice to job->slices.
+    auto addSlice = [&](const uint8_t* loKey, const uint8_t* hiKey,
+                        TSFileDesc* srcFile, int numOut) -> bool {
+        if (numOut < 1) numOut = 1;
+        TSFileMergeSlice slice;
+        slice.srcFile = srcFile;
+        if (loKey) slice.loKey.assign(loKey, loKey + ts->recordSize);
+        if (hiKey) slice.hiKey.assign(hiKey, hiKey + ts->recordSize);
+        for (int i = 0; i < numOut; i++) {
+            TSFileDesc* d = MakeOutputDesc(ts);
+            if (!d) { for (auto* od : slice.outDescs) TSI_FreeFileDesc(ts, od); return false; }
+            slice.outDescs.push_back(d);
+        }
+        job->slices.push_back(std::move(slice));
+        return true;
+    };
 
-    // Per-file zones: each file owns [file.minKey, nextFile.minKey).
-    for (int i = 0; i < (int)sorted.size(); i++)
-    {
-        const uint8_t* loKey = sorted[i]->minKey;
-        const uint8_t* hiKey = (i + 1 < (int)sorted.size()) ? sorted[i + 1]->minKey : nullptr;
-        if (treeHasRecords(loKey, hiKey))
+    // Add slices for B+tree records in gap [gapStart, gapEnd) (no srcFile).
+    // Splits every maxFileRecords records. Returns false on allocation failure.
+    auto addGapSlices = [&](const uint8_t* gapStart, const uint8_t* gapEnd) -> bool {
+        std::vector<std::vector<uint8_t>> splitBounds;
         {
-            if (!addSlice(loKey, hiKey, sorted[i])) { cleanupOnFail(); return nullptr; }
+            BPIterator git;
+            BPIterateStartFrom(ts->memTree, &git, const_cast<uint8_t*>(gapStart), true);
+            std::vector<uint8_t> rec((size_t)ts->recordSize);
+            uint64_t sliceCount = 0;
+            while (BPIterate(&git, rec.data()) == BP_RC_Success)
+            {
+                if (gapEnd && BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                             (BPIdxFld*)ts->keyFlds, rec.data(), gapEnd) >= 0)
+                    break;
+                sliceCount++;
+                if (sliceCount == ts->maxFileRecords)
+                {
+                    std::vector<uint8_t> nextRec((size_t)ts->recordSize);
+                    bool hasNext = (BPIterate(&git, nextRec.data()) == BP_RC_Success);
+                    if (hasNext && !(gapEnd &&
+                        BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                      (BPIdxFld*)ts->keyFlds, nextRec.data(), gapEnd) >= 0))
+                    {
+                        splitBounds.push_back(nextRec);
+                        sliceCount = 1;
+                    }
+                    else break;
+                }
+            }
+            BPIterateStop(&git);
+        }
+        const uint8_t* sliceStart = gapStart;
+        for (auto& sb : splitBounds) {
+            if (!addSlice(sliceStart, sb.data(), nullptr, 1)) return false;
+            sliceStart = sb.data();
+        }
+        return addSlice(sliceStart, gapEnd, nullptr, 1);
+    };
+
+    if (sorted.empty())
+    {
+        // Case 1: no existing files.
+        if (count <= ts->maxFileRecords)
+        {
+            if (!addSlice(nullptr, nullptr, nullptr, 1)) { cleanupOnFail(); return nullptr; }
+        }
+        else
+        {
+            std::vector<void*> outKeys;
+            BPGetLevelStartKeys(ts->memTree, &ts->memTree->keyInfo,
+                                (BPLL)ts->maxFileRecords, outKeys);
+            int N = (int)outKeys.size();
+            std::vector<std::vector<uint8_t>> keyBufs(N);
+            for (int i = 0; i < N; i++)
+                keyBufs[i].assign((uint8_t*)outKeys[i], (uint8_t*)outKeys[i] + ts->recordSize);
+
+            for (int i = 0; i <= N; i++)
+            {
+                const uint8_t* lo = (i == 0) ? nullptr : keyBufs[i - 1].data();
+                const uint8_t* hi = (i <  N) ? keyBufs[i].data() : nullptr;
+                // Count records to detect unbalanced tree.
+                uint64_t partCount = 0;
+                {
+                    BPIterator cit;
+                    std::vector<uint8_t> buf((size_t)ts->recordSize);
+                    if (lo) BPIterateStartFrom(ts->memTree, &cit, const_cast<uint8_t*>(lo), true);
+                    else    BPIterateStart(ts->memTree, &cit);
+                    while (BPIterate(&cit, buf.data()) == BP_RC_Success) {
+                        if (hi && BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings,
+                                                (BPIdxFld*)ts->keyFlds, buf.data(), hi) >= 0)
+                            break;
+                        partCount++;
+                    }
+                    BPIterateStop(&cit);
+                }
+                if (partCount > ts->maxFileRecords)
+                    Fatal(FATAL_TS_UNBALANCED_TREE,
+                          "TSI_PrepMergeJob: partition %d/%d has %llu records, max is %llu",
+                          i, N, (unsigned long long)partCount, (unsigned long long)ts->maxFileRecords);
+                if (!addSlice(lo, hi, nullptr, 1)) { cleanupOnFail(); return nullptr; }
+            }
+        }
+    }
+    else
+    {
+        // Case 2: has files — walk B+tree forward.
+        std::vector<uint8_t> currentKeyBuf((size_t)ts->recordSize);
+        bool hasCurrentKey = false;
+        {
+            BPIterator si;
+            BPIterateStart(ts->memTree, &si);
+            if (BPIterate(&si, currentKeyBuf.data()) == BP_RC_Success) hasCurrentKey = true;
+            BPIterateStop(&si);
+        }
+
+        while (hasCurrentKey)
+        {
+            const uint8_t* currentKey = currentKeyBuf.data();
+
+            int ubIdx = 0, ubHi = (int)sorted.size();
+            while (ubIdx < ubHi) {
+                int mid = (ubIdx + ubHi) / 2;
+                if (BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                                  sorted[mid]->minKey, currentKey) <= 0)
+                    ubIdx = mid + 1;
+                else
+                    ubHi = mid;
+            }
+            int candidate = ubIdx - 1;
+            int fileIdx = -1;
+            if (candidate >= 0 &&
+                BPKeyCmpPPRaw(ts->numKeyFlds, ts->idxSettings, (BPIdxFld*)ts->keyFlds,
+                              currentKey, sorted[candidate]->maxKey) <= 0)
+                fileIdx = candidate;
+
+            if (fileIdx >= 0)
+            {
+                TSFileDesc* file = sorted[fileIdx];
+                std::vector<uint8_t> hiKeyBuf((size_t)ts->recordSize);
+                const uint8_t* hiKey = nullptr;
+                {
+                    BPIterator hi3;
+                    BPIterateStartFrom(ts->memTree, &hi3, file->maxKey, false);
+                    if (BPIterate(&hi3, hiKeyBuf.data()) == BP_RC_Success) hiKey = hiKeyBuf.data();
+                    BPIterateStop(&hi3);
+                }
+                int64_t total = (int64_t)file->liveCount + (int64_t)count;
+                int numOut = (int)((total + (int64_t)ts->maxFileRecords - 1) /
+                                   (int64_t)ts->maxFileRecords) + 1;
+                if (!addSlice(currentKey, hiKey, file, numOut)) { cleanupOnFail(); return nullptr; }
+                if (hiKey) currentKeyBuf = hiKeyBuf;
+                else       hasCurrentKey = false;
+            }
+            else
+            {
+                const uint8_t* gapEnd = (ubIdx < (int)sorted.size()) ? sorted[ubIdx]->minKey : nullptr;
+                if (!addGapSlices(currentKey, gapEnd)) { cleanupOnFail(); return nullptr; }
+                if (gapEnd) memcpy(currentKeyBuf.data(), gapEnd, (size_t)ts->recordSize);
+                else        hasCurrentKey = false;
+            }
         }
     }
 
-    // No files at all: flush entire tree as new file(s).
-    if (sorted.empty())
-    {
-        if (!addSlice(nullptr, nullptr, nullptr)) { cleanupOnFail(); return nullptr; }
-    }
+    if (job->slices.empty()) { delete job; return nullptr; }
 
-    if (job->slices.empty())
-    {
-        // B+tree has records but none overlap any zone — shouldn't happen, but be safe.
-        delete job;
-        return nullptr;
-    }
-
-    // Extract files that are being merged from the live registry.
-    // Build the list of file pointers that need extraction.
+    // Extract merged source files from the live registry (under caller's write lock).
     std::vector<TSFileDesc*> toExtract;
     for (auto& s : job->slices)
         if (s.srcFile) toExtract.push_back(s.srcFile);
 
     if (!toExtract.empty())
     {
-        // Find their indices (pointer match) and remove descending to keep earlier indices valid.
         std::vector<int> removeIdx;
         removeIdx.reserve(toExtract.size());
         for (TSFileDesc* f : toExtract)
-        {
             for (int i = 0; i < ts->numFiles; i++)
-            {
                 if (ts->files[i] == f) { removeIdx.push_back(i); break; }
-            }
-        }
         std::sort(removeIdx.begin(), removeIdx.end(), [](int a, int b){ return a > b; });
-        for (int idx : removeIdx)
-        {
+        for (int idx : removeIdx) {
             for (int j = idx; j < ts->numFiles - 1; j++)
                 ts->files[j] = ts->files[j + 1];
             ts->numFiles--;
         }
-
-        // Remove from the meta-store (still under the caller's write lock).
         if (ts->metaStore)
         {
             int metaRecSize = (int)sizeof(TSManifestFileEntry) + 2 * ts->recordSize;
-            for (TSFileDesc* fd : toExtract)
-            {
+            for (TSFileDesc* fd : toExtract) {
                 std::vector<uint8_t> keyBuf((size_t)metaRecSize, 0);
                 memcpy(keyBuf.data(), &fd->fileId, sizeof(uint64_t));
                 TSDelete(ts->metaStore, keyBuf.data());
@@ -758,126 +920,111 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
     return job;
 }
 
-// ==================== Background merge: worker (runs on bg thread) ====================
+// ==================== Background merge: per-slice worker ====================
 //
-// Owns job->tree and all slice.srcFile pointers exclusively — no lock needed during I/O.
-// Processes each slice independently: B+tree range [loKey, hiKey) merged with srcFile.
-// Re-acquires the write lock only at the end to register output files and clear bgTree.
+// One pool job per TSFileMergeSlice.  All jobs run concurrently — each owns its srcFile
+// and outDescs exclusively.  The last completing job calls TSI_FinalizeJob.
 
-static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
+static void TSI_FinalizeJob(_TieredStore* ts, TSMergeJob* job);
+
+static void TSI_RunSliceJob(_TieredStore* ts, TSMergeJob* job, int sliceIdx)
 {
-    bool splitOccurred = false;
-    bool overallOk     = true;
+    TSFileMergeSlice& slice = job->slices[sliceIdx];
+    const uint8_t* loKey = slice.loKey.empty() ? nullptr : slice.loKey.data();
+    const uint8_t* hiKey = slice.hiKey.empty() ? nullptr : slice.hiKey.data();
 
-    // Collect all successfully-written output files for registration.
-    std::vector<TSFileDesc*> toRegister;
+    std::vector<MergeCursor*> cursors;
+    bool ok = true;
 
-    for (auto& slice : job->slices)
-    {
-        const uint8_t* loKey = slice.loKey.empty() ? nullptr : slice.loKey.data();
-        const uint8_t* hiKey = slice.hiKey.empty() ? nullptr : slice.hiKey.data();
-
-        std::vector<MergeCursor*> cursors;
-        bool ok = true;
-
-        // B+tree cursor for this slice's key range.
-        MergeCursor* mc = new (std::nothrow) MergeCursor();
-        if (!mc) { ok = false; }
-        else
-        {
-            InitCursorTree(mc, ts, job->tree, loKey, hiKey);
-            if (!mc->done) cursors.push_back(mc);
-            else           { CloseCursor(mc); delete mc; }
-        }
-
-        // File cursor (srcFile == nullptr for the pre-zone).
-        if (ok && slice.srcFile)
-        {
-            MergeCursor* fc = new (std::nothrow) MergeCursor();
-            if (!fc) { ok = false; }
-            else if (!InitCursorFile(fc, ts, slice.srcFile, hiKey))
-                { CloseCursor(fc); delete fc; ok = false; }
-            else if (!fc->done) cursors.push_back(fc);
-            else                { CloseCursor(fc); delete fc; }
-        }
-
-        TSRc mrc = ok ? DoMerge(ts, cursors, slice.outDescs) : TS_RC_IO_Error;
-        for (auto* c : cursors) { CloseCursor(c); delete c; }
-
-        if (mrc == TS_RC_Success)
-        {
-            // Drop empty output files (heavy dedup may leave trailing files empty).
-            for (int i = (int)slice.outDescs.size() - 1; i >= 0; i--)
-            {
-                if (slice.outDescs[i]->slotCount == 0)
-                {
-                    remove(slice.outDescs[i]->path);
-                    TSI_FreeFileDesc(ts, slice.outDescs[i]);
-                    slice.outDescs.erase(slice.outDescs.begin() + i);
-                }
-            }
-            if (slice.outDescs.size() > 1) splitOccurred = true;
-            for (auto* od : slice.outDescs) toRegister.push_back(od);
-        }
-        else
-        {
-            overallOk = false;
-            for (auto* od : slice.outDescs) { remove(od->path); TSI_FreeFileDesc(ts, od); }
-        }
-        slice.outDescs.clear();  // ownership transferred to toRegister (or cleaned up above)
+    MergeCursor* mc = new (std::nothrow) MergeCursor();
+    if (!mc) ok = false;
+    else {
+        InitCursorTree(mc, ts, job->tree, loKey, hiKey);
+        if (!mc->done) cursors.push_back(mc);
+        else { CloseCursor(mc); delete mc; }
     }
 
-    // Delete all extracted source files from disk — they were removed from the registry
-    // at prep time and are now fully replaced by the merge output.
-    for (auto& slice : job->slices)
+    if (ok && slice.srcFile) {
+        MergeCursor* fc = new (std::nothrow) MergeCursor();
+        if (!fc) ok = false;
+        else if (!InitCursorFile(fc, ts, slice.srcFile, nullptr))
+            { CloseCursor(fc); delete fc; ok = false; }
+        else if (!fc->done) cursors.push_back(fc);
+        else { CloseCursor(fc); delete fc; }
+    }
+
+    TSRc mrc = ok ? DoMerge(ts, cursors, slice.outDescs) : TS_RC_IO_Error;
+    for (auto* c : cursors) { CloseCursor(c); delete c; }
+
+    if (mrc == TS_RC_Success)
     {
-        if (slice.srcFile)
-        {
+        for (int i = (int)slice.outDescs.size() - 1; i >= 0; i--) {
+            if (slice.outDescs[i]->slotCount == 0) {
+                remove(slice.outDescs[i]->path);
+                TSI_FreeFileDesc(ts, slice.outDescs[i]);
+                slice.outDescs.erase(slice.outDescs.begin() + i);
+            }
+        }
+        if (slice.srcFile) {
             remove(slice.srcFile->path);
             TSI_FreeFileDesc(ts, slice.srcFile);
             slice.srcFile = nullptr;
         }
+        std::lock_guard<std::mutex> lk(job->collectMutex);
+        if (slice.outDescs.size() > 1) job->splitOccurred = true;
+        for (auto* od : slice.outDescs) job->toRegister.push_back(od);
+        slice.outDescs.clear();
     }
-
-    // On overall failure, discard all pending output files.
-    if (!overallOk)
+    else
     {
-        for (auto* od : toRegister) { remove(od->path); TSI_FreeFileDesc(ts, od); }
-        toRegister.clear();
-    }
-
-    // Re-acquire write lock to register output files, recycle the arena, and clear bgTree.
-    RWLockWriteLock("TSI_BackgroundMerge", &ts->storeLock);
-
-    for (int i = 0; i < (int)toRegister.size(); i++)
-    {
-        TSRc rrc = TSI_RegisterFile(ts, toRegister[i]);
-        if (rrc == TS_RC_Success)
-        {
-            toRegister[i] = nullptr;
+        for (auto* od : slice.outDescs) { remove(od->path); TSI_FreeFileDesc(ts, od); }
+        slice.outDescs.clear();
+        if (slice.srcFile) {
+            remove(slice.srcFile->path);
+            TSI_FreeFileDesc(ts, slice.srcFile);
+            slice.srcFile = nullptr;
         }
-        else
+        std::lock_guard<std::mutex> lk(job->collectMutex);
+        job->anyFailed = true;
+    }
+
+    if (job->pendingSlices.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        TSI_FinalizeJob(ts, job);
+}
+
+// ==================== Background merge: finalize (called by last completing slice) ====================
+
+static void TSI_FinalizeJob(_TieredStore* ts, TSMergeJob* job)
+{
+    RWLockWriteLock("TSI_FinalizeJob", &ts->storeLock);
+
+    if (!job->anyFailed)
+    {
+        for (int i = 0; i < (int)job->toRegister.size(); i++)
         {
-            for (int j = i; j < (int)toRegister.size(); j++)
-            {
-                if (toRegister[j])
-                {
-                    remove(toRegister[j]->path);
-                    TSI_FreeFileDesc(ts, toRegister[j]);
-                }
+            TSRc rrc = TSI_RegisterFile(ts, job->toRegister[i]);
+            if (rrc == TS_RC_Success) {
+                job->toRegister[i] = nullptr;
+            } else {
+                for (int j = i; j < (int)job->toRegister.size(); j++)
+                    if (job->toRegister[j])
+                        { remove(job->toRegister[j]->path); TSI_FreeFileDesc(ts, job->toRegister[j]); }
+                break;
             }
-            break;
         }
     }
+    else
+    {
+        for (auto* od : job->toRegister)
+            if (od) { remove(od->path); TSI_FreeFileDesc(ts, od); }
+    }
 
-    // BPFreeTree calls ArenaMemReset internally when an arena is attached, so
-    // job->arena is already reset and ready to be reused as spareArena.
+    // BPFreeTree resets the arena internally; recycle it as spareArena for the next flush.
     BPFreeTree(job->tree, true);
     ts->bgTree  = nullptr;
     ts->bgArena = nullptr;
 
-    if (job->arena)
-    {
+    if (job->arena) {
         if (!ts->spareArena)
             ts->spareArena = job->arena;
         else if (job->arena != ts->externalArena)
@@ -885,12 +1032,11 @@ static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
     }
 
     ts->statMerges++;
-    if (splitOccurred) ts->statSplits++;
+    if (job->splitOccurred) ts->statSplits++;
     ts->statMergeNs += (uint64_t)ClockNanosSinceStart(&job->startTime);
 
-    RWLockWriteUnlock("TSI_BackgroundMerge", &ts->storeLock);
+    RWLockWriteUnlock("TSI_FinalizeJob", &ts->storeLock);
 
-    // Signal bgPending = 0 so callers blocked in TSI_WaitForBgMerge wake up.
     {
         std::lock_guard<std::mutex> lk(*ts->bgMutex);
         ts->bgPending = 0;
@@ -902,38 +1048,40 @@ static void TSI_BackgroundMerge(_TieredStore* ts, TSMergeJob* job)
 
 // ==================== Background merge: trigger (called under write lock) ====================
 //
-// Swaps the full memTree to bgTree, installs a fresh memTree, and queues the merge
-// job.  Returns immediately; the caller can continue inserting into the new memTree.
+// Swaps memTree to bgTree, installs a fresh memTree, then submits one pool job per
+// slice — all run concurrently.  TSI_FinalizeJob is called by whichever slice finishes last.
 
 void TSI_TriggerBgFlush(_TieredStore* ts)
 {
     TSMergeJob* job = TSI_PrepMergeJob(ts);
     if (!job) return;
 
-    // Promote current memTree to bgTree so TSFind can still search it during the merge.
     ts->bgTree  = job->tree;
     ts->bgArena = job->arena;
 
-    // Install a fresh memTree for continued inserts.
     PArenaMem newArena = nullptr;
-    if (ts->pMemArena)
-    {
+    if (ts->pMemArena) {
         newArena       = ts->spareArena ? ts->spareArena
                                         : ArenaMemCreate(ArenaMemSize(ts->pMemArena));
         ts->spareArena = nullptr;
     }
     ts->pMemArena = newArena;
-
-    ts->memTree = nullptr;
+    ts->memTree   = nullptr;
     BPCreateTree(&ts->memTree, 256, (size_t)ts->maxMemoryBytes,
                  ts->idxSettings, (size_t)ts->numKeyFlds,
                  (BPIdxFld*)ts->keyFlds, ts->recordSize, newArena);
+
+    job->anyFailed     = false;
+    job->splitOccurred = false;
+    job->pendingSlices.store((int)job->slices.size(), std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lk(*ts->bgMutex);
         ts->bgPending = 1;
     }
-    ts->mergePool->QueueJob([ts, job](){ TSI_BackgroundMerge(ts, job); });
+
+    for (int i = 0; i < (int)job->slices.size(); i++)
+        ts->mergePool->QueueJob([ts, job, i]{ TSI_RunSliceJob(ts, job, i); });
 }
 
 // ==================== Binary search within a single sorted file ====================

@@ -27,6 +27,7 @@
     <ClCompile Include="BPDelete.cpp" />
     <ClCompile Include="BPFind.cpp" />
     <ClCompile Include="BPGetDataCnt.cpp" />
+    <ClCompile Include="BPGetLevelStartKeys.cpp" />
     <ClCompile Include="BPIdxInfo.cpp" />
     <ClCompile Include="BPInsert.cpp" />
     <ClCompile Include="BPIntegrityCheck.cpp" />

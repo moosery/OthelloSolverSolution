@@ -4,6 +4,7 @@
 #include <ArenaMem.h>
 #include "RWLock.h"
 #include "Error.h"
+#include <vector>
 
 //#define DEBUG_ON
 #ifdef DEBUG_ON
@@ -175,6 +176,8 @@ BPRc BPIterate(PBPIterator pIterator, void* pDataFound);
 void BPIterateStop(PBPIterator pIterator);
 
 BPRc BPUpdate(PBPTree pTree, void* pDataToUpdate);
+
+BPRc BPGetLevelStartKeys(BPTree* pTree, PBPIdxInfo pIdxInfo, BPLL targetNodeCount, std::vector<void*>& outKeys);
 
 /* Macros */
 #ifndef min

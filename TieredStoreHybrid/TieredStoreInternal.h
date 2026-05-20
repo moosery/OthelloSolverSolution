@@ -146,14 +146,19 @@ struct TSFileMergeSlice
 // ==================== Background merge job ====================
 //
 // Captures everything needed for one flush+merge pass.
-// Allocated under write lock in TSI_PrepMergeJob; freed by TSI_BackgroundMerge.
+// Allocated under write lock in TSI_PrepMergeJob; freed by TSI_FinalizeJob.
 
 struct TSMergeJob
 {
-    PBPTree                       tree;       // in-memory tree to merge (not yet freed)
-    PArenaMem                     arena;      // tree's arena (NULL = malloc mode)
-    std::vector<TSFileMergeSlice> slices;     // one per zone needing a merge
-    ClockTick                     startTime;  // for statMergeNs
+    PBPTree                       tree;          // in-memory tree to merge (not yet freed)
+    PArenaMem                     arena;         // tree's arena (NULL = malloc mode)
+    std::vector<TSFileMergeSlice> slices;        // one per zone needing a merge
+    ClockTick                     startTime;     // for statMergeNs
+    std::atomic<int>              pendingSlices; // countdown; TSI_FinalizeJob called when hits 0
+    std::mutex                    collectMutex;  // guards toRegister and anyFailed
+    std::vector<TSFileDesc*>      toRegister;    // outputs collected from completed slices
+    bool                          anyFailed;     // true if any slice had an I/O error
+    bool                          splitOccurred; // true if any slice produced 2+ output files
 };
 
 // ==================== Internal helper declarations ====================
