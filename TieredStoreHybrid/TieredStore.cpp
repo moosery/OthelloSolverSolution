@@ -502,7 +502,10 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
         std::vector<std::vector<uint8_t>> splitBounds;
         {
             BPIterator git;
-            BPIterateStartFrom(ts->memTree, &git, const_cast<uint8_t*>(gapStart), true);
+            if (gapStart)
+                BPIterateStartFrom(ts->memTree, &git, const_cast<uint8_t*>(gapStart), true);
+            else
+                BPIterateStart(ts->memTree, &git);
             std::vector<uint8_t> rec((size_t)ts->recordSize);
             uint64_t sliceCount = 0;
             while (BPIterate(&git, rec.data()) == BP_RC_Success)
@@ -556,6 +559,17 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
             BPGetLevelStartKeys(ts->memTree, &ts->memTree->keyInfo,
                                 targetPartitions, outKeys);
             int N = (int)outKeys.size();
+
+            if (N == 0)
+            {
+                // Level walker found no intermediate level with ≤ targetPartitions nodes
+                // (e.g. root's direct children already exceed the threshold).
+                // Fall back to linear scan — same path used for inter-file gaps.
+                rc = flushGap(nullptr, nullptr);
+            }
+            else
+            {
+
             // Copy raw pointers into owned buffers — pointers only valid while tree is alive.
             std::vector<std::vector<uint8_t>> keyBufs(N);
             for (int i = 0; i < N; i++)
@@ -586,6 +600,7 @@ TSRc TSI_FlushMemTree(_TieredStore* ts)
                           i, N, (unsigned long long)partCount, (unsigned long long)ts->maxFileRecords);
                 rc = mergeSlice(lo, hi, nullptr, 1);
             }
+            } // close else (N > 0)
         }
     }
     else
@@ -749,7 +764,10 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
         std::vector<std::vector<uint8_t>> splitBounds;
         {
             BPIterator git;
-            BPIterateStartFrom(ts->memTree, &git, const_cast<uint8_t*>(gapStart), true);
+            if (gapStart)
+                BPIterateStartFrom(ts->memTree, &git, const_cast<uint8_t*>(gapStart), true);
+            else
+                BPIterateStart(ts->memTree, &git);
             std::vector<uint8_t> rec((size_t)ts->recordSize);
             uint64_t sliceCount = 0;
             while (BPIterate(&git, rec.data()) == BP_RC_Success)
@@ -796,6 +814,16 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
             BPGetLevelStartKeys(ts->memTree, &ts->memTree->keyInfo,
                                 targetPartitions, outKeys);
             int N = (int)outKeys.size();
+
+            if (N == 0)
+            {
+                // Level walker found no intermediate level with ≤ targetPartitions nodes.
+                // Fall back to linear scan — same path used for inter-file gaps.
+                if (!addGapSlices(nullptr, nullptr)) { cleanupOnFail(); return nullptr; }
+            }
+            else
+            {
+
             std::vector<std::vector<uint8_t>> keyBufs(N);
             for (int i = 0; i < N; i++)
                 keyBufs[i].assign((uint8_t*)outKeys[i], (uint8_t*)outKeys[i] + ts->recordSize);
@@ -825,6 +853,7 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
                           i, N, (unsigned long long)partCount, (unsigned long long)ts->maxFileRecords);
                 if (!addSlice(lo, hi, nullptr, 1)) { cleanupOnFail(); return nullptr; }
             }
+            } // close else (N > 0)
         }
     }
     else
@@ -1041,16 +1070,31 @@ static void TSI_FinalizeJob(_TieredStore* ts, TSMergeJob* job)
     }
 
     ts->statMerges++;
-    if (job->splitOccurred) ts->statSplits++;
+    if (!job->anyFailed && (job->splitOccurred || job->toRegister.size() >= 2))
+        ts->statSplits++;
     ts->statMergeNs += (uint64_t)ClockNanosSinceStart(&job->startTime);
+
+    // If records accumulated past the soft threshold while this flush ran, chain
+    // directly into the next flush without dropping bgPending to 0.  The chained
+    // job will signal bgCV when it finishes.
+    bool didRetrigger = false;
+    if (!job->anyFailed && ts->memTree &&
+        BPGetDataCnt(ts->memTree) >= ts->maxMemoryRecords)
+    {
+        TSI_TriggerBgFlush(ts);
+        didRetrigger = true;
+    }
 
     RWLockWriteUnlock("TSI_FinalizeJob", &ts->storeLock);
 
+    if (!didRetrigger)
     {
-        std::lock_guard<std::mutex> lk(*ts->bgMutex);
-        ts->bgPending = 0;
+        {
+            std::lock_guard<std::mutex> lk(*ts->bgMutex);
+            ts->bgPending = 0;
+        }
+        ts->bgCV->notify_all();
     }
-    ts->bgCV->notify_all();
 
     delete job;
 }

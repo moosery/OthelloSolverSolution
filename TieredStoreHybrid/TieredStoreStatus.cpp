@@ -5,6 +5,8 @@ TSRc TSStatus(PTS pTs, TSStatusBlock* pStatus)
 {
     if (!pTs || !pStatus) return TS_RC_Invalid_Arg;
 
+    TSI_WaitForBgMerge(pTs);
+
     RWLockReadLock("TSStatus", &pTs->storeLock);
 
     memset(pStatus, 0, sizeof(*pStatus));

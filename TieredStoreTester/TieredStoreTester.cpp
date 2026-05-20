@@ -6,6 +6,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <windows.h>
+#include <thread>
+#include <atomic>
+#include <vector>
 
 // ==================== Test record ====================
 // Key  : first 8 bytes (uint64_t) — what TieredStore sorts and searches on
@@ -674,6 +677,10 @@ static bool TestDeletedDataFile()
         if (!InsertRange(ts, 1, 50, 1, T))
             { TSClose(&ts); Fail(T, "insert failed"); return false; }
 
+        // Wait for the background flush to complete before inspecting internal state.
+        TSStatusBlock st2 = {};
+        TSStatus(ts, &st2);
+
         // Access internal struct to grab the data file path before closing
         _TieredStore* internal = (_TieredStore*)ts;
         if (internal->numFiles < 1)
@@ -1188,6 +1195,181 @@ static bool TestArenaCloseEmpty()
     return true;
 }
 
+// ==================== Test 22: Large multithreaded stress ====================
+// T threads concurrently insert into two zones:
+//   Shared    [1, sharedSize]                       — every thread inserts value=1
+//                                                     → expected merged value = T
+//   Exclusive [sharedSize+1 + t*blockSize, ...]     — one thread per zone, value=1
+//                                                     → expected value = 1
+// Exercises concurrent inserts, background flushes, auto-retrigger, merges, and splits.
+// Verified by enumerating every record after checkpoint + close + reopen.
+
+struct LargeMTCtx
+{
+    int      numThreads;
+    uint64_t sharedSize;
+    uint64_t totalExpected;
+    uint64_t count;
+    int      wrongValues;
+};
+
+static void LargeMTCb(const void* record, void* ctx)
+{
+    LargeMTCtx*    vctx = (LargeMTCtx*)ctx;
+    const TestRec* r    = (const TestRec*)record;
+
+    vctx->count++;
+
+    uint64_t expected = (r->key <= vctx->sharedSize) ? (uint64_t)vctx->numThreads : 1ULL;
+    if (r->value != expected && vctx->wrongValues < 5)
+    {
+        printf("    key=%llu expected=%llu got=%llu\n",
+               (unsigned long long)r->key,
+               (unsigned long long)expected,
+               (unsigned long long)r->value);
+        vctx->wrongValues++;
+    }
+}
+
+static bool TestLargeMultithreaded()
+{
+    const char*    T          = "LargeMultithreaded";
+    const int      maxRec     = 5000;
+    const uint64_t sharedSize = 10000;   // keys [1, sharedSize]: every thread writes value=1
+    const uint64_t blockSize  = 10000;   // exclusive keys per thread
+
+    ResetWorkDir();
+
+    unsigned hwConc     = std::thread::hardware_concurrency();
+    unsigned preferred  = hwConc / 2u;
+    if (preferred < 2u) preferred = 2u;
+    if (preferred > 8u) preferred = 8u;
+    int numThreads = (int)preferred;
+
+    PTS ts = CreateStore(T, maxRec);
+    if (!ts) { Fail(T, "TSCreate failed"); return false; }
+
+    std::atomic<int>         errCount(0);
+    std::vector<std::thread> threads;
+
+    ClockTick ct;
+    ClockStart(&ct);
+
+    for (int t = 0; t < numThreads; t++)
+    {
+        threads.emplace_back([&, t]() {
+            // Shared zone — every thread inserts all keys [1, sharedSize] with value=1
+            for (uint64_t k = 1; k <= sharedSize; k++)
+            {
+                TestRec r = { k, 1 };
+                if (TSInsert(ts, &r) != TS_RC_Success)
+                    errCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            // Exclusive zone for this thread
+            uint64_t base = sharedSize + 1 + (uint64_t)t * blockSize;
+            for (uint64_t k = 0; k < blockSize; k++)
+            {
+                TestRec r = { base + k, 1 };
+                if (TSInsert(ts, &r) != TS_RC_Success)
+                    errCount.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    for (auto& th : threads) th.join();
+
+    if (errCount.load() > 0)
+    {
+        char msg[128];
+        sprintf_s(msg, "%d inserts failed", errCount.load());
+        TSClose(&ts);
+        Fail(T, msg);
+        return false;
+    }
+
+    if (TSCheckpoint(ts) != TS_RC_Success)
+        { TSClose(&ts); Fail(T, "TSCheckpoint failed"); return false; }
+
+    TSStatusBlock st = {};
+    TSStatus(ts, &st);
+    double elapsedMs = (double)ClockNanosSinceStart(&ct) / 1e6;
+    printf("    threads=%d merges=%llu splits=%llu files=%llu records=%llu (%.0f ms)\n",
+           numThreads,
+           (unsigned long long)st.totalMerges,
+           (unsigned long long)st.totalSplits,
+           (unsigned long long)st.filesInUse,
+           (unsigned long long)st.totalRecords,
+           elapsedMs);
+    TSClose(&ts);
+
+    // Reopen and verify every record
+    ts = OpenStore(T);
+    if (!ts) { Fail(T, "TSOpen failed"); return false; }
+
+    uint64_t totalExpected = sharedSize + (uint64_t)numThreads * blockSize;
+
+    // TSEnumerate: quick smoke-check (unordered — just count and values)
+    LargeMTCtx vctx   = {};
+    vctx.numThreads   = numThreads;
+    vctx.sharedSize   = sharedSize;
+    vctx.totalExpected = totalExpected;
+    if (TSEnumerate(ts, LargeMTCb, &vctx) != TS_RC_Success)
+        { TSClose(&ts); Fail(T, "TSEnumerate failed"); return false; }
+
+    // TSIterator: full sorted-order pass — verify order, count, and values
+    PTSI iter = nullptr;
+    if (TSIterOpen(ts, &iter) != TS_RC_Success || !iter)
+        { TSClose(&ts); Fail(T, "TSIterOpen failed"); return false; }
+
+    uint64_t iterCount  = 0;
+    uint64_t prevKey    = 0;
+    bool     outOfOrder = false;
+    bool     wrongVal   = false;
+    TestRec  rec        = {};
+
+    while (TSIterNext(iter, &rec) == TS_RC_Success)
+    {
+        if (iterCount > 0 && rec.key <= prevKey) outOfOrder = true;
+        prevKey = rec.key;
+        iterCount++;
+
+        uint64_t expected = (rec.key <= sharedSize) ? (uint64_t)numThreads : 1ULL;
+        if (!wrongVal && rec.value != expected)
+        {
+            printf("    iter key=%llu expected=%llu got=%llu\n",
+                   (unsigned long long)rec.key,
+                   (unsigned long long)expected,
+                   (unsigned long long)rec.value);
+            wrongVal = true;
+        }
+    }
+    TSIterClose(&iter);
+    TSClose(&ts);
+
+    bool ok = true;
+    if (vctx.wrongValues > 0)                ok = false;
+    if (vctx.count != totalExpected)
+    {
+        printf("    enumerate: expected %llu records, got %llu\n",
+               (unsigned long long)totalExpected, (unsigned long long)vctx.count);
+        ok = false;
+    }
+    if (outOfOrder)                          { printf("    iterator: records out of order\n"); ok = false; }
+    if (wrongVal)                              ok = false;
+    if (iterCount != totalExpected)
+    {
+        printf("    iterator: expected %llu records, got %llu\n",
+               (unsigned long long)totalExpected, (unsigned long long)iterCount);
+        ok = false;
+    }
+    if (st.totalMerges == 0) { printf("    no merges occurred\n"); ok = false; }
+    if (st.totalSplits == 0) { printf("    no splits occurred\n"); ok = false; }
+
+    if (!ok) { Fail(T, "data integrity or stats check failed"); return false; }
+    Pass(T);
+    return true;
+}
+
 // ==================== Main ====================
 int main()
 {
@@ -1237,6 +1419,9 @@ int main()
     printf("\nGroup 9 -- Arena\n");
     TestArenaSmallStore();
     TestArenaCloseEmpty();
+
+    printf("\nGroup 10 -- Large multithreaded\n");
+    TestLargeMultithreaded();
 
     printf("\n======================\n");
     printf("Results: %d passed, %d failed\n", g_pass, g_fail);

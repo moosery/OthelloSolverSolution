@@ -1,5 +1,28 @@
 # Changelog
 
+## [v2.4.3] - 2026-05-20
+
+### Fixed
+- `TieredStoreHybrid` / `TSStatus`: moved `TSI_WaitForBgMerge` to the top of `TSStatus` before acquiring the read lock — callers that invoked `TSStatus` while a background flush was in flight saw stale `diskRecords`, `filesInUse`, and `totalRecords`; five `TieredStoreTester` tests (`FlushToDisk`, `MultiFlush`, `Merge`, `Split`, `DeletedDataFile`) all depended on post-flush state and failed until the wait was added
+- `TieredStoreHybrid` / `TSI_FinalizeJob`: records that accumulated in `memTree` during a background flush were silently stranded — the soft trigger skips when `bgPending == 1`, so after finalization the in-memory tree sat above threshold with no flush scheduled; fixed by auto-retrigger: when the last slice completes and `memTree >= maxMemoryRecords`, `TSI_FinalizeJob` calls `TSI_TriggerBgFlush` directly instead of clearing `bgPending`, chaining flushes without `bgPending` ever dropping to 0; `TSI_WaitForBgMerge` only unblocks once `memTree` has fully drained
+- `TieredStoreHybrid` / `TSI_FinalizeJob`: `statSplits` was never incremented for parallel-flush jobs — each slice produces exactly one output file so the per-slice `splitOccurred` flag is never set, even when the job as a whole produces multiple output files; fixed by also counting `job->toRegister.size() >= 2`
+- `TieredStoreHybrid` / `TSI_PrepMergeJob`, `TSI_FlushMemTree`: `BPGetLevelStartKeys` returns `N = 0` when the B+tree's direct-children level already contains more nodes than `targetNodeCount` (shallow wide trees); the previous code assumed `N > 0` and either crashed or dispatched a single oversize partition; fixed by falling back to the linear `addGapSlices(nullptr, nullptr)` / `flushGap(nullptr, nullptr)` path when `N == 0`, matching the behavior used for inter-file gap scans
+- `TieredStoreHybrid` / `flushGap`, `addGapSlices`: both lambdas assumed a non-null `gapStart` and always called `BPIterateStartFrom`; the N=0 fallback needs to scan from the tree beginning; fixed by branching on `gapStart != nullptr` and calling `BPIterateStart` when null
+- `TieredStoreTester` / `TestDeletedDataFile`: test read `internal->numFiles` directly without waiting for the background flush, racing the async merge; adding a `TSStatus` call first ensures flush completion before inspecting internal file count
+
+### Added
+- `TieredStoreTester` / Group 10: `TestLargeMultithreaded` — concurrent insert stress test from T threads (T = `hwConc/2`, clamped `[2, 8]`); shared key zone `[1, 10000]` where every thread inserts `value=1` (exercises merge-time deduplication and value accumulation), plus per-thread exclusive zones; generates enough records to guarantee multiple merges and splits; after `TSClose`/reopen, verifies correctness via two independent passes — `TSEnumerate` (unordered count + merged values) and `TSIterator` (strict ascending order, merged values, total count); asserts `totalMerges > 0` and `totalSplits > 0`
+
+---
+
+## [v2.4.2] - 2026-05-20
+
+### Fixed
+- `TieredStoreHybrid` / `TSI_PrepMergeJob`, `TSI_FlushMemTree`: `BPGetLevelStartKeys` was called with `maxFileRecords` (16.8 M) as `targetNodeCount`; that parameter is the maximum sibling count at the chosen level, not the target records per output file; for a 35.5 M-record tree no internal level has 16.8 M siblings, so the walker descended to the leaf-adjacent level (~542 nodes) and returned 541 partition boundaries instead of the intended 2–3, dispatching hundreds of tiny pool jobs and silently discarding extra output files; fixed by passing `ceil(count / maxFileRecords)` as `targetNodeCount`
+- `TieredStoreHybrid` / `TSI_RunSliceJob`: `srcFile` was passed to `remove()` on `DoMerge` failure even when no output had been written, permanently destroying existing file data; fixed by keeping `srcFile` on disk on failure; `TSI_FinalizeJob` re-inserts unmerged `srcFile`s into `ts->files[]` so they remain accessible in the current session (metaStore discrepancy self-heals at the next merge)
+
+---
+
 ## [v2.4.1] - 2026-05-19
 
 ### Fixed
