@@ -6,6 +6,9 @@
 
 extern PTS g_tieredBoardStores[];
 extern PTS g_tieredMoveStores[];
+#ifdef GPU_DEDUP
+extern GpuDedupTable g_gpuDedupTable;
+#endif
 
 void WorkerProcessBatch(
     std::vector<BOARD>  batch,
@@ -23,7 +26,11 @@ void WorkerProcessBatch(
 
     // Stage input into pinned host memory, then dispatch to GPU.
     memcpy(ctx->h_inputBoards, batch.data(), (size_t)boardCount * sizeof(BOARD));
+#ifdef GPU_DEDUP
+    DispatchBatch(ctx, boardCount, numRotations, consts, &g_gpuDedupTable);
+#else
     DispatchBatch(ctx, boardCount, numRotations, consts);
+#endif
 
     // Overflow check: if any board produced more children than the allocated slots,
     // the results were clipped.  maxMovesPerBoard must be increased and the run restarted.
@@ -70,9 +77,9 @@ void WorkerProcessBatch(
     }
 
     // Accumulate total children count.
-    long long myChildren = 0;
+    uint64_t myChildren = 0;
     for (int i = 0; i < boardCount; i++)
-        myChildren += ctx->h_outputCounts[i];
+        myChildren += (uint64_t)ctx->h_outputCounts[i];
     pLevelStats->totalChildren.fetch_add(myChildren);
 
     // Initialize terminal boards (outputCount == 0: both players have no legal moves).
@@ -112,32 +119,44 @@ void WorkerProcessBatch(
             // Pass moves don't place a piece; child stays at the same level.
             int childLevel = isPass ? level : (level + 1);
 
-            TSRc rc = TSInsert(g_tieredBoardStores[childLevel], &res.childBoard);
-            if (rc != TS_RC_Success && rc != TS_RC_Duplicate && rc != TS_RC_Already_Exists)
-            {
-                fprintf(stderr, "TSInsert board store failed rc=%d at level %d\n", (int)rc, level);
-                pLevelStats->activeCount.fetch_sub(1);
-                exit(1);
+#ifdef GPU_DEDUP
+            int  rid      = i * maxMovesPerBoard + j;
+            bool gpuIsNew = (ctx->h_isNewBoard[rid] != 0);
+            if (!gpuIsNew) {
+                pLevelStats->gpuDedupCount.fetch_add(1);
+                // Board already in store — skip the board insert but still record the move edge
+                // so back-propagation can traverse all paths through this child board.
             }
-            if (rc == TS_RC_Success)
+            if (gpuIsNew)
+#endif
             {
-                if (!isPass)
+                TSRc rc = TSInsert(g_tieredBoardStores[childLevel], &res.childBoard);
+                if (rc != TS_RC_Success && rc != TS_RC_Duplicate && rc != TS_RC_Already_Exists)
                 {
-                    pLevelStats->newBoards.fetch_add(1);
+                    fprintf(stderr, "TSInsert board store failed rc=%d at level %d\n", (int)rc, level);
+                    pLevelStats->activeCount.fetch_sub(1);
+                    exit(1);
                 }
-                else if (pPassQueue)
+                if (rc == TS_RC_Success)
                 {
-                    // New pass board: enqueue for processing after the main sweep.
-                    std::lock_guard<std::mutex> lk(*pPassMutex);
-                    pPassQueue->push_back(res.childBoard);
+                    if (!isPass)
+                    {
+                        pLevelStats->newBoards.fetch_add(1);
+                    }
+                    else if (pPassQueue)
+                    {
+                        // New pass board: enqueue for processing after the main sweep.
+                        std::lock_guard<std::mutex> lk(*pPassMutex);
+                        pPassQueue->push_back(res.childBoard);
+                    }
                 }
             }
 
-            // Move edge → level move store.
-            rc = TSInsert(g_tieredMoveStores[level], &res.moveEdge);
-            if (rc != TS_RC_Success)
+            // Move edge → level move store — always inserted regardless of board dedup status.
+            TSRc rcm = TSInsert(g_tieredMoveStores[level], &res.moveEdge);
+            if (rcm != TS_RC_Success)
             {
-                fprintf(stderr, "TSInsert move store failed rc=%d at level %d\n", (int)rc, level);
+                fprintf(stderr, "TSInsert move store failed rc=%d at level %d\n", (int)rcm, level);
                 pLevelStats->activeCount.fetch_sub(1);
                 exit(1);
             }

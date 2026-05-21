@@ -1,5 +1,19 @@
 # Changelog
 
+## [v2.5.0] - 2026-05-20
+
+### Added
+- `OthelloSolverCommandLine` / `SolverKernel`: GPU-side board deduplication via a VRAM hash table (`#define GPU_DEDUP` toggle; comment out to revert to CPU-only TSInsert dedup) — a flat `uint64_t[]` array of 512 M slots (4 GB) is allocated once at run start and cleared at each BFS level boundary; `dev_boardKey` mixes `ullCellsInUse`, `ullCellColors`, and `usBoardInfo` (player-to-move bit) into a 64-bit key (forced odd so 0 remains the empty sentinel); `DedupKernel` runs after `OthelloExpandKernel` with one thread per result slot, using `atomicCAS` linear probing (max 32 probes) and a conservative fallback (mark new) when the probe limit is reached; `ctx->h_isNewBoard[]` is copied D2H alongside results so `WorkerProcessBatch` can skip `TSInsert` for GPU-identified duplicates; move edge inserts are always performed regardless of dedup status (back-propagation needs the complete edge graph)
+- `OthelloSolverCommandLine` / `SolverKernel.h`: `GpuDedupTable` struct (`d_slots`, `tableSlots`, `tableMask`); `d_isNewBoard`/`h_isNewBoard` buffers added to `WorkerGpuContext`; `GpuDedupTableAlloc`, `GpuDedupTableClear`, `GpuDedupTableDestroy` API; `DispatchBatch` signature extended with optional `GpuDedupTable*` parameter under `GPU_DEDUP`
+- `OthelloSolverCommandLine` / `SolverWorker.h`: `gpuDedupCount` (`std::atomic<uint64_t>`) added to `WorkerLevelStats` under `GPU_DEDUP`
+- `OthelloSolverCommandLine`: `GpuDups` column added to both the live BFS progress table and the final results report — shows the count of boards caught by the GPU hash table before reaching TSInsert; `Dups` column shows the combined total (GPU dups + TSInsert dups)
+
+### Fixed
+- `OthelloSolverCommandLine`: all board/move/dup/child counters widened from `long long`/`int` to `uint64_t` — `WorkerLevelStats` fields (`newBoards`, `totalChildren`, `terminalBoards`), `LevelRecord` fields (`boardsIn`, `newBoardsOut`, `totalChildren`, `terminalBoardsOut`, `dupBoards`, `gpuDedups`), `RunSolverCore` locals (`boardsIn`, `gpuDispatches`, `totalBoardsProcessed`, `totalUniqueBoards`, `totalGpuDispatches`, `totalChildren`, `totalTerminals`, `trueDups`, `dups`, `passes`), and `doReportResults` parameters; timing values (`elapsedNs`, `predictedNs`, `nsPerBd`) remain `long long` with explicit casts where divided by `uint64_t` board counts to prevent signed/unsigned promotion
+- `OthelloSolverCommandLine`: `Pass` column formula corrected for GPU-dedup mode — was `totalChildren - newBoardsOut` (inflated by GPU-deduped regular moves that also don't increment `newBoardsOut`); fixed to `totalChildren - newBoardsOut - gpuDedups`; both the live progress table and final report use the corrected formula; recovers the true pass-move count (e.g. level 8: 356038 - 298454 - 57569 = 15, matching the pre-dedup baseline)
+
+---
+
 ## [v2.4.3] - 2026-05-20
 
 ### Fixed

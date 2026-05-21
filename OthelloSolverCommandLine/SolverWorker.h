@@ -9,11 +9,14 @@
 // Per-level stats accumulated by all workers processing that level.
 struct WorkerLevelStats
 {
-    std::atomic<int>        activeCount{0};    // in-flight batch count
-    std::atomic<long long>  newBoards{0};      // new unique child boards inserted
-    std::atomic<long long>  totalChildren{0};  // total children generated (new + dups)
-    std::atomic<long long>  terminalBoards{0}; // boards with no legal moves (game over)
-    std::atomic<int>        maxMovesInLevel{0};// max legal moves seen for any board at this level
+    std::atomic<int>       activeCount{0};    // in-flight batch count
+    std::atomic<uint64_t>  newBoards{0};      // new unique child boards inserted
+    std::atomic<uint64_t>  totalChildren{0};  // total children generated (new + dups)
+    std::atomic<uint64_t>  terminalBoards{0}; // boards with no legal moves (game over)
+    std::atomic<int>       maxMovesInLevel{0};// max legal moves seen for any board at this level
+#ifdef GPU_DEDUP
+    std::atomic<uint64_t>  gpuDedupCount{0};  // dups caught by GPU hash table (not sent to TSInsert)
+#endif
 };
 
 // Run-wide stats accumulated across all levels.

@@ -89,6 +89,90 @@ __global__ void OthelloExpandKernel(
     outputCounts[i] = count;
 }
 
+#ifdef GPU_DEDUP
+// Hash a canonical board to a 64-bit key (never 0; 0 is the empty-slot sentinel).
+// Mixes ullCellsInUse, ullCellColors, and usBoardInfo (which carries the player-to-move bit)
+// so boards that are the same position but different players hash differently.
+__device__ __forceinline__
+uint64_t dev_boardKey(const BOARD& b)
+{
+    uint64_t k1 = b.ullCellsInUse;
+    uint64_t k2 = b.ullCellColors;
+    uint64_t k3 = (uint64_t)b.usBoardInfo;
+    return (k1 * 0x9e3779b97f4a7c15ULL
+          ^ k2 * 0x6c62272e07bb0142ULL
+          ^ k3 * 0x14057b7ef767814fULL) | 1ULL;
+}
+
+// One thread per result slot (boardCount * maxMovesPerBoard threads total).
+// For each valid result, probe the hash table with atomicCAS.
+// Writes isNewBoard[tid] = 1 if this is the first time this board was seen, 0 otherwise.
+// Invalid slots (j >= outputCounts[i]) and probe-overflow slots are marked 0 and 1 respectively.
+__global__ void DedupKernel(
+    const GpuResult* results,
+    const int*       outputCounts,
+    int              boardCount,
+    int              maxMovesPerBoard,
+    uint64_t*        table,
+    uint64_t         tableMask,
+    uint8_t*         isNewBoard)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int i   = tid / maxMovesPerBoard;
+    int j   = tid % maxMovesPerBoard;
+
+    if (i >= boardCount) {
+        isNewBoard[tid] = 0;
+        return;
+    }
+    if (j >= outputCounts[i]) {
+        isNewBoard[tid] = 0;
+        return;
+    }
+
+    const GpuResult& r   = results[(size_t)i * maxMovesPerBoard + j];
+    uint64_t         key = dev_boardKey(r.childBoard);
+    uint64_t         bucket = key & tableMask;
+
+    constexpr int k_MaxProbes = 32;
+    for (int probe = 0; probe < k_MaxProbes; probe++) {
+        uint64_t prev = atomicCAS(&table[bucket], 0ULL, key);
+        if (prev == 0ULL) {
+            isNewBoard[tid] = 1;   // we claimed an empty slot — this is a new board
+            return;
+        }
+        if (prev == key) {
+            isNewBoard[tid] = 0;   // key already present — duplicate
+            return;
+        }
+        bucket = (bucket + 1) & tableMask;
+    }
+    // Table near capacity; conservative fallback: let the CPU insert handle it.
+    isNewBoard[tid] = 1;
+}
+
+void GpuDedupTableAlloc(GpuDedupTable* t, size_t tableSlots)
+{
+    t->tableSlots = tableSlots;
+    t->tableMask  = tableSlots - 1;
+    cudaMalloc(&t->d_slots, tableSlots * sizeof(uint64_t));
+    cudaMemset(t->d_slots, 0, tableSlots * sizeof(uint64_t));
+}
+
+void GpuDedupTableClear(GpuDedupTable* t)
+{
+    cudaMemset(t->d_slots, 0, t->tableSlots * sizeof(uint64_t));
+}
+
+void GpuDedupTableDestroy(GpuDedupTable* t)
+{
+    if (t->d_slots) {
+        cudaFree(t->d_slots);
+        t->d_slots = nullptr;
+    }
+}
+#endif  // GPU_DEDUP
+
 GpuDeviceInfo QueryGpuDevice()
 {
     GpuDeviceInfo info = {};
@@ -145,6 +229,12 @@ WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard
     cudaMallocHost(&ctx->h_results,      resultsBytes);
     cudaMallocHost(&ctx->h_outputCounts, countsBytes);
 
+#ifdef GPU_DEDUP
+    size_t flagsBytes = (size_t)batchCapacity * maxMovesPerBoard * sizeof(uint8_t);
+    cudaMalloc(&ctx->d_isNewBoard, flagsBytes);
+    cudaMallocHost(&ctx->h_isNewBoard, flagsBytes);
+#endif
+
     return ctx;
 }
 
@@ -159,6 +249,10 @@ void WorkerGpuContextDestroy(WorkerGpuContext* ctx)
     cudaFreeHost(ctx->h_inputBoards);
     cudaFreeHost(ctx->h_results);
     cudaFreeHost(ctx->h_outputCounts);
+#ifdef GPU_DEDUP
+    cudaFree(ctx->d_isNewBoard);
+    cudaFreeHost(ctx->h_isNewBoard);
+#endif
     delete ctx;
 }
 
@@ -166,7 +260,11 @@ void DispatchBatch(
     WorkerGpuContext* ctx,
     int               boardCount,
     int               numRotations,
-    DevBoardConsts    consts)
+    DevBoardConsts    consts
+#ifdef GPU_DEDUP
+    , GpuDedupTable*  dedupTable
+#endif
+)
 {
     cudaStream_t s = (cudaStream_t)ctx->stream;
 
@@ -178,6 +276,19 @@ void DispatchBatch(
                         boardCount, ctx->maxMovesPerBoard, numRotations, consts,
                         ctx->stream);
 
+#ifdef GPU_DEDUP
+    if (dedupTable) {
+        int total = boardCount * ctx->maxMovesPerBoard;
+        constexpr int kBlockSize = 256;
+        int gridSize = (total + kBlockSize - 1) / kBlockSize;
+        DedupKernel<<<gridSize, kBlockSize, 0, s>>>(
+            ctx->d_results, ctx->d_outputCounts,
+            boardCount, ctx->maxMovesPerBoard,
+            dedupTable->d_slots, dedupTable->tableMask,
+            ctx->d_isNewBoard);
+    }
+#endif
+
     cudaMemcpyAsync(ctx->h_outputCounts, ctx->d_outputCounts,
                     (size_t)boardCount * sizeof(int),
                     cudaMemcpyDeviceToHost, s);
@@ -185,6 +296,14 @@ void DispatchBatch(
     cudaMemcpyAsync(ctx->h_results, ctx->d_results,
                     (size_t)boardCount * ctx->maxMovesPerBoard * sizeof(GpuResult),
                     cudaMemcpyDeviceToHost, s);
+
+#ifdef GPU_DEDUP
+    if (dedupTable) {
+        cudaMemcpyAsync(ctx->h_isNewBoard, ctx->d_isNewBoard,
+                        (size_t)boardCount * ctx->maxMovesPerBoard * sizeof(uint8_t),
+                        cudaMemcpyDeviceToHost, s);
+    }
+#endif
 
     cudaStreamSynchronize(s);
 }

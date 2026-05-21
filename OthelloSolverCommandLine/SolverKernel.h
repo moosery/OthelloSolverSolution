@@ -1,5 +1,9 @@
 #pragma once
+#include <stdint.h>
 #include <OthelloBasicsForCUDA.h>
+
+// Comment out to disable GPU-side board deduplication and revert to CPU-only TSInsert dedup.
+#define GPU_DEDUP
 
 // One output slot from the kernel: canonical child board + the move edge leading to it.
 struct GpuResult {
@@ -23,6 +27,18 @@ struct GpuDeviceInfo {
     int    recommendedWorkerCount; // based on async engine count
 };
 
+#ifdef GPU_DEDUP
+// VRAM hash table for GPU-side board deduplication.
+// One global instance, cleared at each BFS level boundary.
+// Slots hold keys: 0 = empty sentinel.  Key is always forced odd (| 1) so 0 never appears.
+// tableSlots must be a power of 2.
+struct GpuDedupTable {
+    uint64_t* d_slots;    // device array of tableSlots uint64_t entries
+    size_t    tableSlots; // number of slots (power of 2)
+    uint64_t  tableMask;  // tableSlots - 1
+};
+#endif
+
 // Allocated once per worker thread; holds the stream + device + pinned host buffers.
 struct WorkerGpuContext {
     void*      stream;          // cudaStream_t cast to void*
@@ -34,19 +50,28 @@ struct WorkerGpuContext {
     int*       h_outputCounts;  // pinned host — count staging
     int        batchCapacity;   // max boards this context handles
     int        maxMovesPerBoard;
+#ifdef GPU_DEDUP
+    uint8_t*   d_isNewBoard;    // device — [batchCapacity*maxMovesPerBoard] 1=new 0=dup
+    uint8_t*   h_isNewBoard;    // pinned host — same size, read after DispatchBatch
+#endif
 };
 
 // Query the first CUDA device, print a capability summary, and return computed parameters.
 GpuDeviceInfo     QueryGpuDevice();
 
 // Async dispatch: copy boardCount boards from ctx->h_inputBoards H2D, launch the kernel,
-// copy all results and counts D2H, then sync the stream.
+// optionally run the dedup kernel, copy all results and counts D2H, then sync the stream.
 // After return, ctx->h_outputCounts[0..boardCount-1] and ctx->h_results are ready to read.
+// Under GPU_DEDUP, ctx->h_isNewBoard is also ready: 1=new board, 0=already in dedup table.
 void DispatchBatch(
     WorkerGpuContext* ctx,
     int               boardCount,
     int               numRotations,
-    DevBoardConsts    consts);
+    DevBoardConsts    consts
+#ifdef GPU_DEDUP
+    , GpuDedupTable*  dedupTable
+#endif
+);
 
 // Allocate all per-worker GPU resources (stream + device + pinned buffers).
 WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard);
@@ -74,3 +99,14 @@ void LaunchOthelloKernel(
     int            numRotations,
     DevBoardConsts consts,
     void*          stream);
+
+#ifdef GPU_DEDUP
+// Allocate the dedup hash table in VRAM and zero it.  tableSlots must be a power of 2.
+void GpuDedupTableAlloc(GpuDedupTable* t, size_t tableSlots);
+
+// Zero the hash table (call once at the start of each BFS level).
+void GpuDedupTableClear(GpuDedupTable* t);
+
+// Free the VRAM allocation.
+void GpuDedupTableDestroy(GpuDedupTable* t);
+#endif

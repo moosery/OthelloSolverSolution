@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.4.3"
+#define APP_VERSION "2.5.0"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -47,6 +47,9 @@ typedef struct SolverConfig
 PTS         g_tieredBoardStores[61] = { 0 };
 PTS         g_tieredMoveStores[61]  = { 0 };
 ThreadPool* g_mergePool             = nullptr;
+#ifdef GPU_DEDUP
+GpuDedupTable g_gpuDedupTable       = {};
+#endif
 
 static const TSKeyFld k_boardKeyFlds[] = {
     { 0, offsetof(BOARD, ullPossibleMoves), TS_DATATYPE_BYTE }
@@ -187,15 +190,16 @@ void usage();
 
 struct LevelRecord
 {
-    int       level;
-    long long boardsIn;
-    long long newBoardsOut;
-    long long totalChildren;    // total legal moves generated (= move edges in move store)
-    long long terminalBoardsOut;// boards at this level with no legal moves (game over)
-    int       maxMovesInLevel;  // max legal moves seen for any single board at this level
-    long long elapsedNs;
-    long long predictedNs;      // prediction made for this level; 0 = none
-    long long dupBoards;        // true duplicates: B+tree dups + merge-time dups in board[level+1]
+    int      level;
+    uint64_t boardsIn;
+    uint64_t newBoardsOut;
+    uint64_t totalChildren;    // total legal moves generated (= move edges in move store)
+    uint64_t terminalBoardsOut;// boards at this level with no legal moves (game over)
+    int      maxMovesInLevel;  // max legal moves seen for any single board at this level
+    long long elapsedNs;       // timing — signed so arithmetic stays exact
+    long long predictedNs;     // prediction made for this level; 0 = none
+    uint64_t dupBoards;        // true duplicates: B+tree dups + merge-time dups in board[level+1]
+    uint64_t gpuDedups;        // dups caught by GPU hash table before reaching TSInsert
 };
 
 // ==================== Helpers ====================
@@ -205,13 +209,14 @@ static long long RollingAvgNsPerBoard(const std::vector<LevelRecord>& recs)
     int n = (int)recs.size();
     if (n == 0) return 0;
     int start = (n > 3) ? n - 3 : 0;
-    long long totalNs = 0, totalBoards = 0;
+    long long totalNs     = 0;
+    uint64_t  totalBoards = 0;
     for (int i = start; i < n; i++)
     {
         totalNs    += recs[i].elapsedNs;
-        totalBoards+= recs[i].boardsIn;
+        totalBoards += recs[i].boardsIn;
     }
-    long long avgNs = (totalBoards > 0) ? totalNs / totalBoards : 0;
+    long long avgNs = (totalBoards > 0) ? totalNs / (long long)totalBoards : 0;
 
     // If the most recent level's ns/board exceeds the rolling average by >40%,
     // the store has gone to disk (I/O inflection). Use the latest rate — it's a
@@ -219,7 +224,7 @@ static long long RollingAvgNsPerBoard(const std::vector<LevelRecord>& recs)
     const LevelRecord& latest = recs[n - 1];
     if (latest.boardsIn > 0)
     {
-        long long latestNs = latest.elapsedNs / latest.boardsIn;
+        long long latestNs = latest.elapsedNs / (long long)latest.boardsIn;
         if (latestNs > avgNs * 14 / 10)
             return latestNs;
     }
@@ -296,11 +301,11 @@ static void doReportResults(
     const std::vector<LevelRecord>& levels,
     const WorkerRunStats&       runStats,
     long long                   wallNs,
-    long long                   totalBoardsProcessed,
-    long long                   totalUniqueBoards,
-    long long                   totalChildren,
-    long long                   totalGpuDispatches,
-    long long                   totalTerminals,
+    uint64_t                    totalBoardsProcessed,
+    uint64_t                    totalUniqueBoards,
+    uint64_t                    totalChildren,
+    uint64_t                    totalGpuDispatches,
+    uint64_t                    totalTerminals,
     const char*                 startDateTime)
 {
     SYSTEMTIME st;
@@ -315,10 +320,11 @@ static void doReportResults(
     if (!rf)
         LogErrorf("Warning: could not write results file %s\n", resultsPath);
 
-    long long dupBoards  = 0;
-    for (const LevelRecord& r : levels) dupBoards += r.dupBoards;
+    uint64_t dupBoards  = 0;
+    uint64_t gpuDedups  = 0;
+    for (const LevelRecord& r : levels) { dupBoards += r.dupBoards; gpuDedups += r.gpuDedups; }
     long long wallMs     = wallNs / 1000000LL;
-    long long nsPerBrd   = (totalBoardsProcessed > 0) ? wallNs / totalBoardsProcessed : 0;
+    long long nsPerBrd   = (totalBoardsProcessed > 0) ? wallNs / (long long)totalBoardsProcessed : 0;
     long long brdsPerSec = (wallNs > 0)
         ? (long long)((double)totalBoardsProcessed * 1e9 / (double)wallNs) : 0;
 
@@ -368,12 +374,13 @@ static void doReportResults(
     }
     ReportLine(rf, "%s", sep);
     ReportLine(rf, "Stats\n");
-    ReportLine(rf, "  Boards Processed: %lld\n", totalBoardsProcessed);
-    ReportLine(rf, "  Unique Boards:    %lld\n", totalUniqueBoards);
-    ReportLine(rf, "  Duplicate Boards: %lld\n", dupBoards);
-    ReportLine(rf, "  Total Moves:      %lld\n", totalChildren);
-    ReportLine(rf, "  Total End Boards: %lld\n", totalTerminals);
-    ReportLine(rf, "  GPU Dispatched:   %lld\n", totalGpuDispatches);
+    ReportLine(rf, "  Boards Processed: %llu\n", totalBoardsProcessed);
+    ReportLine(rf, "  Unique Boards:    %llu\n", totalUniqueBoards);
+    ReportLine(rf, "  Duplicate Boards: %llu\n", dupBoards);
+    ReportLine(rf, "  GPU Dups Caught:  %llu\n", gpuDedups);
+    ReportLine(rf, "  Total Moves:      %llu\n", totalChildren);
+    ReportLine(rf, "  Total End Boards: %llu\n", totalTerminals);
+    ReportLine(rf, "  GPU Dispatched:   %llu\n", totalGpuDispatches);
     ReportLine(rf, "  Max Legal Moves:  %d  (level %d)\n",
         runStats.maxMovesCount, runStats.maxMovesLevel);
     ReportLine(rf, "  Max Move Board:\n");
@@ -390,22 +397,22 @@ static void doReportResults(
     ReportLine(rf, "    Mvs[N]       = NewBoards[N] + Pass[N]  (all moves generated)\n");
     ReportLine(rf, "    NewBoards[N] = gross inserts into next level (includes dups; net unique = NewBoards - Dups)\n");
     ReportLine(rf, "    e.g. lv4->5: (105 - 9) + 2 = 98 = BoardsIn[5]\n\n");
-    ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
-        "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "Mvs", "Ends", "MaxMv", "Pred(s)", "Tm(s)", "ns/brd");
-    ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
-        "--", "--------", "---------", "----", "----", "---", "----", "-----", "-------", "-----", "------");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
+        "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "GpuDups", "Mvs", "Ends", "MaxMv", "Pred(s)", "Tm(s)", "ns/brd");
+    ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
+        "--", "--------", "---------", "----", "----", "-------", "---", "----", "-----", "-------", "-----", "------");
     for (const LevelRecord& r : levels)
     {
-        double    elpS    = r.elapsedNs / 1e9;
-        long long nsPerB  = (r.boardsIn > 0) ? r.elapsedNs / r.boardsIn : 0;
-        long long rPasses = r.totalChildren - r.newBoardsOut;
+        double   elpS    = r.elapsedNs / 1e9;
+        long long nsPerB = (r.boardsIn > 0) ? r.elapsedNs / (long long)r.boardsIn : 0;
+        uint64_t rPasses = r.totalChildren - r.newBoardsOut - r.gpuDedups;
         if (r.predictedNs > 0)
-            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %13lld %8lld %6d %11.3f %11.3f %8lld\n",
-                r.level, r.boardsIn, r.newBoardsOut, rPasses, r.dupBoards, r.totalChildren, r.terminalBoardsOut,
+            ReportLine(rf, "  %2d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6d %11.3f %11.3f %8lld\n",
+                r.level, r.boardsIn, r.newBoardsOut, rPasses, r.dupBoards, r.gpuDedups, r.totalChildren, r.terminalBoardsOut,
                 r.maxMovesInLevel, r.predictedNs / 1e9, elpS, nsPerB);
         else
-            ReportLine(rf, "  %2d %13lld %13lld %13lld %13lld %13lld %8lld %6d %11s %11.3f %8lld\n",
-                r.level, r.boardsIn, r.newBoardsOut, rPasses, r.dupBoards, r.totalChildren, r.terminalBoardsOut,
+            ReportLine(rf, "  %2d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6d %11s %11.3f %8lld\n",
+                r.level, r.boardsIn, r.newBoardsOut, rPasses, r.dupBoards, r.gpuDedups, r.totalChildren, r.terminalBoardsOut,
                 r.maxMovesInLevel, "---", elpS, nsPerB);
     }
     ReportLine(rf, "%s", sep);
@@ -704,11 +711,11 @@ static void RunSolverCore(
     WorkerRunStats           runStats;
     std::vector<LevelRecord> levelHistory;
     levelHistory.reserve(maxLevel + 1);
-    long long totalBoardsProcessed = 0;
-    long long totalUniqueBoards    = 0;
-    long long totalGpuDispatches   = 0;
-    long long totalChildren        = 0;
-    long long totalTerminals       = 0;
+    uint64_t  totalBoardsProcessed = 0;
+    uint64_t  totalUniqueBoards    = 0;
+    uint64_t  totalGpuDispatches   = 0;
+    uint64_t  totalChildren        = 0;
+    uint64_t  totalTerminals       = 0;
     long long nextLevelPredNs      = 0;
 
     // Pass-board queue: pass children (same piece count) are accumulated here
@@ -733,11 +740,11 @@ static void RunSolverCore(
     LogPrintf("    NewBoards[N] = gross inserts into next level (includes dups; net unique = NewBoards - Dups)\n");
     LogPrintf("    e.g. lv4->5: (105 - 9) + 2 = 98 = BoardsIn[5]\n\n");
 
-    LogPrintf("%4s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s  %s\n",
-              "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "Mvs", "Ends",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s  %s\n",
+              "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "GpuDups", "Mvs", "Ends",
               "MaxMv", "Pred(s)", "Tm(s)", "ns/brd", "Nxt(s)", "DateTime");
-    LogPrintf("%4s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s\n",
-              "--", "--------", "---------", "----", "----", "---", "----",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s\n",
+              "--", "--------", "---------", "----", "----", "-------", "---", "----",
               "-----", "-------", "-----", "------", "------");
 
     auto wallStart = std::chrono::high_resolution_clock::now();
@@ -753,9 +760,12 @@ static void RunSolverCore(
             CreateBoardStore(level + 1);
 
         deepestLevel = level;
+#ifdef GPU_DEDUP
+        GpuDedupTableClear(&g_gpuDedupTable);
+#endif
         WorkerLevelStats levelStats;
-        long long boardsIn      = 0;
-        long long gpuDispatches = 0;
+        uint64_t  boardsIn      = 0;
+        uint64_t  gpuDispatches = 0;
         long long thisPredNs    = nextLevelPredNs;
 
         auto levelStart = std::chrono::high_resolution_clock::now();
@@ -863,12 +873,16 @@ static void RunSolverCore(
 
         // Flush board[level+1] and read its true duplicate count (B+tree + merge dups).
         // TSCheckpoint waits for all background merges so the count is complete.
-        long long trueDups = 0;
+        uint64_t trueDups = 0;
         if (level < maxLevel && g_tieredBoardStores[level + 1])
         {
             TSCheckpoint(g_tieredBoardStores[level + 1]);
-            trueDups = (long long)TSGetDupCount(g_tieredBoardStores[level + 1]);
+            trueDups = TSGetDupCount(g_tieredBoardStores[level + 1]);
         }
+#ifdef GPU_DEDUP
+        uint64_t gpuDedups = levelStats.gpuDedupCount.load();
+        trueDups += gpuDedups;
+#endif
 
         // Record stats.
         LevelRecord rec;
@@ -881,6 +895,11 @@ static void RunSolverCore(
         rec.elapsedNs          = elapsedNs;
         rec.predictedNs        = thisPredNs;
         rec.dupBoards          = trueDups;
+#ifdef GPU_DEDUP
+        rec.gpuDedups          = gpuDedups;
+#else
+        rec.gpuDedups          = 0;
+#endif
         levelHistory.push_back(rec);
 
         totalBoardsProcessed += boardsIn;
@@ -891,8 +910,8 @@ static void RunSolverCore(
 
         // Per-level log line.
         double    elpS    = elapsedNs / 1e9;
-        long long nsPerBd = (boardsIn > 0) ? elapsedNs / boardsIn : 0;
-        long long dups    = trueDups;
+        long long nsPerBd = (boardsIn > 0) ? elapsedNs / (long long)boardsIn : 0;
+        uint64_t  dups    = trueDups;
         double    predS   = (thisPredNs > 0) ? thisPredNs / 1e9 : 0.0;
 
         nextLevelPredNs = 0;
@@ -922,9 +941,9 @@ static void RunSolverCore(
         else
             snprintf(nxtBuf, sizeof(nxtBuf), "%11s", "---");
 
-        long long passes = rec.totalChildren - rec.newBoardsOut;
-        LogPrintf("%4d %13lld %13lld %13lld %13lld %13lld %8lld %6d %s %11.3f %8lld %s  %s\n",
-                  level, boardsIn, rec.newBoardsOut, passes, dups,
+        uint64_t  passes = rec.totalChildren - rec.newBoardsOut - rec.gpuDedups;
+        LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6d %s %11.3f %8lld %s  %s\n",
+                  level, boardsIn, rec.newBoardsOut, passes, dups, rec.gpuDedups,
                   rec.totalChildren, rec.terminalBoardsOut, rec.maxMovesInLevel,
                   predBuf, elpS, nsPerBd, nxtBuf, dtBuf);
 
@@ -1057,7 +1076,13 @@ void doStartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("  Merge Threads: %d\n", pConfig->chunkPoolThreads);
     LogPrintf("\n");
 
+#ifdef GPU_DEDUP
+    GpuDedupTableAlloc(&g_gpuDedupTable, 512ULL * 1024 * 1024);
+#endif
     RunSolverCore(pConfig, gpuInfo, 0, numLevels);
+#ifdef GPU_DEDUP
+    GpuDedupTableDestroy(&g_gpuDedupTable);
+#endif
     g_mergePool = nullptr;
     mergePool.Stop();
     StopMemStatsThread();
@@ -1185,7 +1210,13 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     LogPrintf("  Merge Threads: %d\n", pConfig->chunkPoolThreads);
     LogPrintf("\n");
 
+#ifdef GPU_DEDUP
+    GpuDedupTableAlloc(&g_gpuDedupTable, 512ULL * 1024 * 1024);
+#endif
     RunSolverCore(pConfig, gpuInfo, resumeFromLevel, numLevels);
+#ifdef GPU_DEDUP
+    GpuDedupTableDestroy(&g_gpuDedupTable);
+#endif
     g_mergePool = nullptr;
     mergePool.Stop();
     StopMemStatsThread();
