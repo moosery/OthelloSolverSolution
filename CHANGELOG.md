@@ -1,5 +1,17 @@
 # Changelog
 
+## [v2.5.1] - 2026-05-20
+
+### Fixed
+- `OthelloSolverCommandLine`: column key legend corrected for GPU-dedup mode — two formulas were stale:
+  - `Mvs[N] = NewBoards[N] + Pass[N]` → `NewBoards[N] + GpuDups[N] + Pass[N]` (GPU-deduped moves contribute to total moves generated but are excluded from both NewBoards and Pass)
+  - `BoardsIn[N] = (NewBoards[N-1] - Dups[N-1]) + Pass[N]` → `(NewBoards[N-1] + GpuDups[N-1] - Dups[N-1]) + Pass[N]` (NewBoards no longer counts GPU-deduped boards, so GpuDups must be added back to recover the net unique count)
+  - `NewBoards[N]` description updated from "gross inserts into next level (includes dups)" to "boards uniquely new at level N+1 after GPU + TSInsert dedup"
+  - Added `GpuDups[N]` description and corrected net-unique formula to `NewBoards - (Dups - GpuDups)`
+  - Both the live BFS progress output and the saved results report updated identically
+
+---
+
 ## [v2.5.0] - 2026-05-20
 
 ### Added

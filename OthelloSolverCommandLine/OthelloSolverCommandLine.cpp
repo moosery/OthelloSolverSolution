@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.5.0"
+#define APP_VERSION "2.5.1"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -392,11 +392,12 @@ static void doReportResults(
     ReportLine(rf, "  Ns/Board:         %lld\n", nsPerBrd);
     ReportLine(rf, "\n  Level Analysis:\n");
     ReportLine(rf, "  Column key:\n");
-    ReportLine(rf, "    BoardsIn[N]  = (NewBoards[N-1] - Dups[N-1]) + Pass[N]\n");
-    ReportLine(rf, "    Pass[N]      = pass moves found and worked within level N; their children go into NewBoards[N]\n");
-    ReportLine(rf, "    Mvs[N]       = NewBoards[N] + Pass[N]  (all moves generated)\n");
-    ReportLine(rf, "    NewBoards[N] = gross inserts into next level (includes dups; net unique = NewBoards - Dups)\n");
-    ReportLine(rf, "    e.g. lv4->5: (105 - 9) + 2 = 98 = BoardsIn[5]\n\n");
+    ReportLine(rf, "    BoardsIn[N]  = (NewBoards[N-1] + GpuDups[N-1] - Dups[N-1]) + Pass[N]\n");
+    ReportLine(rf, "    Pass[N]      = actual pass moves at level N (current player has no legal moves; opponent does)\n");
+    ReportLine(rf, "    Mvs[N]       = NewBoards[N] + GpuDups[N] + Pass[N]  (all moves generated)\n");
+    ReportLine(rf, "    NewBoards[N] = boards uniquely new at level N+1 after GPU + TSInsert dedup\n");
+    ReportLine(rf, "    Dups[N]      = total dups at level N+1 = GpuDups + TSInsert dups; net unique = NewBoards - (Dups - GpuDups)\n");
+    ReportLine(rf, "    GpuDups[N]   = dups caught by GPU VRAM hash table before TSInsert\n\n");
     ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
         "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "GpuDups", "Mvs", "Ends", "MaxMv", "Pred(s)", "Tm(s)", "ns/brd");
     ReportLine(rf, "  %2s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s\n",
@@ -734,11 +735,12 @@ static void RunSolverCore(
     LogPrintf("  Started:       %s\n\n", startDtBuf);
 
     LogPrintf("  Column key:\n");
-    LogPrintf("    BoardsIn[N]  = (NewBoards[N-1] - Dups[N-1]) + Pass[N]\n");
-    LogPrintf("    Pass[N]      = pass moves found and worked within level N; their children go into NewBoards[N]\n");
-    LogPrintf("    Mvs[N]       = NewBoards[N] + Pass[N]  (all moves generated)\n");
-    LogPrintf("    NewBoards[N] = gross inserts into next level (includes dups; net unique = NewBoards - Dups)\n");
-    LogPrintf("    e.g. lv4->5: (105 - 9) + 2 = 98 = BoardsIn[5]\n\n");
+    LogPrintf("    BoardsIn[N]  = (NewBoards[N-1] + GpuDups[N-1] - Dups[N-1]) + Pass[N]\n");
+    LogPrintf("    Pass[N]      = actual pass moves at level N (current player has no legal moves; opponent does)\n");
+    LogPrintf("    Mvs[N]       = NewBoards[N] + GpuDups[N] + Pass[N]  (all moves generated)\n");
+    LogPrintf("    NewBoards[N] = boards uniquely new at level N+1 after GPU + TSInsert dedup\n");
+    LogPrintf("    Dups[N]      = total dups at level N+1 = GpuDups + TSInsert dups; net unique = NewBoards - (Dups - GpuDups)\n");
+    LogPrintf("    GpuDups[N]   = dups caught by GPU VRAM hash table before TSInsert\n\n");
 
     LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %8s %11s  %s\n",
               "Lv", "BoardsIn", "NewBoards", "Pass", "Dups", "GpuDups", "Mvs", "Ends",
