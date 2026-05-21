@@ -30,11 +30,13 @@ struct GpuDeviceInfo {
 #ifdef GPU_DEDUP
 // VRAM hash table for GPU-side board deduplication.
 // One global instance, cleared at each BFS level boundary.
-// Slots hold keys: 0 = empty sentinel.  Key is always forced odd (| 1) so 0 never appears.
+// Each logical slot holds 3 uint64_t words: ullCellsInUse, ullCellColors, usBoardInfo.
+// Word 0 == 0 is the empty-slot sentinel (ullCellsInUse is never 0 in a real game board).
+// Exact 3-word comparison — no hashing of keys, so false positives are impossible.
 // tableSlots must be a power of 2.
 struct GpuDedupTable {
-    uint64_t* d_slots;    // device array of tableSlots uint64_t entries
-    size_t    tableSlots; // number of slots (power of 2)
+    uint64_t* d_slots;    // device array of tableSlots * 3 uint64_t words
+    size_t    tableSlots; // number of logical slots (power of 2)
     uint64_t  tableMask;  // tableSlots - 1
 };
 #endif
@@ -101,7 +103,8 @@ void LaunchOthelloKernel(
     void*          stream);
 
 #ifdef GPU_DEDUP
-// Allocate the dedup hash table in VRAM and zero it.  tableSlots must be a power of 2.
+// Allocate the dedup table in VRAM (tableSlots * 3 uint64_t words) and zero it.
+// tableSlots must be a power of 2.
 void GpuDedupTableAlloc(GpuDedupTable* t, size_t tableSlots);
 
 // Zero the hash table (call once at the start of each BFS level).

@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.5.2] - 2026-05-20
+
+### Fixed
+- `OthelloSolverCommandLine` / `SolverKernel`: GPU dedup table switched from 64-bit hash keys to exact 3-word board identity storage — each logical slot now holds `ullCellsInUse` (word 0), `ullCellColors` (word 1), and `usBoardInfo` (word 2) as three consecutive `uint64_t` words; slot selection still uses a hash (for distribution), but comparison is bitwise exact so false positives are impossible; `dev_boardKey` replaced by `dev_boardSlot` (hash for index only, not stored); `DedupKernel` claims a slot via `atomicCAS` on word 0, writes words 1–2, then on revisit compares all three words — a race that leaves words 1/2 momentarily unwritten produces a false negative (dup not caught by GPU, caught later by TS) but never a false positive (`usBoardInfo` is never 0 for a valid board, so a stale zero in word 2 cannot match); VRAM footprint increases from 4 GB (512 M × 8 B) to 12 GB (512 M × 24 B) on the RTX 4080 SUPER (16 GB VRAM); this eliminates the 3-board shortfall observed at level 13 in the prior hash-based implementation
+
+---
+
 ## [v2.5.1] - 2026-05-20
 
 ### Fixed
