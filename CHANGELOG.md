@@ -8,6 +8,7 @@
 ### Added
 - `OthelloSolverCommandLine` / `SolverKernel`: within-batch deduplication via GPU sort — before the cross-batch hash-table `DedupKernel`, two new kernels run on the same CUDA stream: `BuildSortKeysKernel` extracts the 3-word board key for every valid result slot into `d_batchKeys` and initialises `isNewBoard` (1=valid, 0=padding); `thrust::sort_by_key` then sorts `d_batchKeys`/`d_batchIndices` so within-batch duplicates become adjacent; `MarkIntraBatchDupsKernel` scans consecutive equal keys and marks the later occurrences `isNewBoard=0`; `DedupKernel` then skips any slot already marked 0, only spending hash-table probes on boards that survived within-batch dedup; catches 100% of within-batch duplicates (multiple parents in the same batch producing the same canonical child) with exact byte-for-byte comparison — no hash involved
 - `OthelloSolverCommandLine` / `SolverKernel.h`: `d_batchKeys` and `d_batchIndices` (`void*`) added to `WorkerGpuContext` under `GPU_DEDUP`; allocated in `WorkerGpuContextCreate` (~27 MB per worker at 65536×15 slots) and freed in `WorkerGpuContextDestroy`
+- `TieredStoreComparisonTool`: new standalone console project — streams two board-level TieredStores in sorted order and reports records present in only one; enforces strictly-ascending, unique keys from each iterator (duplicates skipped, out-of-order records flagged and skipped, anomaly counts reported in summary); used to diagnose the 3-board discrepancy between GPU_DEDUP and no-GPU_DEDUP runs at level 13
 
 ---
 
