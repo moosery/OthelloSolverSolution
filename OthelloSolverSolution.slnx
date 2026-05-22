@@ -18,6 +18,7 @@
   <Project Path="OthelloSolverMultithreaded/OthelloSolverMultithreaded.vcxproj" />
   <Project Path="OthelloSolverUsingBplusOnly/OthelloSolverUsingBplusOnly.vcxproj" Id="c044278e-6eb6-4713-a49a-9c77db194d36" />
   <Project Path="TieredStoreAndBPlusTreeTester/TieredStoreAndBPlusTreeTester.vcxproj" />
+  <Project Path="TieredStoreComparisonTool/TieredStoreComparisonTool.vcxproj" Id="0e1af332-5934-4148-9727-8f32b7634cc6" />
   <Project Path="TieredStoreHybrid/TieredStoreHybrid.vcxproj" Id="b33503f7-585b-4d82-b0aa-77676c9c9838" />
   <Project Path="TieredStoreTester/TieredStoreTester.vcxproj" Id="a7594965-78af-4873-a5af-0458ad653e9d" />
   <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
