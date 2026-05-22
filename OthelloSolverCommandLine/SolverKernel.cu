@@ -210,9 +210,17 @@ __global__ void DedupKernel(
             isNewBoard[tid] = 1;
             return;
         }
-        if (prev0 == k0 && p[1] == k1 && p[2] == k2) {
-            isNewBoard[tid] = 0;   // exact match — duplicate
-            return;
+        if (prev0 == k0) {
+            // Volatile reads bypass the reader SM's L1 cache, ensuring we see the writer's
+            // committed values from L2/global rather than stale cached data.
+            // Check p[2] first: if 0 the writer's __threadfence() hasn't committed yet
+            // (usBoardInfo is always non-zero), so treat this slot as not yet visible.
+            volatile const uint64_t* vp = (volatile const uint64_t*)p;
+            uint64_t rv2 = vp[2];
+            if (rv2 != 0 && vp[1] == k1 && rv2 == k2) {
+                isNewBoard[tid] = 0;   // exact match — duplicate
+                return;
+            }
         }
         // Slot occupied by a different board (or word 1/2 not yet visible) — probe next.
         slot = (slot + 1) & tableMask;

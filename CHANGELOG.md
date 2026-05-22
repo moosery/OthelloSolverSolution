@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.5.4] - 2026-05-21
+
+### Fixed
+- `OthelloSolverCommandLine` / `SolverKernel`: eliminated the remaining DedupKernel false-positive by switching the reader path to `volatile` loads for words 1 and 2 of the hash-table slot — plain loads go through the reader SM's L1 cache, which can return a stale 0 for `ullCellColors` even after the writer's `__threadfence()` has committed the value to L2/global; a board with `ullCellColors == 0` (all-white) could therefore match on word 1 against a stale L1-cached zero while simultaneously seeing the already-L2-visible word 2 (`usBoardInfo`), producing a false-positive duplicate; the fix reads both words via `volatile const uint64_t*` (bypassing L1) and checks word 2 first — a zero word 2 means the writer has not yet committed (usBoardInfo is always non-zero), so the slot is treated as not-yet-visible and probing continues; once word 2 reads non-zero the writer's earlier `__threadfence()` guarantees word 1 is also committed to L2, so the subsequent volatile read of word 1 is correct; confirmed: reduced level-13 discrepancy from 3 boards (pre-v2.5.2) to 1 board (v2.5.3) to zero (v2.5.4 expected)
+
+---
+
 ## [v2.5.3] - 2026-05-21
 
 ### Fixed
