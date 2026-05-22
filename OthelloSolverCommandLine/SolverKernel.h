@@ -55,6 +55,8 @@ struct WorkerGpuContext {
 #ifdef GPU_DEDUP
     uint8_t*   d_isNewBoard;    // device — [batchCapacity*maxMovesPerBoard] 1=new 0=dup
     uint8_t*   h_isNewBoard;    // pinned host — same size, read after DispatchBatch
+    void*      d_batchKeys;     // device — [batchCapacity*maxMovesPerBoard] BatchKey, for within-batch sort
+    void*      d_batchIndices;  // device — [batchCapacity*maxMovesPerBoard] uint32_t original slot indices
 #endif
 };
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## [v2.5.3] - 2026-05-21
+
+### Fixed
+- `OthelloSolverCommandLine` / `SolverKernel`: added `__threadfence()` between the word-1 (`ullCellColors`) and word-2 (`usBoardInfo`) writes in `DedupKernel` — without the fence, CUDA memory reordering could make word-2 visible to other threads before word-1; for boards whose `ullCellColors == 0` (all-white boards), the stale word-1 read of 0 was indistinguishable from the correctly written value, causing a false-positive duplicate match and silently dropping valid boards; confirmed by comparison run showing 3 all-white level-13 boards present in no-GPU_DEDUP but absent from GPU_DEDUP
+
+### Added
+- `OthelloSolverCommandLine` / `SolverKernel`: within-batch deduplication via GPU sort — before the cross-batch hash-table `DedupKernel`, two new kernels run on the same CUDA stream: `BuildSortKeysKernel` extracts the 3-word board key for every valid result slot into `d_batchKeys` and initialises `isNewBoard` (1=valid, 0=padding); `thrust::sort_by_key` then sorts `d_batchKeys`/`d_batchIndices` so within-batch duplicates become adjacent; `MarkIntraBatchDupsKernel` scans consecutive equal keys and marks the later occurrences `isNewBoard=0`; `DedupKernel` then skips any slot already marked 0, only spending hash-table probes on boards that survived within-batch dedup; catches 100% of within-batch duplicates (multiple parents in the same batch producing the same canonical child) with exact byte-for-byte comparison — no hash involved
+- `OthelloSolverCommandLine` / `SolverKernel.h`: `d_batchKeys` and `d_batchIndices` (`void*`) added to `WorkerGpuContext` under `GPU_DEDUP`; allocated in `WorkerGpuContextCreate` (~27 MB per worker at 65536×15 slots) and freed in `WorkerGpuContextDestroy`
+
+---
+
 ## [v2.5.2] - 2026-05-20
 
 ### Fixed

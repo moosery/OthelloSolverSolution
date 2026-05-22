@@ -1,6 +1,22 @@
 #include "SolverKernel.h"
 #include <cstring>
 #include <cstdio>
+#ifdef GPU_DEDUP
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
+
+// Three-word board identity key used for within-batch sort-based deduplication.
+struct BatchKey {
+    uint64_t k0, k1, k2;
+    __host__ __device__ bool operator<(const BatchKey& o) const {
+        if (k0 != o.k0) return k0 < o.k0;
+        if (k1 != o.k1) return k1 < o.k1;
+        return k2 < o.k2;
+    }
+};
+static constexpr uint64_t k_SentinelKey = ~(uint64_t)0;  // sorts last; marks invalid slots
+#endif
 
 // One thread per input board.
 // Iterates through ullPossibleMoves bits, applies each move, canonicalizes the child,
@@ -99,13 +115,65 @@ uint64_t dev_boardSlot(uint64_t k0, uint64_t k1, uint64_t k2, uint64_t tableMask
           ^ k2 * 0x14057b7ef767814fULL) & tableMask;
 }
 
+// One thread per result slot.  Builds the BatchKey for each valid slot and initialises
+// isNewBoard: 1 for valid slots (tentatively new), 0 for padding slots beyond outputCounts[i].
+__global__ void BuildSortKeysKernel(
+    const GpuResult* results,
+    const int*       outputCounts,
+    int              boardCount,
+    int              maxMovesPerBoard,
+    BatchKey*        batchKeys,
+    uint32_t*        batchIndices,
+    uint8_t*         isNewBoard)
+{
+    int tid   = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = boardCount * maxMovesPerBoard;
+    if (tid >= total) return;
+
+    int i = tid / maxMovesPerBoard;
+    int j = tid % maxMovesPerBoard;
+
+    batchIndices[tid] = (uint32_t)tid;
+
+    if (i < boardCount && j < outputCounts[i]) {
+        const BOARD& b  = results[tid].childBoard;
+        batchKeys[tid]  = { b.ullCellsInUse, b.ullCellColors, (uint64_t)b.usBoardInfo };
+        isNewBoard[tid] = 1;
+    } else {
+        batchKeys[tid]  = { k_SentinelKey, k_SentinelKey, k_SentinelKey };
+        isNewBoard[tid] = 0;
+    }
+}
+
+// One thread per sorted position.  After thrust::sort_by_key has ordered batchKeys/batchIndices,
+// consecutive entries with identical keys are within-batch duplicates; mark all but the first.
+__global__ void MarkIntraBatchDupsKernel(
+    const BatchKey* sortedKeys,
+    const uint32_t* sortedIndices,
+    int             total,
+    uint8_t*        isNewBoard)
+{
+    int pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos == 0 || pos >= total) return;
+
+    // Sentinel-keyed slots are invalid padding; isNewBoard already 0.
+    if (sortedKeys[pos].k0 == k_SentinelKey) return;
+
+    const BatchKey& cur  = sortedKeys[pos];
+    const BatchKey& prev = sortedKeys[pos - 1];
+    if (cur.k0 == prev.k0 && cur.k1 == prev.k1 && cur.k2 == prev.k2)
+        isNewBoard[sortedIndices[pos]] = 0;
+}
+
 // One thread per result slot (boardCount * maxMovesPerBoard threads total).
+// isNewBoard is pre-initialised by BuildSortKeysKernel / MarkIntraBatchDupsKernel.
+// Slots already marked 0 (invalid or within-batch dup) are skipped.
+// Remaining valid slots are checked against the cross-batch hash table.
 // Each logical table slot holds 3 uint64_t words: ullCellsInUse, ullCellColors, usBoardInfo.
 // Word 0 == 0 is the empty sentinel; ullCellsInUse is never 0 for a real board.
-// Comparison is exact — no hash stored, so false positives are impossible.
-// A race where word 1/2 is read before the claiming thread writes them can produce a false
-// negative (dup treated as new); the TS catches those.  usBoardInfo is never 0 for a valid
-// board, so a stale word-2 read of 0 never causes a false positive.
+// The __threadfence() between word-1 and word-2 writes ensures word-2 (usBoardInfo, always
+// non-zero) is only visible after word-1, preventing false-positive matches for boards
+// whose ullCellColors == 0.
 __global__ void DedupKernel(
     const GpuResult* results,
     const int*       outputCounts,
@@ -119,14 +187,8 @@ __global__ void DedupKernel(
     int i   = tid / maxMovesPerBoard;
     int j   = tid % maxMovesPerBoard;
 
-    if (i >= boardCount) {
-        isNewBoard[tid] = 0;
-        return;
-    }
-    if (j >= outputCounts[i]) {
-        isNewBoard[tid] = 0;
-        return;
-    }
+    if (i >= boardCount || j >= outputCounts[i]) return;  // isNewBoard already 0
+    if (isNewBoard[tid] == 0) return;                     // within-batch dup — skip cross-batch check
 
     const BOARD& b = results[(size_t)i * maxMovesPerBoard + j].childBoard;
     uint64_t k0 = b.ullCellsInUse;
@@ -143,6 +205,7 @@ __global__ void DedupKernel(
         if (prev0 == 0ULL) {
             // We claimed this empty slot — write words 1 and 2, mark as new.
             p[1] = k1;
+            __threadfence();
             p[2] = k2;
             isNewBoard[tid] = 1;
             return;
@@ -237,9 +300,12 @@ WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard
     cudaMallocHost(&ctx->h_outputCounts, countsBytes);
 
 #ifdef GPU_DEDUP
-    size_t flagsBytes = (size_t)batchCapacity * maxMovesPerBoard * sizeof(uint8_t);
+    size_t total      = (size_t)batchCapacity * maxMovesPerBoard;
+    size_t flagsBytes = total * sizeof(uint8_t);
     cudaMalloc(&ctx->d_isNewBoard, flagsBytes);
     cudaMallocHost(&ctx->h_isNewBoard, flagsBytes);
+    cudaMalloc(&ctx->d_batchKeys,    total * sizeof(BatchKey));
+    cudaMalloc(&ctx->d_batchIndices, total * sizeof(uint32_t));
 #endif
 
     return ctx;
@@ -259,6 +325,8 @@ void WorkerGpuContextDestroy(WorkerGpuContext* ctx)
 #ifdef GPU_DEDUP
     cudaFree(ctx->d_isNewBoard);
     cudaFreeHost(ctx->h_isNewBoard);
+    cudaFree(ctx->d_batchKeys);
+    cudaFree(ctx->d_batchIndices);
 #endif
     delete ctx;
 }
@@ -285,9 +353,29 @@ void DispatchBatch(
 
 #ifdef GPU_DEDUP
     if (dedupTable) {
-        int total = boardCount * ctx->maxMovesPerBoard;
+        int   total     = boardCount * ctx->maxMovesPerBoard;
         constexpr int kBlockSize = 256;
-        int gridSize = (total + kBlockSize - 1) / kBlockSize;
+        int   gridSize  = (total + kBlockSize - 1) / kBlockSize;
+        auto* batchKeys = (BatchKey*)ctx->d_batchKeys;
+        auto* batchIdx  = (uint32_t*)ctx->d_batchIndices;
+
+        // Step 1: build sort keys and initialise isNewBoard for all slots.
+        BuildSortKeysKernel<<<gridSize, kBlockSize, 0, s>>>(
+            ctx->d_results, ctx->d_outputCounts,
+            boardCount, ctx->maxMovesPerBoard,
+            batchKeys, batchIdx, ctx->d_isNewBoard);
+
+        // Step 2: sort by board key — brings within-batch duplicates adjacent.
+        thrust::sort_by_key(thrust::cuda::par.on(s),
+                            thrust::device_ptr<BatchKey>(batchKeys),
+                            thrust::device_ptr<BatchKey>(batchKeys + total),
+                            thrust::device_ptr<uint32_t>(batchIdx));
+
+        // Step 3: mark within-batch duplicates (consecutive equal keys after sort).
+        MarkIntraBatchDupsKernel<<<gridSize, kBlockSize, 0, s>>>(
+            batchKeys, batchIdx, total, ctx->d_isNewBoard);
+
+        // Step 4: cross-batch dedup via hash table (skips slots already marked 0).
         DedupKernel<<<gridSize, kBlockSize, 0, s>>>(
             ctx->d_results, ctx->d_outputCounts,
             boardCount, ctx->maxMovesPerBoard,
