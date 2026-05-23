@@ -115,6 +115,63 @@ generated, and duplicate boards eliminated at each stage.
 
 ---
 
+## Files on Disk
+
+OLE writes files into timestamped subdirectories under each output directory you
+specify — something like:
+
+```
+D:\OLEDataDir\2026_05_23.11_46_41\BoardSize6x6\
+D:\OLEDataDir2\2026_05_23.11_46_41\BoardSize6x6\
+D:\OLEDataDir3\2026_05_23.11_46_41\BoardSize6x6\
+D:\OLEDataDir4\2026_05_23.11_46_41\BoardSize6x6\
+```
+
+Inside each run directory you will find three kinds of files:
+
+### Solve files — `ole_solve_L{NN}_{NNNNNN}.sf`
+
+These are created during the GPU pipeline phase.  Each one is a sorted snapshot
+of some of the boards generated at that level — "some" because a single buffer
+in GPU memory can only hold ~100 million boards at a time, so large levels
+produce many of these files.  They are spread across all configured drives in
+round-robin order so reads and writes hit multiple NVMe drives in parallel.
+
+Example names: `ole_solve_L12_000003.sf`, `ole_solve_L13_000017.sf`
+
+**These files are intermediate.**  Once the merge phase for that level finishes,
+they are no longer needed.  The current version keeps them on disk — they are
+never automatically deleted.
+
+### Merge files — `ole_merge_L{NN}_D{N}.sf`
+
+After the GPU pipeline finishes, the merge phase reads all the solve files for
+that level and combines them into one sorted, fully-deduplicated file per drive.
+These are the "finished" boards for that level and serve as the input when
+computing the next level.
+
+Example names: `ole_merge_L12_D0.sf`, `ole_merge_L12_D1.sf`
+
+### Checkpoint file — `ole_merge_level{NN}.meta`
+
+A tiny file (a few kilobytes) stored in the **primary output directory only**.
+It records the names and key-range summaries of that level's merge files.  When
+OLE starts with `--restart`, it checks for this file.  If it exists, the level
+is already complete and OLE skips directly to the next one.
+
+Example name: `ole_merge_level12.meta`
+
+### Disk space
+
+The files are large.  At level 13 of a 6×6 run there are roughly 1.2 billion
+unique board positions, each stored as 64 bytes — around 77 GB for the merge
+files alone, plus roughly 20–30% more for the intermediate solve files that are
+still sitting there.  The solve files for completed levels can safely be deleted
+by hand once a run finishes (or between runs), but OLE does not do this
+automatically.  The merge files must be kept as long as you want resume to work.
+
+---
+
 ## Future Work
 
 Once OLE has found all board positions, a separate "back-propagation" pass can

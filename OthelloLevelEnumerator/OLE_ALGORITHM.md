@@ -248,6 +248,101 @@ not overlap a partition without opening the file.
 
 ---
 
+## File Naming and Lifecycle
+
+### Directory structure
+
+All output files live inside a timestamped subdirectory created at run start:
+
+```
+<outputDir>\<YYYY_MM_DD.HH_MM_SS>\BoardSize<N>x<N>\
+```
+
+For a run with four configured drives this produces four parallel trees:
+
+```
+D:\OLEDataDir\2026_05_23.11_46_41\BoardSize6x6\   ← primary (also holds logs + .meta)
+D:\OLEDataDir2\2026_05_23.11_46_41\BoardSize6x6\
+D:\OLEDataDir3\2026_05_23.11_46_41\BoardSize6x6\
+D:\OLEDataDir4\2026_05_23.11_46_41\BoardSize6x6\
+```
+
+### Solve files
+
+**Pattern:** `ole_solve_L{NN}_{NNNNNN}.sf`  (e.g. `ole_solve_L13_000017.sf`)
+
+**Created by:** `FlushBuffer` in `GPUPipeline.cpp` via a thread-safe
+monotonically-increasing sequence counter (`s_fileSeq`).
+
+**Contents:** The unique boards produced by one flush of the GPU accumulation
+buffer — sorted by `BoardKeyCompare`, deduplicated within that window only.
+The level number `NN` refers to the level being *expanded* (the source level),
+so the boards stored are at level `NN+1`.
+
+**Drive assignment:** Files are written round-robin across all configured
+output directories — `drive = flushIndex % numOutputDirs`.  This spreads I/O
+across all NVMe drives simultaneously.
+
+**Lifecycle:** These files are the sole input to the merge phase.  Once the
+merge for that level completes they are no longer referenced by OLE and can
+be safely deleted by hand to recover disk space.  **OLE never deletes them
+automatically.**
+
+### Merge files
+
+**Pattern:** `ole_merge_L{NN}_D{N}.sf`  (e.g. `ole_merge_L13_D2.sf`)
+
+**Created by:** `RunMergePartition` in `MergePhase.cpp`.
+
+**Contents:** All unique boards at level `NN+1`, fully sorted and deduplicated
+across all solve-phase flush windows.  One file per configured drive (`D0`–`D3`),
+each covering a non-overlapping key range (the partition assigned to that drive's
+merge thread).
+
+**Lifecycle:** These are the permanent canonical board set for that level.  They
+serve as the input `currentReg` when processing the next level.  They must not
+be deleted while any higher-level computation depends on them.  Once the entire
+BFS is complete (and back-propagation is done) they could be archived or
+discarded.
+
+### Checkpoint / metadata file
+
+**Pattern:** `ole_merge_level{NN}.meta`  (e.g. `ole_merge_level13.meta`)
+
+**Location:** Primary output directory only (`outputDirs[0]`).
+
+**Contents:** Binary dump of an `OLEFileRegistry` — a 4-byte count followed by
+one `OLEFileDesc` struct per merge file.  Each descriptor records the file path,
+drive index, record count, and the first/last 24-byte board keys (minKey/maxKey).
+
+**Written by:** `FRSave` immediately after `MergePhaseRun` returns.  Its
+existence is the definition of "this level is complete."
+
+**Read by:** Resume detection at the top of the BFS loop — if `FRLoad` succeeds
+and the registry is non-empty, OLE skips both the solve and merge phases for
+that level.
+
+**Lifecycle:** These files are tiny (a few kilobytes each, one per level).
+They must be kept as long as `--restart` support is needed for this run.
+
+### Disk space
+
+All solve and merge files use the binary `.sf` format: a fixed 72-byte header
+followed by packed 64-byte `BOARD` records.  A rough estimate for level L of a
+6×6 run:
+
+```
+solve files = (uniqueBoards_L+1 - MrgDups_L) × 64 bytes   (GPU-deduped boards before cross-window merge)
+merge files = uniqueBoards_L+1               × 64 bytes   (fully deduped)
+```
+
+At level 13 of a 6×6 run that is roughly:
+- Solve files: ~1.44 B boards × 64 B ≈ 92 GB (spread across drives)
+- Merge files: ~1.21 B boards × 64 B ≈ 77 GB (one partition per drive)
+
+Solve files from completed levels can be deleted once the run finishes to
+recover approximately 20–25% extra disk space relative to the merge files alone.
+
 ## FileRegistry and Checkpoint/Resume
 
 `OLEFileRegistry` is an in-memory list of `OLEFileDesc` entries (path, drive
