@@ -1,5 +1,11 @@
 # Changelog
 
+## [OLE v0.2.2] - 2026-05-23
+
+### Changed
+- `OthelloLevelEnumerator` / `OLEMain`: switched all timing from raw `std::chrono` to the `ClockTick` utility (`ClockStart` / `ClockNanosSinceStart`); `#include <ClockTick.h>` added; `<chrono>` retained only for the memory-stats thread `condition_variable::wait_until` call
+- `OthelloLevelEnumerator` / `OLEMain`: progress table now reports four timing columns per level instead of one — `SlvTm(s)` (GPU solve phase), `MrgTm(s)` (merge phase), `Tm(s)` (total, unchanged), and `PredTm(s)` (predicted total for the **next** level, computed as `Tm(s) × newBoardsNet / boardsIn`); `LevelRecord` extended with `solveNs` and `mergeNs` fields; a second `ClockNanosSinceStart` call is made immediately after `PipelineRun` returns to capture the solve-phase boundary
+
 ## [OLE v0.2.1] - 2026-05-23
 
 ### Changed

@@ -15,6 +15,7 @@
 #include <psapi.h>
 #pragma comment(lib, "Psapi.lib")
 #include <Utility.h>
+#include <ClockTick.h>
 #include <SysMemInfo.h>
 #include <Mem.h>
 #include <OthelloBasics.h>
@@ -24,7 +25,7 @@
 #include "GPUPipeline.h"
 #include "MergePhase.h"
 
-#define APP_VERSION "0.2.1"
+#define APP_VERSION "0.2.2"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -65,6 +66,8 @@ struct LevelRecord
     uint64_t endBoards;       // terminal boards (both players have no legal moves)
     uint32_t maxMovesAny;     // max children generated for any single board this level
     long long elapsedNs;
+    long long solveNs;
+    long long mergeNs;
 };
 
 // ---------------------------------------------------------------------------
@@ -273,17 +276,21 @@ static void MergeMeta(char* buf, size_t sz, const char* dir, int level)
 
 static void PrintLevelHeader()
 {
-    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %10s  %s\n",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s  %s\n",
               "Lv", "BoardsIn", "NewBoards", "Pass", "GpuDups", "MrgDups",
-              "Mvs", "Ends", "MaxMv", "Tm(s)", "ns/brd", "DateTime");
-    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %10s  -------------------\n",
+              "Mvs", "Ends", "MaxMv", "SlvTm(s)", "MrgTm(s)", "Tm(s)", "PredTm(s)", "ns/brd", "DateTime");
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s  -------------------\n",
               "--", "--------", "---------", "----", "-------", "-------",
-              "---", "----", "-----", "-----", "------");
+              "---", "----", "-----", "--------", "--------", "-----", "---------", "------");
 }
 
 static void PrintLevelRow(const LevelRecord& r)
 {
+    double    slvSec   = (double)r.solveNs  / 1e9;
+    double    mrgSec   = (double)r.mergeNs  / 1e9;
     double    tmSec    = (double)r.elapsedNs / 1e9;
+    double    ratio    = (r.boardsIn > 0) ? (double)r.newBoardsNet / (double)r.boardsIn : 0.0;
+    double    predSec  = tmSec * ratio;
     long long nsPerBrd = (r.boardsIn > 0) ? r.elapsedNs / (long long)r.boardsIn : 0;
 
     time_t now = time(nullptr);
@@ -292,10 +299,10 @@ static void PrintLevelRow(const LevelRecord& r)
     char dtBuf[32];
     strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
 
-    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %10lld  %s\n",
+    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %11.3f %11.3f %11.3f %10lld  %s\n",
               r.level, r.boardsIn, r.newBoards, r.passBoards, r.gpuDups, r.mergeDups,
               r.totalMoves, r.endBoards, r.maxMovesAny,
-              tmSec, nsPerBrd, dtBuf);
+              slvSec, mrgSec, tmSec, predSec, nsPerBrd, dtBuf);
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +500,7 @@ int main(int argc, char* argv[])
     }
 
     // ---- BFS level loop ----
-    auto wallStart = std::chrono::high_resolution_clock::now();
+    ClockTick wallStart; ClockStart(&wallStart);
     int maxLevels  = (config.boardSize == 4) ? 13
                    : (config.boardSize == 6) ? 33 : 61;
     uint64_t  skippedBoards = 0;   // boards at skipped levels (for summary total)
@@ -517,7 +524,7 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        auto lvStart = std::chrono::high_resolution_clock::now();
+        ClockTick lvStart; ClockStart(&lvStart);
 
         // Solve phase: expand all boards in currentReg → solveReg.
         pipelineCfg.level = level;
@@ -528,6 +535,8 @@ int main(int argc, char* argv[])
             Error(FATAL_FILE_OPEN, "PipelineRun failed at level %d", level);
             break;
         }
+
+        long long solveNs = ClockNanosSinceStart(&lvStart);
 
         uint64_t solveUniqueBoards = stats.uniqueBoards;
 
@@ -549,8 +558,8 @@ int main(int argc, char* argv[])
         for (const OLEFileDesc& fd : solveReg.files)
             remove(fd.path);
 
-        auto lvEnd = std::chrono::high_resolution_clock::now();
-        long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(lvEnd - lvStart).count();
+        long long ns      = ClockNanosSinceStart(&lvStart);
+        long long mergeNs = ns - solveNs;
 
         uint64_t finalUnique = FRTotalRecords(&mergedReg);
         uint64_t mergeDups   = (solveUniqueBoards >= finalUnique)
@@ -568,6 +577,8 @@ int main(int argc, char* argv[])
         rec.endBoards    = stats.endBoards;
         rec.maxMovesAny  = stats.maxMovesAnyBoard;
         rec.elapsedNs    = ns;
+        rec.solveNs      = solveNs;
+        rec.mergeNs      = mergeNs;
         history.push_back(rec);
 
         PrintLevelRow(rec);
@@ -576,8 +587,7 @@ int main(int argc, char* argv[])
     }
 
     // ---- Final summary ----
-    auto wallEnd = std::chrono::high_resolution_clock::now();
-    long long wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
+    long long wallNs = ClockNanosSinceStart(&wallStart);
 
     uint64_t totalBoardsIn   = 0;
     uint64_t totalGpuDups    = 0;
