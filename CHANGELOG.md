@@ -1,5 +1,21 @@
 # Changelog
 
+## [OLE v0.2.0] - 2026-05-23
+
+### Fixed
+- `OthelloLevelEnumerator` / `OLEKernel`: replaced `BOARDKeyDecomposer` (24-element `uint8_t` CUB tuple decomposer on `BOARD`) with a three-pass primitive `uint64_t` CUB `DeviceRadixSort::SortPairs` approach — the decomposer caused CUB's histogram kernel to require 64 KB of shared memory (256 buckets × 64 threads × 4 bytes), exceeding CUB's 48 KB policy default on all SM versions including SM 8.9; the policy limit is internal to CUB and cannot be raised by changing the GPU target architecture; the new approach sorts LSB-first across three 8-byte fields (f2=bytes 16-23 first, f1, then f0=bytes 0-7 as MSB), using CUB's perfectly-tuned uint64_t radix-sort policies with no shared-memory overhead; a `uint32_t` index permutation is maintained alongside the sort so BOARDs stay in place in the accumulation buffer and are gathered in sorted order during D2H extraction; confirmed: 6×6 level 13 sorts ~71.8 M items in ~245 s (previously 30+ min under thrust comparison sort)
+
+### Changed
+- `OthelloLevelEnumerator` / `OLEKernel`: `OLEGpuBuffers` extended with `d_fieldA`/`d_fieldB` (`uint64_t*`, one per slot, shared scratch for the three sort passes) and restored `d_indicesA`/`d_indicesB` (`uint32_t*`, one per slot, for the index permutation); both arrays are shared between the two ping-pong buffers (only one sort runs at a time); per-slot VRAM cost: `2×sizeof(BOARD) + 2×sizeof(uint64_t) + 2×sizeof(uint32_t) + 2×sizeof(uint8_t)` = 154 bytes; yields ~104.5 M slots on an RTX 4080 SUPER (16 GB VRAM, 1 GB headroom)
+- `OthelloLevelEnumerator` / `OLEMain`: `accumBufSlots` formula updated from `vramAvail / (2×sizeof(BOARD))` to `vramAvail / 154` to account for all scratch arrays
+- `OthelloLevelEnumerator` / `MergePhase`: replaced all `memcmp`-based ordering comparisons with `BoardKeyCompare` (raw `uint64_t` field comparison, no bswap) — pivot sort in `ComputePivots`, file-range overlap checks, and k-way merge minimum selection; dedup equality check unchanged (memcmp equality is equivalent)
+- `OthelloLevelEnumerator` / `SortedFile`: `SFLowerBound` binary-search comparator updated from `memcmp` to `BoardKeyCompare` to match the GPU sort order; `cmpLen` local removed (unused after the change)
+- `OthelloLevelEnumerator` / `MarkDupFlagsKernel`: updated signature to accept the sorted index permutation (`const uint32_t* perm`); compares `boards[perm[i-1]]` vs `boards[perm[i]]` rather than adjacent array positions
+- `OthelloLevelEnumerator` / `ExtractUniqueBoards`: D2H-copies the boards, permutation, and dup flags; gathers unique boards on the CPU using the permutation (`outBoards[out++] = hAccum[hIndices[i]]` for `hFlags[i]==0`)
+
+### Fixed (minor)
+- `OthelloSolverCommandLine`: two resume-path GPU-device banner lines aligned with two extra spaces to match the fresh-run banner (`doRestartProcess`)
+
 ## [v2.5.4] - 2026-05-21
 
 ### Fixed

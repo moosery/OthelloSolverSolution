@@ -10,6 +10,7 @@
   <Project Path="OthelloBasics/OthelloBasics.vcxproj" Id="2cc52c70-80f3-4700-9e46-0f6b1c077667" />
   <Project Path="OthelloBasicsForCUDA/OthelloBasicsForCUDA.vcxproj" Id="375f3354-bf89-48cd-8405-d660fa4a3983" />
   <Project Path="OthelloEnumerator/OthelloEnumerator.vcxproj" Id="412972d8-f9f4-484c-a5bf-970ace32ee36" />
+  <Project Path="OthelloLevelEnumerator/OthelloLevelEnumerator.vcxproj" Id="fda7268a-0b6e-455c-9878-89e81509974e" />
   <Project Path="OthelloSolverCommandLine/OthelloSolverCommandLine.vcxproj" Id="5074bfae-6b02-442e-b799-2e262eb46810" />
   <Project Path="OthelloSolverCuda/OthelloSolverCuda.vcxproj">
     <Platform Project="x64" />

@@ -1,0 +1,625 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <ctime>
+#include <string>
+#include <vector>
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "Psapi.lib")
+#include <Utility.h>
+#include <SysMemInfo.h>
+#include <Mem.h>
+#include <OthelloBasics.h>
+#include "OLEKernel.h"
+#include "SortedFile.h"
+#include "FileRegistry.h"
+#include "GPUPipeline.h"
+#include "MergePhase.h"
+
+#define APP_VERSION "0.2.0"
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+typedef struct OLEConfig
+{
+    int         boardSize;
+    int         numRotations;
+    const char* outputDirs[4];    // [0]=primary (logs, meta); [1..3]=extra data dirs
+    int         numOutputDirs;
+    bool        restart;
+    MemoryMode  memMode;
+    uint64_t    specifiedMemBytes;
+
+    // Computed in main():
+    uint64_t    memBudgetBytes;           // free RAM × mode pct
+    uint64_t    mergeBufBytesPerThread;   // RAM budget / numMergeThreads
+    int         numMergeThreads;          // CPU threads for merge phase
+    size_t      accumBufSlots;            // BOARD slots per ping-pong buffer
+    int         batchSize;                // boards per GPU dispatch
+} OLEConfig, *POLEConfig;
+
+// ---------------------------------------------------------------------------
+// Per-level stats record
+// ---------------------------------------------------------------------------
+
+struct LevelRecord
+{
+    int      level;
+    uint64_t boardsIn;        // display: (unique boards read) + passBoards — matches CL BoardsIn
+    uint64_t newBoards;       // display: slotsExpanded (gross, before dedup) — matches CL NewBoards
+    uint64_t newBoardsNet;    // internal: unique boards after full dedup — for summary unique count
+    uint64_t passBoards;      // non-terminal pass boards (no moves, opponent has moves)
+    uint64_t gpuDups;         // dups caught by GPU sort+dedup (within each accum window)
+    uint64_t mergeDups;       // additional dups caught by merge-phase k-way merge (cross-window)
+    uint64_t totalMoves;      // display: slotsExpanded + passBoards — matches CL Mvs
+    uint64_t endBoards;       // terminal boards (both players have no legal moves)
+    uint32_t maxMovesAny;     // max children generated for any single board this level
+    long long elapsedNs;
+};
+
+// ---------------------------------------------------------------------------
+// Run log: mirrors all formatted console output to a persistent log file.
+// ---------------------------------------------------------------------------
+
+static FILE* g_logFile = nullptr;
+
+static void OpenLogFile(const char* outputDir)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char path[MAX_PATH];
+    snprintf(path, MAX_PATH, "%sole_run_%04d%02d%02d_%02d%02d%02d.log",
+             outputDir,
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
+    fopen_s(&g_logFile, path, "w");
+}
+
+static void CloseLogFile()
+{
+    if (g_logFile) { fclose(g_logFile); g_logFile = nullptr; }
+}
+
+static void LogPrintf(const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    if (g_logFile) {
+        va_start(args, fmt);
+        vfprintf(g_logFile, fmt, args);
+        va_end(args);
+        fflush(g_logFile);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory stats thread (same pattern as OthelloSolverCommandLine)
+// ---------------------------------------------------------------------------
+
+static std::thread             g_memStatsThread;
+static std::atomic<bool>       g_memStatsStop{false};
+static std::mutex              g_memStatsMtx;
+static std::condition_variable g_memStatsCV;
+
+static void MemStatsThreadFn(std::string logPath)
+{
+    FILE* f = nullptr;
+    fopen_s(&f, logPath.c_str(), "w");
+    if (!f) return;
+
+    fprintf(f, "%-19s  %14s  %14s  %14s\n",
+            "DateTime", "WorkSet(GB)", "Commit(GB)", "SysFree(GB)");
+    fflush(f);
+
+    while (true)
+    {
+        auto wakeAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        {
+            std::unique_lock<std::mutex> lk(g_memStatsMtx);
+            g_memStatsCV.wait_until(lk, wakeAt, [] { return g_memStatsStop.load(); });
+        }
+        if (g_memStatsStop.load()) break;
+
+        PROCESS_MEMORY_COUNTERS_EX pmc = {};
+        pmc.cb = sizeof(pmc);
+        GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc));
+
+        MEMORYSTATUSEX ms = {};
+        ms.dwLength = sizeof(ms);
+        GlobalMemoryStatusEx(&ms);
+
+        time_t now = time(nullptr);
+        struct tm tmNow;
+        localtime_s(&tmNow, &now);
+        char tbuf[32];
+        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+
+        double workGB = (double)pmc.WorkingSetSize / (1024.0 * 1024 * 1024);
+        double commGB = (double)pmc.PrivateUsage   / (1024.0 * 1024 * 1024);
+        double freeGB = (double)ms.ullAvailPhys    / (1024.0 * 1024 * 1024);
+
+        fprintf(f, "%-19s  %14.3f  %14.3f  %14.3f\n", tbuf, workGB, commGB, freeGB);
+        fflush(f);
+    }
+    fclose(f);
+}
+
+static void StartMemStatsThread(const char* outputDir)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char logPath[MAX_PATH];
+    snprintf(logPath, MAX_PATH, "%smemory_stats_%04d%02d%02d_%02d%02d%02d.log",
+             outputDir,
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
+    g_memStatsStop.store(false);
+    g_memStatsThread = std::thread(MemStatsThreadFn, std::string(logPath));
+}
+
+static void StopMemStatsThread()
+{
+    g_memStatsStop.store(true);
+    g_memStatsCV.notify_all();
+    if (g_memStatsThread.joinable())
+        g_memStatsThread.join();
+}
+
+// ---------------------------------------------------------------------------
+// Arg parsing
+// ---------------------------------------------------------------------------
+
+static void usage()
+{
+    printf("OthelloLevelEnumerator v%s\n", APP_VERSION);
+    printf("Usage: OthelloLevelEnumerator [options]\n");
+    printf("  --board-size <N>             Board size: 4, 6, or 8 (default=6)\n");
+    printf("  --rotations <N>              Symmetry rotations: 1, 4, 8, or 16 (default=16)\n");
+    printf("  --output-dir <dir>           Primary output directory (default=D:\\OLEDataDir\\)\n");
+    printf("  --output-dir2 <dir>          Extra data directory (drive 2)\n");
+    printf("  --output-dir3 <dir>          Extra data directory (drive 3)\n");
+    printf("  --output-dir4 <dir>          Extra data directory (drive 4)\n");
+    printf("  --restart                    Resume the most recent run\n");
+    printf("Memory options (default: --use-recommended-memory):\n");
+    printf("  --use-max-memory             Use ~95%% of available RAM for merge buffers\n");
+    printf("  --use-recommended-memory     Use ~75%% of available RAM (default)\n");
+    printf("  --max-memory <size>          Use specified amount (e.g. 34GB, 16000MB)\n");
+}
+
+static void processArgs(int argc, char* argv[], POLEConfig cfg)
+{
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "help") == 0 || strcmp(argv[i], "--help") == 0)
+        {
+            usage(); exit(0);
+        }
+        else if (strcmp(argv[i], "--board-size") == 0 && i + 1 < argc)
+        {
+            cfg->boardSize = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--rotations") == 0 && i + 1 < argc)
+        {
+            cfg->numRotations = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--output-dir") == 0 && i + 1 < argc)
+        {
+            cfg->outputDirs[0] = argv[++i];
+        }
+        else if (strcmp(argv[i], "--output-dir2") == 0 && i + 1 < argc)
+        {
+            cfg->outputDirs[1] = argv[++i];
+            if (cfg->numOutputDirs < 2) cfg->numOutputDirs = 2;
+        }
+        else if (strcmp(argv[i], "--output-dir3") == 0 && i + 1 < argc)
+        {
+            cfg->outputDirs[2] = argv[++i];
+            if (cfg->numOutputDirs < 3) cfg->numOutputDirs = 3;
+        }
+        else if (strcmp(argv[i], "--output-dir4") == 0 && i + 1 < argc)
+        {
+            cfg->outputDirs[3] = argv[++i];
+            if (cfg->numOutputDirs < 4) cfg->numOutputDirs = 4;
+        }
+        else if (strcmp(argv[i], "--restart") == 0)
+        {
+            cfg->restart = true;
+        }
+        else if (strcmp(argv[i], "--use-max-memory") == 0)
+        {
+            cfg->memMode = MM_USE_MAX;
+        }
+        else if (strcmp(argv[i], "--use-recommended-memory") == 0)
+        {
+            cfg->memMode = MM_RECOMMENDED;
+        }
+        else if (strcmp(argv[i], "--max-memory") == 0 && i + 1 < argc)
+        {
+            cfg->memMode           = MM_SPECIFIED;
+            cfg->specifiedMemBytes = ParseMemorySize(argv[++i]);
+        }
+        else
+        {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            usage(); exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Meta file path helpers
+// ---------------------------------------------------------------------------
+
+static void MergeMeta(char* buf, size_t sz, const char* dir, int level)
+{
+    snprintf(buf, sz, "%sole_merge_level%02d.meta", dir, level);
+}
+
+// ---------------------------------------------------------------------------
+// Level table printing
+// ---------------------------------------------------------------------------
+
+static void PrintLevelHeader()
+{
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %10s  %s\n",
+              "Lv", "BoardsIn", "NewBoards", "Pass", "GpuDups", "MrgDups",
+              "Mvs", "Ends", "MaxMv", "Tm(s)", "ns/brd", "DateTime");
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %10s  -------------------\n",
+              "--", "--------", "---------", "----", "-------", "-------",
+              "---", "----", "-----", "-----", "------");
+}
+
+static void PrintLevelRow(const LevelRecord& r)
+{
+    double    tmSec    = (double)r.elapsedNs / 1e9;
+    long long nsPerBrd = (r.boardsIn > 0) ? r.elapsedNs / (long long)r.boardsIn : 0;
+
+    time_t now = time(nullptr);
+    struct tm tmNow;
+    localtime_s(&tmNow, &now);
+    char dtBuf[32];
+    strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+
+    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %10lld  %s\n",
+              r.level, r.boardsIn, r.newBoards, r.passBoards, r.gpuDups, r.mergeDups,
+              r.totalMoves, r.endBoards, r.maxMovesAny,
+              tmSec, nsPerBrd, dtBuf);
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+int main(int argc, char* argv[])
+{
+    // ---- GPU query ----
+    GpuDeviceInfo gpuInfo = QueryGpuDevice();
+
+    // ---- Default config ----
+    OLEConfig config = {};
+    config.boardSize         = 6;
+    config.numRotations      = 16;
+    config.outputDirs[0]     = "D:\\OLEDataDir\\";
+    config.outputDirs[1]     = "D:\\OLEDataDir2\\";
+    config.outputDirs[2]     = "D:\\OLEDataDir3\\";
+    config.outputDirs[3]     = "D:\\OLEDataDir4\\";
+    config.numOutputDirs     = 4;
+    config.restart           = false;
+    config.memMode           = MM_RECOMMENDED;
+    config.specifiedMemBytes = 0;
+
+    if (argc > 1)
+        processArgs(argc, argv, &config);
+
+    // ---- CPU core detection → merge thread count ----
+    int totalCores = (int)std::thread::hardware_concurrency();
+    if (totalCores < 1) totalCores = 1;
+    // Reserve: 1 GPU thread + 1 reader thread + 1 OS headroom.
+    int remaining = totalCores - 3;
+    config.numMergeThreads = (remaining >= config.numOutputDirs) ? config.numOutputDirs
+                           : (remaining > 1 ? remaining : 1);
+
+    // ---- Memory budget ----
+    {
+        uint64_t budget = CalcMemoryBudget(config.memMode, config.specifiedMemBytes);
+        config.memBudgetBytes = budget;
+        // Solve phase: GPU holds both ping-pong buffers; RAM mostly free.
+        // Merge phase: GPU idle; full RAM budget goes to I/O buffers.
+        static constexpr uint64_t k_overhead = 2ULL * 1024 * 1024 * 1024; // 2 GB OS headroom
+        uint64_t mergeTotal = (budget > k_overhead) ? budget - k_overhead : budget / 2;
+        config.mergeBufBytesPerThread = mergeTotal / (uint64_t)config.numMergeThreads;
+    }
+
+    // ---- GPU buffer sizing ----
+    {
+        // Reserve ~1 GB for CUDA runtime and driver overhead.
+        static constexpr size_t k_gpuOverhead = 1ULL * 1024 * 1024 * 1024;
+        size_t vramAvail = (gpuInfo.totalGlobalMemBytes > k_gpuOverhead)
+                         ? gpuInfo.totalGlobalMemBytes - k_gpuOverhead
+                         : gpuInfo.totalGlobalMemBytes / 2;
+        // Divide VRAM across all buffer arrays: accum A+B, field A+B, indices A+B, flags A+B.
+        static constexpr size_t kBytesPerSlot =
+            2 * sizeof(BOARD) + 2 * sizeof(uint64_t) + 2 * sizeof(uint32_t) + 2 * sizeof(uint8_t);
+        config.accumBufSlots  = vramAvail / kBytesPerSlot;
+        config.batchSize      = gpuInfo.optimalBatchSize;
+    }
+
+    // ---- Compute timestamped run directories ----
+    // Each user-specified dir is a root; actual data lives under
+    // <root>\<YYYY_MM_DD.HH_MM_SS>\BoardSize<N>x<N>\  (same convention as CL solver).
+    char runDirs[4][MAX_PATH];
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char suffix[80];
+        snprintf(suffix, sizeof(suffix),
+                 "%04d_%02d_%02d.%02d_%02d_%02d\\BoardSize%dx%d\\",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                 config.boardSize, config.boardSize);
+        for (int i = 0; i < config.numOutputDirs; i++) {
+            snprintf(runDirs[i], MAX_PATH, "%s%s", config.outputDirs[i], suffix);
+            config.outputDirs[i] = runDirs[i];
+        }
+    }
+
+    // ---- Create all run directories ----
+    for (int i = 0; i < config.numOutputDirs; i++)
+    {
+        if (!CreateFullPath(config.outputDirs[i]))
+            Fatal(UTIL_RC_Could_Not_Create_Directory,
+                  "Cannot create output directory: %s", config.outputDirs[i]);
+    }
+
+    // ---- Initialize board-size globals (must precede any BOARD operation) ----
+    SetBoardSizeForRun(config.boardSize);
+
+    // ---- Open run log (mirrors all console output) ----
+    OpenLogFile(config.outputDirs[0]);
+
+    // ---- Print startup banner ----
+    {
+        MEMORYSTATUSEX ms = {};
+        ms.dwLength = sizeof(ms);
+        GlobalMemoryStatusEx(&ms);
+        double freeGB      = (double)ms.ullAvailPhys                / (1024.0*1024*1024);
+        double budgetGB    = (double)config.memBudgetBytes           / (1024.0*1024*1024);
+        double perThreadGB = (double)config.mergeBufBytesPerThread   / (1024.0*1024*1024);
+        double accumGB     = (double)(config.accumBufSlots * sizeof(BOARD)) / (1024.0*1024*1024);
+        double vramGB      = (double)gpuInfo.totalGlobalMemBytes     / (1024.0*1024*1024);
+        int    l2KB        = gpuInfo.l2CacheSizeBytes / 1024;
+
+        LogPrintf("OthelloLevelEnumerator v%s starting\n", APP_VERSION);
+        LogPrintf("  Board Size:    %dx%d\n",  config.boardSize, config.boardSize);
+        LogPrintf("  Num Rotations: %d\n",     config.numRotations);
+        LogPrintf("  Output Dir:    %s\n",     config.outputDirs[0]);
+        for (int i = 1; i < config.numOutputDirs; i++)
+            LogPrintf("  Data Dir %d:    %s\n", i + 1, config.outputDirs[i]);
+        LogPrintf("  Memory:        %.1f GB free -> %.1f GB budget\n", freeGB, budgetGB);
+        LogPrintf("                 %.1f GB/merge-thread  (%d merge threads)\n",
+                  perThreadGB, config.numMergeThreads);
+        LogPrintf("  GPU Device:    %s (compute %d.%d)\n",
+                  gpuInfo.name, gpuInfo.computeCapabilityMajor, gpuInfo.computeCapabilityMinor);
+        LogPrintf("                 %d SMs x %d threads/SM  |  %d async copy engines\n",
+                  gpuInfo.smCount, gpuInfo.maxThreadsPerSM, gpuInfo.asyncEngineCount);
+        LogPrintf("                 L2 = %d KB  |  VRAM = %.1f GB\n", l2KB, vramGB);
+        LogPrintf("  Accum Buffer:  %.1f GB x2  (%zu slots each)\n",
+                  accumGB, config.accumBufSlots);
+        LogPrintf("  Batch Size:    %d\n",     config.batchSize);
+        LogPrintf("  Merge Threads: %d\n",     config.numMergeThreads);
+        LogPrintf("\n");
+    }
+
+    // ---- Start memory stats thread ----
+    StartMemStatsThread(config.outputDirs[0]);
+
+    // ---- Thread pool for merge phase ----
+    ThreadPool mergePool(config.numMergeThreads, "OLEMerge");
+    mergePool.Start();
+
+    // ---- Pipeline config (reused every level) ----
+    OLEPipelineConfig pipelineCfg = {};
+    pipelineCfg.boardSize        = config.boardSize;
+    pipelineCfg.numRotations     = config.numRotations;
+    pipelineCfg.batchSize        = config.batchSize;
+    pipelineCfg.accumBufSlots    = config.accumBufSlots;
+    pipelineCfg.writerBufBytes   = 256ULL * 1024 * 1024;  // 256 MB writer buffer per thread
+    pipelineCfg.numWriterThreads = (config.numMergeThreads > 2) ? 2 : 1;
+    pipelineCfg.outputDirs       = config.outputDirs;
+    pipelineCfg.numOutputDirs    = config.numOutputDirs;
+
+    // ---- Level records ----
+    std::vector<LevelRecord> history;
+
+    // ---- DateTime at start ----
+    {
+        time_t now = time(nullptr);
+        struct tm tmNow;
+        localtime_s(&tmNow, &now);
+        char dtBuf[32];
+        strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
+        LogPrintf("  Started:       %s\n\n", dtBuf);
+    }
+
+    // ---- Print level table header ----
+    LogPrintf("  Column key:\n");
+    LogPrintf("    BoardsIn[N]  = (NewBoards[N-1] - GpuDups[N-1] - MrgDups[N-1]) + Pass[N]\n");
+    LogPrintf("    Pass[N]      = pass moves at level N (current player has no legal moves; opponent does)\n");
+    LogPrintf("    Mvs[N]       = NewBoards[N] + Pass[N]  (all moves generated)\n");
+    LogPrintf("    NewBoards[N] = gross boards generated at level N+1 (before any dedup)\n");
+    LogPrintf("    GpuDups[N]   = dups caught by GPU sort+dedup within each accumulation window\n");
+    LogPrintf("    MrgDups[N]   = additional dups caught by merge-phase k-way merge (cross-window)\n\n");
+    PrintLevelHeader();
+
+    // ---- Seed: level 0 contains only the starting board ----
+    OLEFileRegistry currentReg = {};
+
+    if (config.restart)
+    {
+        // TODO: implement resume — scan for deepest completed merge meta.
+        LogPrintf("  [restart not yet implemented — starting fresh]\n\n");
+    }
+
+    if (currentReg.files.empty())
+    {
+        PBOARD pRoot = BoardAllocateFirstBoard();
+        if (!pRoot) Fatal(FATAL_ALLOCATION_FAILED, "BoardAllocateFirstBoard failed");
+        BOARD root = *pRoot;
+        MemFree(pRoot);
+
+        char seedPath[MAX_PATH];
+        snprintf(seedPath, MAX_PATH, "%sole_level00_seed.sf", config.outputDirs[0]);
+
+        if (!SFWrite(seedPath, &root, 1, sizeof(BOARD), 24, 64ULL * 1024 * 1024))
+            Fatal(FATAL_FILE_OPEN, "Failed to write seed file: %s", seedPath);
+        OLEFileDesc d = {};
+        strncpy_s(d.path, seedPath, sizeof(d.path) - 1);
+        d.drive       = 0;
+        d.recordCount = 1;
+        memcpy(d.minKey, &root, 24);
+        memcpy(d.maxKey, &root, 24);
+        FRRegister(&currentReg, d);
+    }
+
+    // ---- BFS level loop ----
+    auto wallStart = std::chrono::high_resolution_clock::now();
+    int maxLevels  = (config.boardSize == 4) ? 13
+                   : (config.boardSize == 6) ? 33 : 61;
+    uint64_t  skippedBoards = 0;   // boards at skipped levels (for summary total)
+    int       skippedLevels = 0;
+
+    for (int level = 0; level < maxLevels; level++)
+    {
+        if (currentReg.files.empty()) break;
+
+        // Resume check: skip if merged output already exists.
+        char mergeMeta[MAX_PATH];
+        MergeMeta(mergeMeta, sizeof(mergeMeta), config.outputDirs[0], level);
+        OLEFileRegistry mergedReg = {};
+        if (FRLoad(&mergedReg, mergeMeta) && !mergedReg.files.empty())
+        {
+            uint64_t n = FRTotalRecords(&mergedReg);
+            LogPrintf("  Level %2d: skipped (already complete, %llu boards)\n", level, n);
+            skippedBoards += n;
+            skippedLevels++;
+            currentReg.files = std::move(mergedReg.files);
+            continue;
+        }
+
+        auto lvStart = std::chrono::high_resolution_clock::now();
+
+        // Solve phase: expand all boards in currentReg → solveReg.
+        pipelineCfg.level = level;
+        OLEFileRegistry  solveReg = {};
+        OLEPipelineStats stats    = {};
+        if (!PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool))
+        {
+            Error(FATAL_FILE_OPEN, "PipelineRun failed at level %d", level);
+            break;
+        }
+
+        uint64_t solveUniqueBoards = stats.uniqueBoards;
+
+        // Merge phase: consolidate solveReg → mergedReg (fully deduped, one file per drive).
+        FRClear(&mergedReg);
+        if (!MergePhaseRun(&solveReg, &mergedReg,
+                           config.outputDirs, config.numOutputDirs,
+                           level, sizeof(BOARD), 24,
+                           config.mergeBufBytesPerThread, &mergePool))
+        {
+            Error(FATAL_FILE_OPEN, "MergePhaseRun failed at level %d", level);
+            break;
+        }
+
+        // Checkpoint: persist merged registry.
+        FRSave(&mergedReg, mergeMeta);
+
+        auto lvEnd = std::chrono::high_resolution_clock::now();
+        long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(lvEnd - lvStart).count();
+
+        uint64_t finalUnique = FRTotalRecords(&mergedReg);
+        uint64_t mergeDups   = (solveUniqueBoards >= finalUnique)
+                             ? solveUniqueBoards - finalUnique : 0;
+
+        LevelRecord rec = {};
+        rec.level        = level;
+        rec.boardsIn     = stats.boardsIn + stats.passBoards;   // matches CL BoardsIn
+        rec.newBoards    = stats.slotsExpanded;                 // gross, matches CL NewBoards
+        rec.newBoardsNet = finalUnique;                         // net unique, for summary
+        rec.passBoards   = stats.passBoards;
+        rec.gpuDups      = stats.dupBoards;
+        rec.mergeDups    = mergeDups;
+        rec.totalMoves   = stats.slotsExpanded + stats.passBoards; // matches CL Mvs
+        rec.endBoards    = stats.endBoards;
+        rec.maxMovesAny  = stats.maxMovesAnyBoard;
+        rec.elapsedNs    = ns;
+        history.push_back(rec);
+
+        PrintLevelRow(rec);
+
+        currentReg.files = std::move(mergedReg.files);
+    }
+
+    // ---- Final summary ----
+    auto wallEnd = std::chrono::high_resolution_clock::now();
+    long long wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
+
+    uint64_t totalBoardsIn   = 0;
+    uint64_t totalGpuDups    = 0;
+    uint64_t totalMrgDups    = 0;
+    uint64_t totalNetBoards  = 0;   // sum of net unique boards per level (for unique count)
+    uint64_t totalPassBoards = 0;
+    uint64_t totalEndBoards  = 0;
+    uint64_t totalMvs        = 0;
+    int      levelsCompleted = 0;
+    for (const LevelRecord& r : history)
+    {
+        totalBoardsIn   += r.boardsIn;       // already includes pass boards (display value)
+        totalGpuDups    += r.gpuDups;
+        totalMrgDups    += r.mergeDups;
+        totalNetBoards  += r.newBoardsNet;   // net unique per level
+        totalPassBoards += r.passBoards;
+        totalEndBoards  += r.endBoards;
+        totalMvs        += r.totalMoves;
+        levelsCompleted++;
+    }
+    long long brdsPerSec = (wallNs > 0)
+        ? (long long)((double)totalBoardsIn * 1e9 / (double)wallNs) : 0;
+
+    // Unique boards = seed (level 0) + net unique from every processed level
+    // + net unique boards at every skipped level (resumed from a prior run).
+    uint64_t totalUniqueBoards = 1 + totalNetBoards + skippedBoards;
+
+    LogPrintf("\n");
+    LogPrintf("----------------------------------------------------------------------\n");
+    LogPrintf("Wall clock:           %.1f s\n",  (double)wallNs / 1e9);
+    LogPrintf("Levels completed:     %d\n",       levelsCompleted + skippedLevels);
+    LogPrintf("Total unique boards:  %llu\n",     totalUniqueBoards);
+    LogPrintf("Boards processed:     %llu\n",     totalBoardsIn);
+    LogPrintf("Pass boards folded:   %llu\n",     totalPassBoards);
+    LogPrintf("Terminal boards:      %llu\n",     totalEndBoards);
+    LogPrintf("Total moves expanded: %llu\n",     totalMvs);
+    LogPrintf("GPU dups caught:      %llu\n",     totalGpuDups);
+    LogPrintf("Merge dups caught:    %llu\n",     totalMrgDups);
+    LogPrintf("Boards/sec:           %lld\n",     brdsPerSec);
+    LogPrintf("\n");
+    LogPrintf("  Note: win/loss/tie counts require a retrograde solve pass\n");
+    LogPrintf("        (planned as a future phase on top of these BFS results).\n");
+    LogPrintf("----------------------------------------------------------------------\n");
+
+    mergePool.Stop();
+    StopMemStatsThread();
+    CloseLogFile();
+    return 0;
+}

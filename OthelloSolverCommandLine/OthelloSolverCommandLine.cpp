@@ -1203,9 +1203,9 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
     OpenBoardStore(resumeFromLevel);
 
     LogPrintf("  GPU Device:    %s (compute %d.%d)\n", gpuInfo.name, gpuInfo.computeCapabilityMajor, gpuInfo.computeCapabilityMinor);
-    LogPrintf("               %d SMs x %d threads/SM  |  %d async copy engines\n",
+    LogPrintf("                 %d SMs x %d threads/SM  |  %d async copy engines\n",
               gpuInfo.smCount, gpuInfo.maxThreadsPerSM, gpuInfo.asyncEngineCount);
-    LogPrintf("               L2 = %d KB  |  VRAM = %.1f GB\n",
+    LogPrintf("                 L2 = %d KB  |  VRAM = %.1f GB\n",
               gpuInfo.l2CacheSizeBytes / 1024, (double)gpuInfo.totalGlobalMemBytes / (1024.0*1024*1024));
     LogPrintf("  Batch Size:    %d\n",  gpuInfo.optimalBatchSize);
     LogPrintf("  Workers:       %d  (GPU recommended: %d)\n", pConfig->numThreads, gpuInfo.recommendedWorkerCount);
