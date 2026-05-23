@@ -24,7 +24,7 @@
 #include "GPUPipeline.h"
 #include "MergePhase.h"
 
-#define APP_VERSION "0.2.0"
+#define APP_VERSION "0.2.1"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -544,6 +544,10 @@ int main(int argc, char* argv[])
 
         // Checkpoint: persist merged registry.
         FRSave(&mergedReg, mergeMeta);
+
+        // Delete intermediate solve files — merge files are now the canonical set.
+        for (const OLEFileDesc& fd : solveReg.files)
+            remove(fd.path);
 
         auto lvEnd = std::chrono::high_resolution_clock::now();
         long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(lvEnd - lvStart).count();

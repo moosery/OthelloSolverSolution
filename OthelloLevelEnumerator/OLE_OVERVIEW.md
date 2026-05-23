@@ -140,8 +140,8 @@ round-robin order so reads and writes hit multiple NVMe drives in parallel.
 Example names: `ole_solve_L12_000003.sf`, `ole_solve_L13_000017.sf`
 
 **These files are intermediate.**  Once the merge phase for that level finishes,
-they are no longer needed.  The current version keeps them on disk — they are
-never automatically deleted.
+OLE deletes them automatically.  If a deletion fails for any reason the run
+continues — the files can be cleaned up by hand.
 
 ### Merge files — `ole_merge_L{NN}_D{N}.sf`
 
@@ -163,12 +163,12 @@ Example name: `ole_merge_level12.meta`
 
 ### Disk space
 
-The files are large.  At level 13 of a 6×6 run there are roughly 1.2 billion
-unique board positions, each stored as 64 bytes — around 77 GB for the merge
-files alone, plus roughly 20–30% more for the intermediate solve files that are
-still sitting there.  The solve files for completed levels can safely be deleted
-by hand once a run finishes (or between runs), but OLE does not do this
-automatically.  The merge files must be kept as long as you want resume to work.
+The merge files are large.  At level 13 of a 6×6 run there are roughly
+1.2 billion unique board positions, each stored as 64 bytes — around 77 GB
+for that level's merge files alone.  The intermediate solve files are
+automatically deleted as soon as each level's merge phase completes, so they
+do not accumulate.  The merge files must be kept as long as you want resume
+to work.
 
 ---
 

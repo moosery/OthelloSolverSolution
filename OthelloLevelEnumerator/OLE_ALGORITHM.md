@@ -284,9 +284,9 @@ output directories — `drive = flushIndex % numOutputDirs`.  This spreads I/O
 across all NVMe drives simultaneously.
 
 **Lifecycle:** These files are the sole input to the merge phase.  Once the
-merge for that level completes they are no longer referenced by OLE and can
-be safely deleted by hand to recover disk space.  **OLE never deletes them
-automatically.**
+merge for that level completes and the checkpoint is written, OLE deletes
+them via `remove()` on every path in `solveReg`.  Deletion failures are
+silently ignored (run continues; files can be cleaned up by hand).
 
 ### Merge files
 
@@ -340,8 +340,8 @@ At level 13 of a 6×6 run that is roughly:
 - Solve files: ~1.44 B boards × 64 B ≈ 92 GB (spread across drives)
 - Merge files: ~1.21 B boards × 64 B ≈ 77 GB (one partition per drive)
 
-Solve files from completed levels can be deleted once the run finishes to
-recover approximately 20–25% extra disk space relative to the merge files alone.
+Solve files are deleted automatically after each level's merge completes, so
+only the merge files accumulate on disk.
 
 ## FileRegistry and Checkpoint/Resume
 

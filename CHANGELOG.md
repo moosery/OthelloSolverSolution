@@ -1,5 +1,14 @@
 # Changelog
 
+## [OLE v0.2.1] - 2026-05-23
+
+### Changed
+- `OthelloLevelEnumerator` / `OLEMain`: solve files are now deleted automatically
+  after each level's merge phase completes and the checkpoint is written —
+  `remove()` is called on every path in `solveReg`; failures are silently ignored
+  so the run continues even if a file is locked or already gone; previously these
+  intermediate files accumulated on disk for the entire run
+
 ## [OLE v0.2.0] - 2026-05-23
 
 ### Fixed
