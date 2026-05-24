@@ -7,6 +7,7 @@
 - `OthelloLevelEnumerator` / `MergePhase`: fixed short-circuit evaluation bug in `MergePhaseRun` — the loop `for (auto& f : futures) allOk = allOk && f.get()` would skip `.get()` calls on later futures once one returned false, leaving those thread-pool tasks potentially still running while `srcFiles` (captured by reference) went out of scope; changed to `{ bool ok = f.get(); allOk = allOk && ok; }` so all futures are always waited on before the function returns
 - `OthelloLevelEnumerator` / `OLEMain`: merge and pipeline failures now emit a visible `LogPrintf` line to the log file in addition to going to stderr; previously a failure exited the BFS loop silently with no log entry
 - `OthelloLevelEnumerator` / `OLEMain`: added `_setmaxstdio(2048)` at startup to raise the CRT per-process file-handle limit from the default 512 to 2048, preventing `fopen_s` failures when merge phases open large numbers of source files simultaneously at deep BFS levels
+- `OthelloLevelEnumerator` / `MergePhase`: replaced `strerror` with `strerror_s` (local `char eb[64]` buffer) at all four errno-reporting sites to resolve MSVC C4996 deprecation errors
 
 ## [OLE v0.2.2] - 2026-05-23
 
