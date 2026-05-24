@@ -1,5 +1,12 @@
 # Changelog
 
+## [OLE v0.2.4] - 2026-05-24
+
+### Fixed
+- `OthelloLevelEnumerator` / `GPUPipeline`: `SFWrite` failure in `FlushBuffer` now captures `errno`, embeds `strerror_s` in the error message, and calls `ErrorPrint(stderr)` — previously the only error path that caused `PipelineRun` to return false was completely silent, making the level 16 failure impossible to diagnose
+- `OthelloLevelEnumerator` / `GPUPipeline`: `SFReaderOpen` failure now prints via `ErrorPrint(stderr)` and sets `ok = false; break` instead of silently `continue`-ing — skipping an input file would have produced silently incomplete results
+- `OthelloLevelEnumerator` / `GPUPipeline`: `recordSize` mismatch error now prints via `ErrorPrint(stderr)` and fails instead of silently `continue`-ing
+
 ## [OLE v0.2.3] - 2026-05-23
 
 ### Fixed

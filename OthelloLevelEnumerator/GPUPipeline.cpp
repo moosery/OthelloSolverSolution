@@ -64,7 +64,9 @@ static bool FlushBuffer(
     if (!SFWrite(path, hostBoards.data(), (uint64_t)got,
                  sizeof(BOARD), 24, cfg->writerBufBytes))
     {
-        Error(FATAL_FILE_OPEN, "GPUPipeline: SFWrite failed: %s", path);
+        int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+        Error(FATAL_FILE_OPEN, "GPUPipeline: SFWrite failed: %s (errno=%d: %s)", path, e, eb);
+        ErrorPrint(stderr);
         return false;
     }
 
@@ -137,8 +139,10 @@ bool PipelineRun(
         SortedFileReader* reader = SFReaderOpen(fd.path, 64ULL * 1024 * 1024);
         if (!reader)
         {
-            Error(FATAL_FILE_OPEN, "GPUPipeline: SFReaderOpen failed: %s", fd.path);
-            continue;
+            int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+            Error(FATAL_FILE_OPEN, "GPUPipeline: SFReaderOpen failed: %s (errno=%d: %s)", fd.path, e, eb);
+            ErrorPrint(stderr);
+            ok = false; break;
         }
 
         const SortedFileHeader* hdr = SFReaderHeader(reader);
@@ -146,8 +150,9 @@ bool PipelineRun(
         {
             Error(FATAL_READ_FAILED, "GPUPipeline: unexpected recordSize %u in %s",
                   hdr->recordSize, fd.path);
+            ErrorPrint(stderr);
             SFReaderClose(&reader);
-            continue;
+            ok = false; break;
         }
 
         while (ok)

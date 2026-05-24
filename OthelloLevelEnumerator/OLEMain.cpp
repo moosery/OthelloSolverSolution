@@ -25,7 +25,7 @@
 #include "GPUPipeline.h"
 #include "MergePhase.h"
 
-#define APP_VERSION "0.2.3"
+#define APP_VERSION "0.2.4"
 
 // ---------------------------------------------------------------------------
 // Configuration
