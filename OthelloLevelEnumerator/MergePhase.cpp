@@ -93,13 +93,13 @@ static bool RunMergePartition(
         if (BoardKeyCompare(fd->minKey, pivotHi.data()) >= 0) continue;
 
         SortedFileReader* r = SFReaderOpen(fd->path, 256ULL * 1024);
-        if (!r) { Error(FATAL_FILE_OPEN, "MergePhase: SFReaderOpen failed: %s", fd->path); return false; }
+        if (!r) { int e = errno; Error(FATAL_FILE_OPEN, "MergePhase: SFReaderOpen failed: %s (errno=%d: %s)", fd->path, e, strerror(e)); ErrorPrint(stderr); return false; }
 
         uint64_t lo = SFLowerBound(r, pivotLo.data(), keySize);
         uint64_t hi = SFLowerBound(r, pivotHi.data(), keySize);
         if (lo >= hi) { SFReaderClose(&r); continue; }
 
-        if (!SFReaderSeek(r, lo)) { SFReaderClose(&r); Error(FATAL_SEEK_FAILED, "MergePhase: SFReaderSeek failed: %s", fd->path); return false; }
+        if (!SFReaderSeek(r, lo)) { SFReaderClose(&r); int e = errno; Error(FATAL_SEEK_FAILED, "MergePhase: SFReaderSeek failed: %s (errno=%d: %s)", fd->path, e, strerror(e)); ErrorPrint(stderr); return false; }
 
         SourceState s;
         s.reader    = r;
@@ -125,8 +125,10 @@ static bool RunMergePartition(
              outputDir, level, partIdx);
     FILE* outFile = nullptr;
     if (fopen_s(&outFile, outPath, "wb") != 0 || !outFile) {
+        int e = errno;
         for (auto& s : sources) SFReaderClose(&s.reader);
-        Error(FATAL_FILE_OPEN, "MergePhase: cannot open output file: %s", outPath);
+        Error(FATAL_FILE_OPEN, "MergePhase: cannot open output file: %s (errno=%d: %s)", outPath, e, strerror(e));
+        ErrorPrint(stderr);
         return false;
     }
 
@@ -213,9 +215,10 @@ static bool RunMergePartition(
         ok = (_fseeki64(outFile, 0, SEEK_SET) == 0) &&
              (fwrite(&hdr, sizeof(hdr), 1, outFile) == 1);
     }
+    int lastErrno = ok ? 0 : errno;
     fclose(outFile);
 
-    if (!ok) { Error(FATAL_FILE_OPEN, "MergePhase: write failed: %s", outPath); return false; }
+    if (!ok) { Error(FATAL_FILE_OPEN, "MergePhase: write failed: %s (errno=%d: %s)", outPath, lastErrno, strerror(lastErrno)); ErrorPrint(stderr); return false; }
     if (written == 0) return true;
 
     OLEFileDesc desc = {};
@@ -283,6 +286,6 @@ bool MergePhaseRun(
     }
 
     bool allOk = true;
-    for (auto& f : futures) allOk = allOk && f.get();
+    for (auto& f : futures) { bool ok = f.get(); allOk = allOk && ok; }
     return allOk;
 }

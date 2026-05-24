@@ -25,7 +25,7 @@
 #include "GPUPipeline.h"
 #include "MergePhase.h"
 
-#define APP_VERSION "0.2.2"
+#define APP_VERSION "0.2.3"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -313,6 +313,7 @@ int main(int argc, char* argv[])
 {
     // ---- GPU query ----
     GpuDeviceInfo gpuInfo = QueryGpuDevice();
+    _setmaxstdio(2048);
 
     // ---- Default config ----
     OLEConfig config = {};
@@ -532,7 +533,7 @@ int main(int argc, char* argv[])
         OLEPipelineStats stats    = {};
         if (!PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool))
         {
-            Error(FATAL_FILE_OPEN, "PipelineRun failed at level %d", level);
+            LogPrintf("  ERROR: PipelineRun failed at level %d\n", level);
             break;
         }
 
@@ -547,7 +548,7 @@ int main(int argc, char* argv[])
                            level, sizeof(BOARD), 24,
                            config.mergeBufBytesPerThread, &mergePool))
         {
-            Error(FATAL_FILE_OPEN, "MergePhaseRun failed at level %d", level);
+            LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
             break;
         }
 
