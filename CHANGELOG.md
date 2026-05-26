@@ -1,5 +1,10 @@
 # Changelog
 
+## [OLE v0.2.10] - 2026-05-25
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — NAS archival changed from one-thread-per-file (all files copying in parallel) to a single sequential background thread per level; each file is copied and deleted before the next begins; total transfer time is unchanged (NAS link is the bottleneck) but local disk space is freed file-by-file as each copy completes rather than all at once, and the NAS receives sequential writes instead of competing concurrent writes
+
 ## [OLE v0.2.9] - 2026-05-25
 
 ### Changed

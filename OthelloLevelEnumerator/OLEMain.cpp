@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.9"
+#define APP_VERSION "0.2.10"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -227,6 +227,9 @@ static void ArchiveLevelAsync(
     int                    numLocalDirs,
     int                    level)
 {
+    struct FilePair { std::string src, dst; };
+    std::vector<FilePair> files;
+
     for (const OLEFileDesc& fd : reg->files) {
         const char* rel = nullptr;
         for (int i = 0; i < numLocalDirs && !rel; i++) {
@@ -238,17 +241,21 @@ static void ArchiveLevelAsync(
             rel = strrchr(fd.path, '\\');
             rel = rel ? rel + 1 : fd.path;
         }
-
         char dstPath[MAX_PATH];
         snprintf(dstPath, MAX_PATH, "%s%s", nasRunDir, rel);
+        files.push_back({fd.path, dstPath});
+    }
 
-        std::string src(fd.path), dst(dstPath);
-        int lev = level;
-        std::thread t([src, dst, lev]() { ArchiveOneFile(src, dst, lev); });
+    size_t n = files.size();
+    std::thread t([files = std::move(files), level]() {
+        for (const auto& f : files)
+            ArchiveOneFile(f.src, f.dst, level);
+    });
+    {
         std::lock_guard<std::mutex> lk(g_archiveMtx);
         g_archiveThreads.push_back(std::move(t));
     }
-    LogPrintf("  [Archive] Level %2d  queued %zu file(s) to NAS\n", level, reg->files.size());
+    LogPrintf("  [Archive] Level %2d  queued %zu file(s) to NAS\n", level, n);
 }
 
 static void JoinArchiveThreads()
