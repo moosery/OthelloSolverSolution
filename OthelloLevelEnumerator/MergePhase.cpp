@@ -1,4 +1,5 @@
 #include "MergePhase.h"
+#include "OLEStatus.h"
 #include "SortedFile.h"
 #include "FileRegistry.h"
 #define NOMINMAX
@@ -9,6 +10,8 @@
 #include <vector>
 #include <algorithm>
 #include <future>
+#include <atomic>
+#include <memory>
 
 // Comparison matching the GPU sort order: ascending by (f0, f1, f2) where each
 // field is 8 raw bytes read as a little-endian uint64_t.  This is NOT the same
@@ -58,6 +61,31 @@ static void ComputePivots(
 }
 
 // ---------------------------------------------------------------------------
+// Progressive source-file deletion
+//
+// Each partition signals "done" with a source file as soon as it closes that
+// file's reader (skipped, empty-range, or exhausted during merge).  When all
+// numParts partitions have signaled, the file is deleted — freeing solve-file
+// disk space progressively while the merge output is being written.
+// ---------------------------------------------------------------------------
+struct MergeDeleteState {
+    std::unique_ptr<std::atomic<int>[]>    counts;   // one per source file
+    int                                    numParts;
+    int                                    numFiles;
+    const std::vector<const OLEFileDesc*>* srcFiles;
+    OLEStatusBlock*                        status;   // optional live status (may be nullptr)
+};
+
+static void SignalFileDone(MergeDeleteState* ds, int fi)
+{
+    if (!ds) return;
+    if (++ds->counts[fi] == ds->numParts) {
+        remove((*ds->srcFiles)[fi]->path);
+        if (ds->status) ds->status->mergeSrcFilesConsumed++;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-partition state
 // ---------------------------------------------------------------------------
 struct SourceState {
@@ -65,6 +93,7 @@ struct SourceState {
     uint64_t             remaining;   // records left after the current one
     std::vector<uint8_t> current;     // current (top) record
     bool                 active;
+    int                  fileIdx;     // index into srcFiles (for deletion tracking)
 };
 
 // ---------------------------------------------------------------------------
@@ -72,6 +101,8 @@ struct SourceState {
 //
 // Thread i reads the slice [pivotLo, pivotHi) from every source file,
 // k-way merges them, deduplicates, and writes one sorted output file.
+// Signals ds per file as each reader is closed so solve files are deleted
+// progressively once all partitions finish with them.
 // ---------------------------------------------------------------------------
 static bool RunMergePartition(
     int                                    partIdx,
@@ -83,29 +114,33 @@ static bool RunMergePartition(
     uint32_t                               recordSize,
     uint32_t                               keySize,
     size_t                                 bufBytes,
-    OLEFileRegistry*                       dstReg)
+    OLEFileRegistry*                       dstReg,
+    MergeDeleteState*                      ds)
 {
     // --- Open readers and locate each file's slice ---
     std::vector<SourceState> sources;
-    for (const OLEFileDesc* fd : srcFiles) {
+    for (int fi = 0; fi < (int)srcFiles.size(); fi++) {
+        const OLEFileDesc* fd = srcFiles[fi];
+
         // Quick rejection: file range doesn't overlap partition range.
-        if (BoardKeyCompare(fd->maxKey, pivotLo.data()) < 0)  continue;
-        if (BoardKeyCompare(fd->minKey, pivotHi.data()) >= 0) continue;
+        if (BoardKeyCompare(fd->maxKey, pivotLo.data()) < 0) { SignalFileDone(ds, fi); continue; }
+        if (BoardKeyCompare(fd->minKey, pivotHi.data()) >= 0) { SignalFileDone(ds, fi); continue; }
 
         SortedFileReader* r = SFReaderOpen(fd->path, 256ULL * 1024);
         if (!r) { int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e); Error(FATAL_FILE_OPEN, "MergePhase: SFReaderOpen failed: %s (errno=%d: %s)", fd->path, e, eb); ErrorPrint(stderr); return false; }
 
         uint64_t lo = SFLowerBound(r, pivotLo.data(), keySize);
         uint64_t hi = SFLowerBound(r, pivotHi.data(), keySize);
-        if (lo >= hi) { SFReaderClose(&r); continue; }
+        if (lo >= hi) { SFReaderClose(&r); SignalFileDone(ds, fi); continue; }
 
-        if (!SFReaderSeek(r, lo)) { SFReaderClose(&r); int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e); Error(FATAL_SEEK_FAILED, "MergePhase: SFReaderSeek failed: %s (errno=%d: %s)", fd->path, e, eb); ErrorPrint(stderr); return false; }
+        if (!SFReaderSeek(r, lo)) { SFReaderClose(&r); SignalFileDone(ds, fi); int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e); Error(FATAL_SEEK_FAILED, "MergePhase: SFReaderSeek failed: %s (errno=%d: %s)", fd->path, e, eb); ErrorPrint(stderr); return false; }
 
         SourceState s;
         s.reader    = r;
         s.remaining = hi - lo;   // total records in range
         s.current.resize(recordSize);
         s.active    = false;
+        s.fileIdx   = fi;
 
         // Read first record
         if (SFReaderNext(r, s.current.data(), 1) == 1) {
@@ -114,6 +149,7 @@ static bool RunMergePartition(
             sources.push_back(std::move(s));
         } else {
             SFReaderClose(&r);
+            SignalFileDone(ds, fi);
         }
     }
 
@@ -126,7 +162,7 @@ static bool RunMergePartition(
     FILE* outFile = nullptr;
     if (fopen_s(&outFile, outPath, "wb") != 0 || !outFile) {
         int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
-        for (auto& s : sources) SFReaderClose(&s.reader);
+        for (auto& s : sources) { SFReaderClose(&s.reader); SignalFileDone(ds, s.fileIdx); }
         Error(FATAL_FILE_OPEN, "MergePhase: cannot open output file: %s (errno=%d: %s)", outPath, e, eb);
         ErrorPrint(stderr);
         return false;
@@ -144,17 +180,21 @@ static bool RunMergePartition(
     std::vector<uint8_t> outBuf(outBufBytes);
     size_t outPos = 0;
 
-    auto flushOut = [&]() -> bool {
-        if (outPos == 0) return true;
-        bool ok = fwrite(outBuf.data(), 1, outPos, outFile) == outPos;
-        outPos   = 0;
-        return ok;
-    };
+    OLEStatusBlock* statusBlk = ds ? ds->status : nullptr;
 
     // Merge state
     std::vector<uint8_t> lastKey(keySize, 0x00);
     bool    hasLast  = false;
     uint64_t written  = 0;
+
+    auto flushOut = [&]() -> bool {
+        if (outPos == 0) return true;
+        bool ok = fwrite(outBuf.data(), 1, outPos, outFile) == outPos;
+        outPos   = 0;
+        if (ok && statusBlk && partIdx < OLE_STATUS_MAX_PARTS)
+            statusBlk->mergeRecordsWritten[partIdx] = written;
+        return ok;
+    };
     uint8_t  minKey24[24] = {}, maxKey24[24] = {};
     size_t   cpyLen  = (keySize < 24) ? (size_t)keySize : 24;
     bool     ok      = true;
@@ -189,22 +229,33 @@ static bool RunMergePartition(
             }
         }
 
-        // Advance source minIdx
+        // Advance source minIdx — close reader immediately when exhausted so
+        // SignalFileDone can delete the source file as early as possible.
         SourceState& s = sources[minIdx];
         if (s.remaining > 0) {
             if (SFReaderNext(s.reader, s.current.data(), 1) == 1) {
                 s.remaining--;
             } else {
+                SFReaderClose(&s.reader);
+                SignalFileDone(ds, s.fileIdx);
                 s.active = false;
                 nActive--;
             }
         } else {
+            SFReaderClose(&s.reader);
+            SignalFileDone(ds, s.fileIdx);
             s.active = false;
             nActive--;
         }
     }
 
-    for (auto& s : sources) SFReaderClose(&s.reader);
+    // Close any readers still open (error / early-exit path).
+    for (auto& s : sources) {
+        if (s.reader) {
+            SFReaderClose(&s.reader);
+            SignalFileDone(ds, s.fileIdx);
+        }
+    }
     if (ok) ok = flushOut();
 
     // Fix up the header now that we know recordCount, minKey, maxKey.
@@ -219,6 +270,13 @@ static bool RunMergePartition(
     fclose(outFile);
 
     if (!ok) { char eb[64]; strerror_s(eb, sizeof(eb), lastErrno); Error(FATAL_FILE_OPEN, "MergePhase: write failed: %s (errno=%d: %s)", outPath, lastErrno, eb); ErrorPrint(stderr); return false; }
+
+    // Final record count and parts-done update.
+    if (statusBlk && partIdx < OLE_STATUS_MAX_PARTS) {
+        statusBlk->mergeRecordsWritten[partIdx] = written;
+        statusBlk->mergePartsDone++;
+    }
+
     if (written == 0) return true;
 
     OLEFileDesc desc = {};
@@ -236,6 +294,7 @@ static bool RunMergePartition(
 //
 // Launches one thread per output dir; each thread owns a non-overlapping key
 // partition and merges all source files into a single sorted, deduped output.
+// Source files are deleted progressively as all partitions finish reading them.
 // ---------------------------------------------------------------------------
 bool MergePhaseRun(
     const OLEFileRegistry* srcReg,
@@ -246,7 +305,8 @@ bool MergePhaseRun(
     uint32_t               recordSize,
     uint32_t               keySize,
     size_t                 mergeBufBytesPerThread,
-    ThreadPool*            pool)
+    ThreadPool*            pool,
+    OLEStatusBlock*        statusBlock)
 {
     if (srcReg->files.empty()) return true;
     if (numOutputDirs < 1)     return false;
@@ -263,6 +323,25 @@ bool MergePhaseRun(
 
     size_t bufBytes = std::max(mergeBufBytesPerThread, (size_t)(4ULL * 1024 * 1024));
 
+    // Init status merge fields.
+    if (statusBlock) {
+        statusBlock->mergePartsTotal      = numParts;
+        statusBlock->mergePartsDone       = 0;
+        statusBlock->mergeSrcFilesTotal   = (uint64_t)srcFiles.size();
+        statusBlock->mergeSrcFilesConsumed = 0;
+        for (int i = 0; i < OLE_STATUS_MAX_PARTS; i++)
+            statusBlock->mergeRecordsWritten[i] = 0;
+    }
+
+    // Progressive deletion state: deleted when all numParts partitions signal done.
+    MergeDeleteState ds;
+    ds.counts   = std::unique_ptr<std::atomic<int>[]>(
+                      new std::atomic<int>[(int)srcFiles.size()]());
+    ds.numParts = numParts;
+    ds.numFiles = (int)srcFiles.size();
+    ds.srcFiles = &srcFiles;
+    ds.status   = statusBlock;
+
     std::vector<std::future<bool>> futures;
     futures.reserve(numParts);
 
@@ -275,9 +354,9 @@ bool MergePhaseRun(
         const char* dir = outputDirs[i];
 
         auto task = [prom, i, lo, hi, dir, level, recordSize, keySize, bufBytes,
-                     &srcFiles, dstReg]() {
+                     &srcFiles, dstReg, &ds]() {
             bool ok = RunMergePartition(i, srcFiles, lo, hi, dir, level,
-                                        recordSize, keySize, bufBytes, dstReg);
+                                        recordSize, keySize, bufBytes, dstReg, &ds);
             prom->set_value(ok);
         };
 

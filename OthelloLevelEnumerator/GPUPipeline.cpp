@@ -1,5 +1,6 @@
 #include "GPUPipeline.h"
 #include "OLEKernel.h"
+#include "OLEStatus.h"
 #include "SortedFile.h"
 #include "FileRegistry.h"
 #include <Utility.h>
@@ -22,7 +23,7 @@ static void MakeOutputPath(char* buf, size_t sz, const char* dir, int level, int
 // ---------------------------------------------------------------------------
 // FlushBuffer
 //
-// Sort + dedup the filled accumulation buffer, extract unique BOARDs to host,
+// Sort + dedup the filled accumulation buffer, extract unique BOARD_KEYs to host,
 // write a sorted file, and register it in outputReg.
 // driveIdx selects which output directory to use (caller increments it).
 // ---------------------------------------------------------------------------
@@ -48,7 +49,7 @@ static bool FlushBuffer(
 
     // D2H: gather unique boards into host buffer.
     // Allocate host staging (unique boards in sorted order).
-    std::vector<BOARD> hostBoards(slotsFilled);   // over-allocate; uniqueCount <= slotsFilled
+    std::vector<BOARD_KEY> hostBoards(slotsFilled);   // over-allocate; uniqueCount <= slotsFilled
     uint32_t got = ExtractUniqueBoards(bufs, bufferIdx, slotsFilled, hostBoards.data());
     hostBoards.resize(got);
 
@@ -62,7 +63,7 @@ static bool FlushBuffer(
     MakeOutputPath(path, sizeof(path), dir, cfg->level, s_fileSeq.fetch_add(1));
 
     if (!SFWrite(path, hostBoards.data(), (uint64_t)got,
-                 sizeof(BOARD), 24, cfg->writerBufBytes))
+                 sizeof(BOARD_KEY), sizeof(BOARD_KEY), cfg->writerBufBytes))
     {
         int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
         Error(FATAL_FILE_OPEN, "GPUPipeline: SFWrite failed: %s (errno=%d: %s)", path, e, eb);
@@ -82,6 +83,7 @@ static bool FlushBuffer(
     }
     FRRegister(outputReg, desc);
     stats->filesWritten++;
+    if (cfg->statusBlock) cfg->statusBlock->solveFilesWritten = stats->filesWritten;
 
     return true;
 }
@@ -123,7 +125,7 @@ bool PipelineRun(
     {
         WorkerGpuContextDestroy(ctx);
         Fatal(FATAL_ALLOCATION_FAILED, "OLEGpuBuffersCreate failed (%.1f GB requested)",
-              (double)(cfg->accumBufSlots * sizeof(BOARD) * 2) / (1024.0*1024*1024));
+              (double)(cfg->accumBufSlots * sizeof(BOARD_KEY) * 2) / (1024.0*1024*1024));
         return false;
     }
 
@@ -146,7 +148,7 @@ bool PipelineRun(
         }
 
         const SortedFileHeader* hdr = SFReaderHeader(reader);
-        if (hdr->recordSize != sizeof(BOARD))
+        if (hdr->recordSize != sizeof(BOARD_KEY))
         {
             Error(FATAL_READ_FAILED, "GPUPipeline: unexpected recordSize %u in %s",
                   hdr->recordSize, fd.path);
@@ -163,10 +165,10 @@ bool PipelineRun(
 
             stats->boardsIn      += (uint64_t)got;
             stats->gpuDispatches += 1;
-
-            // Compute possible moves for each board (required by OthelloExpandKernel).
-            for (int i = 0; i < got; i++)
-                BoardMoveCalculator(&ctx->h_inputBoards[i]);
+            if (cfg->statusBlock) {
+                cfg->statusBlock->solveBoardsRead    = stats->boardsIn;
+                cfg->statusBlock->solveGpuDispatches = stats->gpuDispatches;
+            }
 
             // If remaining accum capacity can't hold worst-case output, flush first.
             uint32_t worstCase = (uint32_t)got * maxMovesPerBoard;
@@ -186,6 +188,7 @@ bool PipelineRun(
                             got, cfg->numRotations, consts, &batchStats);
             writeOffset              += batchStats.slotsWritten;
             stats->slotsExpanded     += batchStats.slotsWritten;
+            if (cfg->statusBlock) cfg->statusBlock->solveSlotsExpanded = stats->slotsExpanded;
             stats->passBoards        += batchStats.passBoards;
             stats->endBoards         += batchStats.endBoards;
             if (batchStats.maxMoves > stats->maxMovesAnyBoard)

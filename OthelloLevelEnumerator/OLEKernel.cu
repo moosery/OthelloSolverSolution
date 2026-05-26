@@ -68,7 +68,7 @@ WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard
 
     CUDA_CHECK(cudaStreamCreate((cudaStream_t*)&ctx->stream));
 
-    size_t boardsBytes  = (size_t)batchCapacity * sizeof(BOARD);
+    size_t boardsBytes  = (size_t)batchCapacity * sizeof(BOARD_KEY);
     size_t resultsBytes = (size_t)batchCapacity * maxMovesPerBoard * sizeof(GpuResult);
     size_t countsBytes  = (size_t)batchCapacity * sizeof(int);
 
@@ -114,8 +114,8 @@ OLEGpuBuffers* OLEGpuBuffersCreate(size_t slotCapacity)
     OLEGpuBuffers* bufs = new OLEGpuBuffers{};
     bufs->slotCapacity = slotCapacity;
 
-    CUDA_CHECK(cudaMalloc(&bufs->d_accumA,    sizeof(BOARD)    * slotCapacity));
-    CUDA_CHECK(cudaMalloc(&bufs->d_accumB,    sizeof(BOARD)    * slotCapacity));
+    CUDA_CHECK(cudaMalloc(&bufs->d_accumA,    sizeof(BOARD_KEY) * slotCapacity));
+    CUDA_CHECK(cudaMalloc(&bufs->d_accumB,    sizeof(BOARD_KEY) * slotCapacity));
     CUDA_CHECK(cudaMalloc(&bufs->d_fieldA,    sizeof(uint64_t) * slotCapacity));
     CUDA_CHECK(cudaMalloc(&bufs->d_fieldB,    sizeof(uint64_t) * slotCapacity));
     CUDA_CHECK(cudaMalloc(&bufs->d_indicesA,  sizeof(uint32_t) * slotCapacity));
@@ -145,41 +145,40 @@ void OLEGpuBuffersDestroy(OLEGpuBuffers* bufs)
 // ---------------------------------------------------------------------------
 
 __global__ void OthelloExpandKernel(
-    const BOARD*   inputBoards,
-    GpuResult*     results,
-    int*           outputCounts,
-    int            batchSize,
-    int            maxMovesPerBoard,
-    int            numRotations,
-    DevBoardConsts consts,
-    uint32_t*      batchStats)   // [0]=passBoards [1]=endBoards [2]=maxMoves
+    const BOARD_KEY* inputBoards,
+    GpuResult*       results,
+    int*             outputCounts,
+    int              batchSize,
+    int              maxMovesPerBoard,
+    int              numRotations,
+    DevBoardConsts   consts,
+    uint32_t*        batchStats)   // [0]=passBoards [1]=endBoards [2]=maxMoves
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= batchSize) return;
 
-    const BOARD src     = inputBoards[i];
-    GpuResult*  mySlots = results + ((size_t)i * maxMovesPerBoard);
-    int         count   = 0;
+    const BOARD_KEY src     = inputBoards[i];
+    GpuResult*      mySlots = results + ((size_t)i * maxMovesPerBoard);
+    int             count   = 0;
 
-    if (src.ullPossibleMoves == 0) {
-        BOARD passBoard         = {};
-        passBoard.ullCellsInUse = src.ullCellsInUse;
-        passBoard.ullCellColors = src.ullCellColors;
-        passBoard.usBoardInfo   = src.usBoardInfo;
-        SETBOARDNEXTPLAYERFLIP(&passBoard);
-        dev_boardMoveCalculator(&passBoard, consts);
+    unsigned long long myMoves = dev_boardKeyGetMoves(&src, consts);
 
-        if (passBoard.ullPossibleMoves != 0) {
+    if (myMoves == 0) {
+        BOARD_KEY passKey       = src;
+        SETBOARDNEXTPLAYERFLIP(&passKey);
+        unsigned long long passMoves = dev_boardKeyGetMoves(&passKey, consts);
+
+        if (passMoves != 0) {
             atomicAdd(&batchStats[0], 1u);   // non-terminal pass board
-            unsigned long long moves = passBoard.ullPossibleMoves;
+            unsigned long long moves = passMoves;
             while (moves) {
                 unsigned long long moveBit = moves & (-(long long)moves);
                 int moveIdx                = __clzll(moveBit);
                 moves                     &= moves - 1;
 
-                BOARD grandchild = {};
-                dev_playMove(&passBoard, &grandchild, moveIdx);
-                dev_canonicalize(&grandchild, numRotations, consts);
+                BOARD_KEY grandchild = {};
+                dev_playMove_key(&passKey, &grandchild, moveIdx);
+                dev_canonicalize_key(&grandchild, numRotations);
 
                 if (count < maxMovesPerBoard) {
                     GpuResult& r          = mySlots[count];
@@ -202,15 +201,15 @@ __global__ void OthelloExpandKernel(
         }
     }
     else {
-        unsigned long long moves = src.ullPossibleMoves;
+        unsigned long long moves = myMoves;
         while (moves) {
             unsigned long long moveBit = moves & (-(long long)moves);
             int moveIdx                = __clzll(moveBit);
             moves                     &= moves - 1;
 
-            BOARD child = {};
-            dev_playMove(&src, &child, moveIdx);
-            dev_canonicalize(&child, numRotations, consts);
+            BOARD_KEY child = {};
+            dev_playMove_key(&src, &child, moveIdx);
+            dev_canonicalize_key(&child, numRotations);
 
             if (count < maxMovesPerBoard) {
                 GpuResult& r          = mySlots[count];
@@ -247,7 +246,7 @@ __global__ void ScatterToAccumKernel(
     const int*       outputCounts,
     int              batchSize,
     int              maxMovesPerBoard,
-    BOARD*           accum,
+    BOARD_KEY*       accum,
     uint32_t         accumCapacity,
     uint32_t*        d_writePos)
 {
@@ -261,7 +260,7 @@ __global__ void ScatterToAccumKernel(
 
     uint32_t pos = atomicAdd(d_writePos, 1u);
     if (pos < accumCapacity)
-        accum[pos] = results[tid].childBoard;   // store BOARD only; move edges handled separately
+        accum[pos] = results[tid].childBoard;   // store BOARD_KEY only; move edges handled separately
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +279,7 @@ void AccumulateBatch(
 {
     cudaStream_t s = (cudaStream_t)ctx->stream;
 
-    BOARD* d_accum = (bufferIdx == 0) ? bufs->d_accumA : bufs->d_accumB;
+    BOARD_KEY* d_accum = (bufferIdx == 0) ? bufs->d_accumA : bufs->d_accumB;
 
     // Initialize the device atomic counter and per-batch stats to zero.
     CUDA_CHECK(cudaMemcpyAsync(ctx->d_writePos, &writeOffset, sizeof(uint32_t),
@@ -289,7 +288,7 @@ void AccumulateBatch(
 
     // H2D: copy input boards.
     CUDA_CHECK(cudaMemcpyAsync(ctx->d_inputBoards, ctx->h_inputBoards,
-                               (size_t)boardCount * sizeof(BOARD),
+                               (size_t)boardCount * sizeof(BOARD_KEY),
                                cudaMemcpyHostToDevice, s));
 
     // Expand: one thread per input board.
@@ -340,16 +339,16 @@ void AccumulateBatch(
 // ---------------------------------------------------------------------------
 
 __global__ void MarkDupFlagsKernel(
-    const BOARD*    boards,
-    const uint32_t* perm,
-    uint8_t*        flags,
-    uint32_t        count)
+    const BOARD_KEY* boards,
+    const uint32_t*  perm,
+    uint8_t*         flags,
+    uint32_t         count)
 {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
     if (i == 0) { flags[0] = 0; return; }
     const uint64_t* a = reinterpret_cast<const uint64_t*>(&boards[perm[i - 1]]);
-    const uint64_t* b = reinterpret_cast<const uint64_t*>(&boards[perm[i]]);
+    const uint64_t* b = reinterpret_cast<const uint64_t*>(&boards[perm[i]]);  // _pad1 always zero
     flags[i] = (a[0] == b[0] && a[1] == b[1] && a[2] == b[2]) ? 1u : 0u;
 }
 
@@ -365,10 +364,10 @@ __global__ void InitIndicesKernel(uint32_t* indices, uint32_t count)
 
 // Extract one uint64_t field directly from the board array (pass 1, no gather).
 __global__ void ExtractFieldKernel(
-    const BOARD* boards,
-    uint32_t     count,
-    int          fieldIdx,   // 0=bytes[0..7]  1=bytes[8..15]  2=bytes[16..23]
-    uint64_t*    out)
+    const BOARD_KEY* boards,
+    uint32_t         count,
+    int              fieldIdx,   // 0=bytes[0..7]  1=bytes[8..15]  2=bytes[16..23]
+    uint64_t*        out)
 {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
@@ -378,11 +377,11 @@ __global__ void ExtractFieldKernel(
 
 // Gather one uint64_t field using the current permutation (passes 2 and 3).
 __global__ void GatherFieldKernel(
-    const BOARD*    boards,
-    const uint32_t* perm,
-    uint32_t        count,
-    int             fieldIdx,
-    uint64_t*       out)
+    const BOARD_KEY* boards,
+    const uint32_t*  perm,
+    uint32_t         count,
+    int              fieldIdx,
+    uint64_t*        out)
 {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
@@ -414,8 +413,8 @@ void SortAndDedup(
 {
     if (slotsFilled == 0) { *outUniqueCount = 0; return; }
 
-    BOARD*    d_accum    = (bufferIdx == 0) ? bufs->d_accumA    : bufs->d_accumB;
-    uint64_t* d_fieldA   = bufs->d_fieldA;
+    BOARD_KEY* d_accum   = (bufferIdx == 0) ? bufs->d_accumA    : bufs->d_accumB;
+    uint64_t*  d_fieldA  = bufs->d_fieldA;
     uint64_t* d_fieldB   = bufs->d_fieldB;
     uint32_t* d_indicesA = bufs->d_indicesA;
     uint32_t* d_indicesB = bufs->d_indicesB;
@@ -498,19 +497,19 @@ uint32_t ExtractUniqueBoards(
     OLEGpuBuffers* bufs,
     int            bufferIdx,
     uint32_t       slotsFilled,
-    BOARD*         outBoards)
+    BOARD_KEY*     outBoards)
 {
     if (slotsFilled == 0) return 0;
 
-    BOARD*    d_accum   = (bufferIdx == 0) ? bufs->d_accumA    : bufs->d_accumB;
-    uint32_t* d_indices = bufs->d_indicesA;   // final sorted permutation from SortAndDedup
-    uint8_t*  d_flags   = (bufferIdx == 0) ? bufs->d_dupFlagsA : bufs->d_dupFlagsB;
+    BOARD_KEY* d_accum   = (bufferIdx == 0) ? bufs->d_accumA    : bufs->d_accumB;
+    uint32_t*  d_indices = bufs->d_indicesA;   // final sorted permutation from SortAndDedup
+    uint8_t*   d_flags   = (bufferIdx == 0) ? bufs->d_dupFlagsA : bufs->d_dupFlagsB;
 
-    std::vector<BOARD>    hAccum  (slotsFilled);
-    std::vector<uint32_t> hIndices(slotsFilled);
-    std::vector<uint8_t>  hFlags  (slotsFilled);
+    std::vector<BOARD_KEY> hAccum  (slotsFilled);
+    std::vector<uint32_t>  hIndices(slotsFilled);
+    std::vector<uint8_t>   hFlags  (slotsFilled);
 
-    CUDA_CHECK(cudaMemcpy(hAccum.data(),   d_accum,   slotsFilled * sizeof(BOARD),
+    CUDA_CHECK(cudaMemcpy(hAccum.data(),   d_accum,   slotsFilled * sizeof(BOARD_KEY),
                           cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(hIndices.data(), d_indices, slotsFilled * sizeof(uint32_t),
                           cudaMemcpyDeviceToHost));

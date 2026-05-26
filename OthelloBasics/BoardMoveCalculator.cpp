@@ -130,6 +130,104 @@ void BoardMoveCalculator(PBOARD pBoard)
     pBoard->ullPossibleMoves = validMoves;
 }
 
+unsigned long long BoardKeyGetMoves(const PBOARD_KEY pKey)
+{
+    char color = GETBOARDNEXTPLAYER(pKey);
+
+    unsigned long long myPieces, oppPieces;
+    if (color == BLACK)
+    {
+        myPieces  = pKey->ullCellsInUse &  pKey->ullCellColors;
+        oppPieces = pKey->ullCellsInUse & ~pKey->ullCellColors;
+    }
+    else
+    {
+        myPieces  = pKey->ullCellsInUse & ~pKey->ullCellColors;
+        oppPieces = pKey->ullCellsInUse &  pKey->ullCellColors;
+    }
+
+    const unsigned long long notRight = ~g_boardRightEdge;
+    const unsigned long long notLeft  = ~g_boardLeftEdge;
+
+    unsigned long long empty      = g_boardMask & ~(myPieces | oppPieces);
+    unsigned long long validMoves = 0;
+    unsigned long long gen, candidates;
+
+    candidates = oppPieces & notRight;
+    gen  = (myPieces      & notRight) >> 1; gen &= candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    gen |= ((gen & notRight) >> 1) & candidates;
+    validMoves |= ((gen & notRight) >> 1) & empty;
+
+    candidates = oppPieces & notLeft;
+    gen  = (myPieces      & notLeft) << 1; gen &= candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    gen |= ((gen & notLeft) << 1) & candidates;
+    validMoves |= ((gen & notLeft) << 1) & empty;
+
+    candidates = oppPieces;
+    gen  = (myPieces >> 8) & candidates;
+    gen |= ((gen >> 8) & candidates);
+    gen |= ((gen >> 8) & candidates);
+    gen |= ((gen >> 8) & candidates);
+    gen |= ((gen >> 8) & candidates);
+    gen |= ((gen >> 8) & candidates);
+    validMoves |= (gen >> 8) & empty;
+
+    candidates = oppPieces;
+    gen  = (myPieces << 8) & candidates;
+    gen |= ((gen << 8) & candidates);
+    gen |= ((gen << 8) & candidates);
+    gen |= ((gen << 8) & candidates);
+    gen |= ((gen << 8) & candidates);
+    gen |= ((gen << 8) & candidates);
+    validMoves |= (gen << 8) & empty;
+
+    candidates = oppPieces & notRight;
+    gen  = (myPieces      & notRight) >> 9; gen &= candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    gen |= ((gen & notRight) >> 9) & candidates;
+    validMoves |= ((gen & notRight) >> 9) & empty;
+
+    candidates = oppPieces & notLeft;
+    gen  = (myPieces      & notLeft) >> 7; gen &= candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    gen |= ((gen & notLeft) >> 7) & candidates;
+    validMoves |= ((gen & notLeft) >> 7) & empty;
+
+    candidates = oppPieces & notRight;
+    gen  = (myPieces      & notRight) << 7; gen &= candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    gen |= ((gen & notRight) << 7) & candidates;
+    validMoves |= ((gen & notRight) << 7) & empty;
+
+    candidates = oppPieces & notLeft;
+    gen  = (myPieces      & notLeft) << 9; gen &= candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    gen |= ((gen & notLeft) << 9) & candidates;
+    validMoves |= ((gen & notLeft) << 9) & empty;
+
+    return validMoves;
+}
+
 #else
 
 /**

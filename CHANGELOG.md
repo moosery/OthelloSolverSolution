@@ -1,5 +1,65 @@
 # Changelog
 
+## [OLE v0.2.8] - 2026-05-25
+
+### Added
+- **`OthelloLevelEnumerator` / `OLEStatus.h`** — new shared header defining `OLEStatusBlock` (volatile struct in named shared memory `Local\OthelloLevelEnumeratorStatus`), `OLEPhase` enum, and `OLEStatusOpen` / `OLEStatusClose` inline helpers
+- **`OthelloLevelEnumeratorStatus` / `OLEStatusQuery.cpp`** — new standalone query exe; opens the shared memory read-only and displays live progress; `--loop [N]` refreshes every N seconds (default 5); no CUDA or library dependencies
+- **`OthelloLevelEnumerator` / `OLEMain`** — creates shared memory at startup, updates `phase` / `currentLevel` / solve and merge counters throughout the BFS loop, writes `lastLevel` stats after each level, sets `OLE_PHASE_DONE` and closes at shutdown
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — updates `solveBoardsRead`, `solveGpuDispatches`, `solveSlotsExpanded` after each GPU dispatch, and `solveFilesWritten` after each flush; `OLEPipelineConfig` gains `statusBlock*` field
+- **`OthelloLevelEnumerator` / `MergePhase`** — updates `mergeRecordsWritten[partIdx]` on each output flush, `mergePartsDone` when a partition completes, and `mergeSrcFilesConsumed` in `SignalFileDone` when a source file is fully consumed by all partitions; `MergePhaseRun` gains `statusBlock*` parameter (default nullptr)
+
+### Query output (MERGE example)
+```
+OthelloLevelEnumerator v0.2.8  [MERGE]
+Run:    D:\OLEDataDir\2026_05_25...\BoardSize6x6\
+Board:  6x6    Level: 17 / 33
+
+  Phase: MERGE
+  Sources:   677 total   |   342 consumed (50.5%)
+  Part 0:    9,449,800,000 records  (223.74 GB)
+  Part 1:    10,567,000,000 records  (250.21 GB)
+  Part 2:    7,642,000,000 records  (180.98 GB)
+  Part 3:    5,682,000,000 records  (134.57 GB)
+  Total:     789.50 GB written
+  Parts done: 1 / 4
+```
+
+## [OLE v0.2.7] - 2026-05-25
+
+### Changed
+- `OthelloLevelEnumerator` / `MergePhase`: progressive solve-file deletion — source (solve) files are now deleted during the merge phase as each file is fully consumed by all partition threads, rather than waiting until after merge completes; each partition signals "done" with a source file the moment its `SortedFileReader` is closed (whether quick-rejected, empty-range, or read to exhaustion in the k-way merge loop); when all `numParts` partitions have signaled a file, it is deleted via `remove()`; readers are also closed eagerly when a source is exhausted mid-merge (previously closed in a batch at end)
+- `OthelloLevelEnumerator` / `MergePhase`: `SourceState` gains a `fileIdx` field tracking its index in `srcFiles`; `RunMergePartition` gains a `MergeDeleteState*` parameter (new internal struct with per-file `std::atomic<int>` completion counts); init loop is now index-based to feed `fileIdx`
+
+### Rationale
+At deep BFS levels (≥16) the solve files (~2.5 TB) and merge output (~1.85 TB) cannot coexist on a single 4 TB NVMe — the disk fills before merge completes.  Progressive deletion frees solve-file space as it is consumed, so the merge can run to completion using only `max(solve_remaining + merge_written)` peak disk — roughly equal to `solve_total`, which fits.
+
+## [OLE v0.2.6] - 2026-05-24
+
+### Added
+- `OthelloLevelEnumerator` / `OLEMain`: NAS archival — after each level's `PipelineRun` returns (input files fully consumed), consumed merge files are asynchronously copied to a NAS drive and deleted locally; one thread per file, all running concurrently with `MergePhaseRun`; threads are joined cleanly at program exit
+- `OthelloLevelEnumerator` / `OLEMain`: `--nas-dir [path]` arg — NAS root dir; defaults to `Z:\OthelloRuns\`; if path omitted, uses default; NAS archival is **ON by default**; run-dir suffix (`YYYY_MM_DD.HH_MM_SS\BoardSizeNxN\`) appended to construct the NAS run directory
+- `OthelloLevelEnumerator` / `OLEMain`: `--no-nas` arg — disables NAS archival; if NAS directory cannot be created at startup, archival auto-disables with a warning
+- `OthelloLevelEnumerator` / `OLEMain`: `LogPrintf` is now protected by `g_logMtx` (std::mutex) so archive completion messages from worker threads interleave safely with main-thread output
+- `OthelloLevelEnumerator` / `OLEMain`: NAS archive dir shown in startup banner; archive queue and completion logged per file (`[Archive] Level NN  filename  (X.XX GB, Y.Y s)`)
+
+### Rationale
+All-levels merge files must be retained permanently (retrograde pass binary-searches them).  With D: running low at deep levels, archiving consumed input files to a NAS with 30 TB free keeps local NVMe clear for the current level's solve+merge working set.
+
+## [OLE v0.2.5] - 2026-05-24
+
+### Changed
+- `OthelloBasics` / `OthelloBasics.h`: added `BOARD_KEY` struct (24 bytes: `ullCellsInUse` + `ullCellColors` + `usBoardInfo` + `_pad1[3]`), `static_assert(sizeof(BOARD_KEY)==24)`, and declaration of `BoardKeyGetMoves`; `BOARD_KEY` is the first 24 bytes of `BOARD` and works with all existing macros (`GETBOARDSIZE`, `GETBOARDNEXTPLAYER`, etc.) via C macro duck typing
+- `OthelloBasics` / `BoardMoveCalculator.cpp`: added `BoardKeyGetMoves(const PBOARD_KEY)` — same 8-direction bitboard fill as `BoardMoveCalculator` but takes a `BOARD_KEY*` and returns the valid-move mask as `unsigned long long` instead of mutating a `BOARD`
+- `OthelloBasicsForCUDA` / `OthelloBasicsForCUDA.h`: added a complete BOARD_KEY device-function family for OLE's CUDA-only path — `dev_applyMove_key`, `dev_rotate90Right_key`, `dev_mirrorVerticalAxis_key`, `dev_boardFlip_key`, `dev_boardLT_key`, `dev_playMove_key`, `dev_boardKeyGetMoves` (returns move mask), and `dev_canonicalize_key` (no moves computed — 384-byte `BOARD_KEY arr[16]` vs 1024-byte `BOARD arr[16]` scratch); `dev_canonicalize_key` does not take `DevBoardConsts` because it no longer calls `dev_boardMoveCalculator`; existing BOARD-based device functions unchanged (SolverKernel.cu still uses them)
+- `OthelloLevelEnumerator` / `OLEKernel.h`: `GpuResult::childBoard` changed from `BOARD` (64 bytes) to `BOARD_KEY` (24 bytes); `WorkerGpuContext::d_inputBoards` / `h_inputBoards` changed from `BOARD*` to `BOARD_KEY*`; `OLEGpuBuffers::d_accumA` / `d_accumB` changed from `BOARD*` to `BOARD_KEY*`; `ExtractUniqueBoards` last parameter changed from `BOARD*` to `BOARD_KEY*`
+- `OthelloLevelEnumerator` / `OLEKernel.cu`: `OthelloExpandKernel` now takes `const BOARD_KEY* inputBoards`; moves are computed on-GPU via `dev_boardKeyGetMoves` (no pre-computed `ullPossibleMoves` field required); `dev_playMove_key` + `dev_canonicalize_key` replace `dev_playMove` + `dev_canonicalize`; `ScatterToAccumKernel` now writes `BOARD_KEY` slots; all field/gather/dup-flag kernels changed from `const BOARD*` to `const BOARD_KEY*`; `ExtractUniqueBoards` updated end-to-end for `BOARD_KEY`; per-slot VRAM cost drops from `2×64+2×8+2×4+2×1=154` to `2×24+2×8+2×4+2×1=74` bytes, growing accumulation-buffer slot count from ~104 M to ~215 M on the same VRAM
+- `OthelloLevelEnumerator` / `GPUPipeline.cpp`: `FlushBuffer` writes 24-byte `BOARD_KEY` records (`SFWrite` record/key size both `sizeof(BOARD_KEY)=24`); `PipelineRun` reads `BOARD_KEY` records from solve files; `BoardMoveCalculator` per-batch CPU pre-pass removed (GPU now computes moves internally via `dev_boardKeyGetMoves`)
+- `OthelloLevelEnumerator` / `OLEMain.cpp`: seed file extracts `BOARD_KEY` fields from `BoardAllocateFirstBoard()` result and writes 24-byte records; `MergePhaseRun` uses `sizeof(BOARD_KEY)` for both record-size and key-size arguments; `kBytesPerSlot` and banner display math updated for 24-byte accum slots
+
+### Rationale
+Storing full 64-byte `BOARD` structs in solve/merge files and GPU buffers required ~6.8 TB of intermediate disk space at level 16, exceeding available storage.  Switching to 24-byte `BOARD_KEY` records reduces disk usage 62.5% (~2.55 TB at level 16) and nearly doubles GPU accumulation-buffer capacity on the same VRAM.
+
 ## [OLE v0.2.4] - 2026-05-24
 
 ### Fixed

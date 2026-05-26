@@ -24,8 +24,9 @@
 #include "FileRegistry.h"
 #include "GPUPipeline.h"
 #include "MergePhase.h"
+#include "OLEStatus.h"
 
-#define APP_VERSION "0.2.4"
+#define APP_VERSION "0.2.8"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -38,6 +39,8 @@ typedef struct OLEConfig
     const char* outputDirs[4];    // [0]=primary (logs, meta); [1..3]=extra data dirs
     int         numOutputDirs;
     bool        restart;
+    bool        nasEnabled;
+    const char* nasDir;         // NAS root dir (run-suffix appended at startup)
     MemoryMode  memMode;
     uint64_t    specifiedMemBytes;
 
@@ -45,7 +48,7 @@ typedef struct OLEConfig
     uint64_t    memBudgetBytes;           // free RAM × mode pct
     uint64_t    mergeBufBytesPerThread;   // RAM budget / numMergeThreads
     int         numMergeThreads;          // CPU threads for merge phase
-    size_t      accumBufSlots;            // BOARD slots per ping-pong buffer
+    size_t      accumBufSlots;            // BOARD_KEY slots per ping-pong buffer
     int         batchSize;                // boards per GPU dispatch
 } OLEConfig, *POLEConfig;
 
@@ -74,7 +77,8 @@ struct LevelRecord
 // Run log: mirrors all formatted console output to a persistent log file.
 // ---------------------------------------------------------------------------
 
-static FILE* g_logFile = nullptr;
+static FILE*       g_logFile = nullptr;
+static std::mutex  g_logMtx;
 
 static void OpenLogFile(const char* outputDir)
 {
@@ -95,6 +99,7 @@ static void CloseLogFile()
 
 static void LogPrintf(const char* fmt, ...)
 {
+    std::lock_guard<std::mutex> lk(g_logMtx);
     va_list args;
     va_start(args, fmt);
     vprintf(fmt, args);
@@ -181,6 +186,80 @@ static void StopMemStatsThread()
 }
 
 // ---------------------------------------------------------------------------
+// NAS archival (fire-and-forget; threads tracked for clean shutdown)
+// ---------------------------------------------------------------------------
+
+static std::mutex               g_archiveMtx;
+static std::vector<std::thread> g_archiveThreads;
+
+// ---------------------------------------------------------------------------
+// Live status — shared memory block readable by OLEStatusQuery.exe
+// ---------------------------------------------------------------------------
+
+static OLEStatusBlock* g_status        = nullptr;
+static HANDLE          g_statusHandle  = nullptr;
+
+static void ArchiveOneFile(std::string src, std::string dst, int level)
+{
+    ClockTick t; ClockStart(&t);
+    if (!CopyFileA(src.c_str(), dst.c_str(), FALSE)) {
+        DWORD err = GetLastError();
+        LogPrintf("  [Archive] Level %2d ERROR: CopyFile failed (%lu): %s\n", level, err, src.c_str());
+        return;
+    }
+    remove(src.c_str());
+    double secs = (double)ClockNanosSinceStart(&t) / 1e9;
+    WIN32_FILE_ATTRIBUTE_DATA fa = {};
+    double gb = 0.0;
+    if (GetFileAttributesExA(dst.c_str(), GetFileExInfoStandard, &fa)) {
+        ULONGLONG sz = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+        gb = (double)sz / (1024.0 * 1024 * 1024);
+    }
+    const char* fname = strrchr(dst.c_str(), '\\');
+    fname = fname ? fname + 1 : dst.c_str();
+    LogPrintf("  [Archive] Level %2d  %-52s  (%.2f GB, %.1f s)\n", level, fname, gb, secs);
+}
+
+static void ArchiveLevelAsync(
+    const OLEFileRegistry* reg,
+    const char*            nasRunDir,
+    const char* const*     localDirs,
+    int                    numLocalDirs,
+    int                    level)
+{
+    for (const OLEFileDesc& fd : reg->files) {
+        const char* rel = nullptr;
+        for (int i = 0; i < numLocalDirs && !rel; i++) {
+            size_t plen = strlen(localDirs[i]);
+            if (_strnicmp(fd.path, localDirs[i], plen) == 0)
+                rel = fd.path + plen;
+        }
+        if (!rel) {
+            rel = strrchr(fd.path, '\\');
+            rel = rel ? rel + 1 : fd.path;
+        }
+
+        char dstPath[MAX_PATH];
+        snprintf(dstPath, MAX_PATH, "%s%s", nasRunDir, rel);
+
+        std::string src(fd.path), dst(dstPath);
+        int lev = level;
+        std::thread t([src, dst, lev]() { ArchiveOneFile(src, dst, lev); });
+        std::lock_guard<std::mutex> lk(g_archiveMtx);
+        g_archiveThreads.push_back(std::move(t));
+    }
+    LogPrintf("  [Archive] Level %2d  queued %zu file(s) to NAS\n", level, reg->files.size());
+}
+
+static void JoinArchiveThreads()
+{
+    std::lock_guard<std::mutex> lk(g_archiveMtx);
+    for (auto& t : g_archiveThreads)
+        if (t.joinable()) t.join();
+    g_archiveThreads.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Arg parsing
 // ---------------------------------------------------------------------------
 
@@ -195,6 +274,8 @@ static void usage()
     printf("  --output-dir3 <dir>          Extra data directory (drive 3)\n");
     printf("  --output-dir4 <dir>          Extra data directory (drive 4)\n");
     printf("  --restart                    Resume the most recent run\n");
+    printf("  --nas-dir [path]             NAS archive root (default=Z:\\OthelloRuns\\); NAS archival is ON by default\n");
+    printf("  --no-nas                     Disable NAS archival\n");
     printf("Memory options (default: --use-recommended-memory):\n");
     printf("  --use-max-memory             Use ~95%% of available RAM for merge buffers\n");
     printf("  --use-recommended-memory     Use ~75%% of available RAM (default)\n");
@@ -239,6 +320,17 @@ static void processArgs(int argc, char* argv[], POLEConfig cfg)
         else if (strcmp(argv[i], "--restart") == 0)
         {
             cfg->restart = true;
+        }
+        else if (strcmp(argv[i], "--nas-dir") == 0)
+        {
+            cfg->nasEnabled = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                cfg->nasDir = argv[++i];
+            // else: keep default NAS path
+        }
+        else if (strcmp(argv[i], "--no-nas") == 0)
+        {
+            cfg->nasEnabled = false;
         }
         else if (strcmp(argv[i], "--use-max-memory") == 0)
         {
@@ -325,6 +417,8 @@ int main(int argc, char* argv[])
     config.outputDirs[3]     = "D:\\OLEDataDir4\\";
     config.numOutputDirs     = 4;
     config.restart           = false;
+    config.nasEnabled        = true;
+    config.nasDir            = "Z:\\OthelloRuns\\";
     config.memMode           = MM_RECOMMENDED;
     config.specifiedMemBytes = 0;
 
@@ -359,7 +453,7 @@ int main(int argc, char* argv[])
                          : gpuInfo.totalGlobalMemBytes / 2;
         // Divide VRAM across all buffer arrays: accum A+B, field A+B, indices A+B, flags A+B.
         static constexpr size_t kBytesPerSlot =
-            2 * sizeof(BOARD) + 2 * sizeof(uint64_t) + 2 * sizeof(uint32_t) + 2 * sizeof(uint8_t);
+            2 * sizeof(BOARD_KEY) + 2 * sizeof(uint64_t) + 2 * sizeof(uint32_t) + 2 * sizeof(uint8_t);
         config.accumBufSlots  = vramAvail / kBytesPerSlot;
         config.batchSize      = gpuInfo.optimalBatchSize;
     }
@@ -368,6 +462,7 @@ int main(int argc, char* argv[])
     // Each user-specified dir is a root; actual data lives under
     // <root>\<YYYY_MM_DD.HH_MM_SS>\BoardSize<N>x<N>\  (same convention as CL solver).
     char runDirs[4][MAX_PATH];
+    char nasRunDir[MAX_PATH] = {};
     {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -380,6 +475,8 @@ int main(int argc, char* argv[])
             snprintf(runDirs[i], MAX_PATH, "%s%s", config.outputDirs[i], suffix);
             config.outputDirs[i] = runDirs[i];
         }
+        if (config.nasEnabled)
+            snprintf(nasRunDir, MAX_PATH, "%s%s", config.nasDir, suffix);
     }
 
     // ---- Create all run directories ----
@@ -389,12 +486,33 @@ int main(int argc, char* argv[])
             Fatal(UTIL_RC_Could_Not_Create_Directory,
                   "Cannot create output directory: %s", config.outputDirs[i]);
     }
+    if (config.nasEnabled && nasRunDir[0])
+    {
+        if (!CreateFullPath(nasRunDir)) {
+            fprintf(stderr, "[NAS] Warning: cannot create %s -- NAS archival disabled\n", nasRunDir);
+            config.nasEnabled = false;
+        }
+    }
 
     // ---- Initialize board-size globals (must precede any BOARD operation) ----
     SetBoardSizeForRun(config.boardSize);
 
     // ---- Open run log (mirrors all console output) ----
     OpenLogFile(config.outputDirs[0]);
+
+    // ---- Live status shared memory ----
+    g_status = OLEStatusOpen(true, &g_statusHandle);
+    if (g_status) {
+        memset((void*)g_status, 0, sizeof(OLEStatusBlock));
+        g_status->magic   = OLE_STATUS_MAGIC;
+        g_status->version = OLE_STATUS_VERSION;
+        strncpy_s((char*)g_status->appVersion, sizeof(g_status->appVersion), APP_VERSION, _TRUNCATE);
+        strncpy_s((char*)g_status->runDir,     sizeof(g_status->runDir),     config.outputDirs[0], _TRUNCATE);
+        g_status->boardSize  = config.boardSize;
+        g_status->maxLevels  = (config.boardSize == 4) ? 13 : (config.boardSize == 6) ? 33 : 61;
+        g_status->phase      = OLE_PHASE_IDLE;
+        g_status->lastLevel  = -1;
+    }
 
     // ---- Print startup banner ----
     {
@@ -404,7 +522,7 @@ int main(int argc, char* argv[])
         double freeGB      = (double)ms.ullAvailPhys                / (1024.0*1024*1024);
         double budgetGB    = (double)config.memBudgetBytes           / (1024.0*1024*1024);
         double perThreadGB = (double)config.mergeBufBytesPerThread   / (1024.0*1024*1024);
-        double accumGB     = (double)(config.accumBufSlots * sizeof(BOARD)) / (1024.0*1024*1024);
+        double accumGB     = (double)(config.accumBufSlots * sizeof(BOARD_KEY)) / (1024.0*1024*1024);
         double vramGB      = (double)gpuInfo.totalGlobalMemBytes     / (1024.0*1024*1024);
         int    l2KB        = gpuInfo.l2CacheSizeBytes / 1024;
 
@@ -426,6 +544,10 @@ int main(int argc, char* argv[])
                   accumGB, config.accumBufSlots);
         LogPrintf("  Batch Size:    %d\n",     config.batchSize);
         LogPrintf("  Merge Threads: %d\n",     config.numMergeThreads);
+        if (config.nasEnabled)
+            LogPrintf("  NAS Archive:   %s\n", nasRunDir);
+        else
+            LogPrintf("  NAS Archive:   disabled\n");
         LogPrintf("\n");
     }
 
@@ -446,6 +568,7 @@ int main(int argc, char* argv[])
     pipelineCfg.numWriterThreads = (config.numMergeThreads > 2) ? 2 : 1;
     pipelineCfg.outputDirs       = config.outputDirs;
     pipelineCfg.numOutputDirs    = config.numOutputDirs;
+    pipelineCfg.statusBlock      = g_status;
 
     // ---- Level records ----
     std::vector<LevelRecord> history;
@@ -483,20 +606,23 @@ int main(int argc, char* argv[])
     {
         PBOARD pRoot = BoardAllocateFirstBoard();
         if (!pRoot) Fatal(FATAL_ALLOCATION_FAILED, "BoardAllocateFirstBoard failed");
-        BOARD root = *pRoot;
+        BOARD_KEY rootKey = {};
+        rootKey.ullCellsInUse = pRoot->ullCellsInUse;
+        rootKey.ullCellColors = pRoot->ullCellColors;
+        rootKey.usBoardInfo   = pRoot->usBoardInfo;
         MemFree(pRoot);
 
         char seedPath[MAX_PATH];
         snprintf(seedPath, MAX_PATH, "%sole_level00_seed.sf", config.outputDirs[0]);
 
-        if (!SFWrite(seedPath, &root, 1, sizeof(BOARD), 24, 64ULL * 1024 * 1024))
+        if (!SFWrite(seedPath, &rootKey, 1, sizeof(BOARD_KEY), sizeof(BOARD_KEY), 64ULL * 1024 * 1024))
             Fatal(FATAL_FILE_OPEN, "Failed to write seed file: %s", seedPath);
         OLEFileDesc d = {};
         strncpy_s(d.path, seedPath, sizeof(d.path) - 1);
         d.drive       = 0;
         d.recordCount = 1;
-        memcpy(d.minKey, &root, 24);
-        memcpy(d.maxKey, &root, 24);
+        memcpy(d.minKey, &rootKey, 24);
+        memcpy(d.maxKey, &rootKey, 24);
         FRRegister(&currentReg, d);
     }
 
@@ -529,6 +655,15 @@ int main(int argc, char* argv[])
 
         // Solve phase: expand all boards in currentReg → solveReg.
         pipelineCfg.level = level;
+        if (g_status) {
+            g_status->currentLevel      = level;
+            g_status->phase             = OLE_PHASE_SOLVE;
+            g_status->solveBoardsIn     = FRTotalRecords(&currentReg);
+            g_status->solveBoardsRead   = 0;
+            g_status->solveGpuDispatches = 0;
+            g_status->solveSlotsExpanded = 0;
+            g_status->solveFilesWritten  = 0;
+        }
         OLEFileRegistry  solveReg = {};
         OLEPipelineStats stats    = {};
         if (!PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool))
@@ -541,12 +676,18 @@ int main(int argc, char* argv[])
 
         uint64_t solveUniqueBoards = stats.uniqueBoards;
 
+        // Archive current level's input files to NAS (they are now fully consumed).
+        // Runs concurrently with MergePhaseRun below — zero pipeline impact.
+        if (config.nasEnabled)
+            ArchiveLevelAsync(&currentReg, nasRunDir, config.outputDirs, config.numOutputDirs, level);
+
         // Merge phase: consolidate solveReg → mergedReg (fully deduped, one file per drive).
+        if (g_status) g_status->phase = OLE_PHASE_MERGE;
         FRClear(&mergedReg);
         if (!MergePhaseRun(&solveReg, &mergedReg,
                            config.outputDirs, config.numOutputDirs,
-                           level, sizeof(BOARD), 24,
-                           config.mergeBufBytesPerThread, &mergePool))
+                           level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
+                           config.mergeBufBytesPerThread, &mergePool, g_status))
         {
             LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
             break;
@@ -583,6 +724,17 @@ int main(int argc, char* argv[])
         history.push_back(rec);
 
         PrintLevelRow(rec);
+
+        if (g_status) {
+            g_status->lastLevel        = level;
+            g_status->lastBoardsIn     = rec.boardsIn;
+            g_status->lastNewBoards    = rec.newBoards;
+            g_status->lastGpuDups      = rec.gpuDups;
+            g_status->lastMergeDups    = rec.mergeDups;
+            g_status->lastUniqueBoards = rec.newBoardsNet;
+            g_status->lastSolveNs      = rec.solveNs;
+            g_status->lastMergeNs      = rec.mergeNs;
+        }
 
         currentReg.files = std::move(mergedReg.files);
     }
@@ -633,8 +785,17 @@ int main(int argc, char* argv[])
     LogPrintf("        (planned as a future phase on top of these BFS results).\n");
     LogPrintf("----------------------------------------------------------------------\n");
 
+    if (g_status) g_status->phase = OLE_PHASE_DONE;
+
     mergePool.Stop();
     StopMemStatsThread();
+    if (config.nasEnabled) {
+        LogPrintf("  Waiting for NAS archive threads to complete...\n");
+        JoinArchiveThreads();
+        LogPrintf("  NAS archival complete.\n");
+    }
+    OLEStatusClose(g_status, g_statusHandle);
+    g_status = nullptr; g_statusHandle = nullptr;
     CloseLogFile();
     return 0;
 }

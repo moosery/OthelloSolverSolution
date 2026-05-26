@@ -4,12 +4,14 @@
 #include <stddef.h>
 
 class ThreadPool;
+struct OLEStatusBlock;   // defined in OLEStatus.h
 
 // Merge all source files in srcReg into numOutputFiles sorted, deduped output files.
 // Each output file covers a non-overlapping key range and is written to a separate drive.
 // Large explicit merge buffers (mergeBufBytesPerThread) are allocated per thread to
 // maximize sequential NVMe write throughput.
 // On success, the new output files are registered into dstReg.
+// statusBlock is optional (nullptr = disabled); updated live during the merge.
 bool MergePhaseRun(
     const OLEFileRegistry* srcReg,
     OLEFileRegistry*       dstReg,
@@ -19,4 +21,5 @@ bool MergePhaseRun(
     uint32_t               recordSize,
     uint32_t               keySize,
     size_t                 mergeBufBytesPerThread,
-    ThreadPool*            pool);
+    ThreadPool*            pool,
+    OLEStatusBlock*        statusBlock = nullptr);

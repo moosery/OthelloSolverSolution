@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 class ThreadPool;
+struct OLEStatusBlock;   // defined in OLEStatus.h
 
 // Configuration for one solve-phase pipeline run (one BFS level).
 struct OLEPipelineConfig {
@@ -17,6 +18,7 @@ struct OLEPipelineConfig {
     int         numWriterThreads;    // 2-4
     const char* const* outputDirs;   // one per drive
     int         numOutputDirs;
+    OLEStatusBlock* statusBlock;     // optional live status (nullptr = disabled)
 };
 
 // Counters returned after a pipeline run.

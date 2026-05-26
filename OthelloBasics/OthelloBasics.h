@@ -2,6 +2,18 @@
 #include "Error.h"
 #include <stdio.h>
 
+/* 24 byte for a board key */
+typedef struct _BoardKey
+{
+	unsigned long long  ullCellsInUse;      /* 0-> Not used      1-> Used             */
+	unsigned long long  ullCellColors;      /* 0-> White         1-> Black            */
+	unsigned short      usBoardInfo;        /* 0b0000XXX0        Boardsize (4,6,8)    */
+	                                        /* 0b0000000X        Next Player 1->Black */
+	                                        /*                               0->White */
+	unsigned short      _pad1[3];           /* explicit alignment padding             */
+} BOARD_KEY, * PBOARD_KEY;
+static_assert(sizeof(BOARD_KEY) == 24, "BOARD_KEY must be 24 bytes");
+
 /* 64 bytes for a board */
 typedef struct _Board
 {
@@ -166,6 +178,7 @@ PBOARD BoardAllocate();
 PBOARD BoardAllocateClone(PBOARD pOrigBoard);
 void BoardCreateUniqueBoard(PBOARD pBoard, PBOARD pUniqueBoard, bool *pFlippedBoard, int numRotations = 8);
 void BoardMoveCalculator(PBOARD pBoard);
+unsigned long long BoardKeyGetMoves(const PBOARD_KEY pKey);
 
 PMOVE MoveAllocate();
 void MoveSet(PMOVE pMove, PBOARD pParent, PBOARD pResult, unsigned short usMoveIdx);
