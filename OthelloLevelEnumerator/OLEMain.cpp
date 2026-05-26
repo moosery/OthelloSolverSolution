@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.8"
+#define APP_VERSION "0.2.9"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -658,6 +658,7 @@ int main(int argc, char* argv[])
         if (g_status) {
             g_status->currentLevel      = level;
             g_status->phase             = OLE_PHASE_SOLVE;
+            g_status->phaseStartMs      = GetTickCount64();
             g_status->solveBoardsIn     = FRTotalRecords(&currentReg);
             g_status->solveBoardsRead   = 0;
             g_status->solveGpuDispatches = 0;
@@ -682,7 +683,10 @@ int main(int argc, char* argv[])
             ArchiveLevelAsync(&currentReg, nasRunDir, config.outputDirs, config.numOutputDirs, level);
 
         // Merge phase: consolidate solveReg → mergedReg (fully deduped, one file per drive).
-        if (g_status) g_status->phase = OLE_PHASE_MERGE;
+        if (g_status) {
+            g_status->phase        = OLE_PHASE_MERGE;
+            g_status->phaseStartMs = GetTickCount64();
+        }
         FRClear(&mergedReg);
         if (!MergePhaseRun(&solveReg, &mergedReg,
                            config.outputDirs, config.numOutputDirs,

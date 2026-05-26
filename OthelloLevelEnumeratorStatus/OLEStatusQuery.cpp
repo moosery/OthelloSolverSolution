@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 // ---------------------------------------------------------------------------
 // OthelloLevelEnumeratorStatus
@@ -12,7 +13,7 @@
 //
 // Usage:
 //   OthelloLevelEnumeratorStatus.exe              (display once)
-//   OthelloLevelEnumeratorStatus.exe --loop [N]   (refresh every N seconds, default 5)
+//   OthelloLevelEnumeratorStatus.exe --loop [N]   (refresh every N seconds, default 600)
 // ---------------------------------------------------------------------------
 
 static const char* PhaseName(OLEPhase p)
@@ -28,14 +29,39 @@ static const char* PhaseName(OLEPhase p)
 
 static void PrintCommas(uint64_t v)
 {
-    if (v < 1000) { printf("%llu", v); return; }
+    if (v < 1000) { printf("%llu", (unsigned long long)v); return; }
     PrintCommas(v / 1000);
-    printf(",%03llu", v % 1000);
+    printf(",%03llu", (unsigned long long)(v % 1000));
 }
 
 static double RecordsToGB(uint64_t records)
 {
     return (double)(records * 24ULL) / (1024.0 * 1024.0 * 1024.0);
+}
+
+static void FormatDuration(uint64_t ms, char* buf, size_t sz)
+{
+    uint64_t s = ms / 1000;
+    uint64_t h = s / 3600; s %= 3600;
+    uint64_t m = s / 60;   s %= 60;
+    if (h > 0)
+        snprintf(buf, sz, "%lluh %02llum %02llus",
+                 (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
+    else if (m > 0)
+        snprintf(buf, sz, "%llum %02llus",
+                 (unsigned long long)m, (unsigned long long)s);
+    else
+        snprintf(buf, sz, "%llus", (unsigned long long)s);
+}
+
+static void PrintTimestamp(void)
+{
+    time_t t = time(nullptr);
+    struct tm tm;
+    localtime_s(&tm, &t);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    printf("[%s]\n", buf);
 }
 
 static void PrintStatus(const OLEStatusBlock* s)
@@ -44,6 +70,12 @@ static void PrintStatus(const OLEStatusBlock* s)
         printf("  [status block invalid -- OLE may have just started]\n");
         return;
     }
+    if (s->version != OLE_STATUS_VERSION) {
+        printf("  [WARNING: status block version %u (OLE) vs %u (query) -- rebuild both]\n",
+               s->version, OLE_STATUS_VERSION);
+    }
+
+    uint64_t nowMs = GetTickCount64();
 
     printf("OthelloLevelEnumerator v%s  [%s]\n",
            (const char*)s->appVersion, PhaseName(s->phase));
@@ -51,42 +83,87 @@ static void PrintStatus(const OLEStatusBlock* s)
     printf("Board:  %dx%d    Level: %d / %d\n\n",
            s->boardSize, s->boardSize, s->currentLevel, s->maxLevels);
 
-    if (s->phase == OLE_PHASE_SOLVE) {
+    if (s->phase == OLE_PHASE_SOLVE)
+    {
+        uint64_t elapsedMs = (s->phaseStartMs > 0 && nowMs > s->phaseStartMs)
+                           ? nowMs - s->phaseStartMs : 0;
+
         printf("  Phase: SOLVE\n");
+
+        if (elapsedMs > 0) {
+            char elBuf[32];
+            FormatDuration(elapsedMs, elBuf, sizeof(elBuf));
+            printf("  Elapsed:   %s\n", elBuf);
+        }
+
         if (s->solveBoardsIn > 0) {
-            double pct = (double)s->solveBoardsRead * 100.0 / (double)s->solveBoardsIn;
+            double fraction = (double)s->solveBoardsRead / (double)s->solveBoardsIn;
             printf("  Progress:  ");
             PrintCommas(s->solveBoardsRead);
             printf(" / ");
             PrintCommas(s->solveBoardsIn);
-            printf(" boards read  (%.1f%%)\n", pct);
+            printf(" boards read  (%.1f%%)\n", fraction * 100.0);
+
+            if (elapsedMs > 0 && s->solveBoardsRead > 0) {
+                double rate = (double)s->solveBoardsRead * 1000.0 / (double)elapsedMs;
+                printf("  Rate:      %.0f boards/s\n", rate);
+
+                if (fraction > 0.001 && fraction < 1.0) {
+                    uint64_t etaMs = (uint64_t)((double)elapsedMs * (1.0 - fraction) / fraction);
+                    char etaBuf[32];
+                    FormatDuration(etaMs, etaBuf, sizeof(etaBuf));
+                    printf("  ETA:       ~%s remaining\n", etaBuf);
+                }
+            }
         } else {
             printf("  Progress:  ");
             PrintCommas(s->solveBoardsRead);
             printf(" boards read\n");
         }
+
         printf("  GPU:       ");
         PrintCommas(s->solveGpuDispatches);
         printf(" dispatches   |   ");
         PrintCommas(s->solveSlotsExpanded);
         printf(" slots expanded\n");
-        printf("  Files:     %llu written\n", s->solveFilesWritten);
+        printf("  Files:     %llu written\n", (unsigned long long)s->solveFilesWritten);
     }
-    else if (s->phase == OLE_PHASE_MERGE) {
+    else if (s->phase == OLE_PHASE_MERGE)
+    {
+        uint64_t elapsedMs = (s->phaseStartMs > 0 && nowMs > s->phaseStartMs)
+                           ? nowMs - s->phaseStartMs : 0;
+
         printf("  Phase: MERGE\n");
-        if (s->mergeSrcFilesTotal > 0) {
-            double pct = (s->mergeSrcFilesTotal > 0)
-                       ? (double)s->mergeSrcFilesConsumed * 100.0 / (double)s->mergeSrcFilesTotal
-                       : 0.0;
-            printf("  Sources:   %llu total   |   %llu consumed (%.1f%%)\n",
-                   s->mergeSrcFilesTotal, s->mergeSrcFilesConsumed, pct);
+
+        if (elapsedMs > 0) {
+            char elBuf[32];
+            FormatDuration(elapsedMs, elBuf, sizeof(elBuf));
+            printf("  Elapsed:   %s\n", elBuf);
         }
+
+        if (s->mergeSrcFilesTotal > 0) {
+            double fraction = (double)s->mergeSrcFilesConsumed / (double)s->mergeSrcFilesTotal;
+            printf("  Sources:   %llu total   |   %llu consumed (%.1f%%)\n",
+                   (unsigned long long)s->mergeSrcFilesTotal,
+                   (unsigned long long)s->mergeSrcFilesConsumed,
+                   fraction * 100.0);
+
+            if (elapsedMs > 0 && s->mergeSrcFilesConsumed > 0
+                && fraction > 0.001 && fraction < 1.0)
+            {
+                uint64_t etaMs = (uint64_t)((double)elapsedMs * (1.0 - fraction) / fraction);
+                char etaBuf[32];
+                FormatDuration(etaMs, etaBuf, sizeof(etaBuf));
+                printf("  ETA:       ~%s remaining\n", etaBuf);
+            }
+        }
+
         double totalGB = 0.0;
-        int    nParts  = (s->mergePartsTotal > 0 && s->mergePartsTotal <= OLE_STATUS_MAX_PARTS)
-                       ? s->mergePartsTotal : OLE_STATUS_MAX_PARTS;
+        int nParts = (s->mergePartsTotal > 0 && s->mergePartsTotal <= OLE_STATUS_MAX_PARTS)
+                   ? s->mergePartsTotal : OLE_STATUS_MAX_PARTS;
         for (int i = 0; i < nParts; i++) {
-            double gb  = RecordsToGB(s->mergeRecordsWritten[i]);
-            totalGB   += gb;
+            double gb = RecordsToGB(s->mergeRecordsWritten[i]);
+            totalGB  += gb;
             printf("  Part %d:    ", i);
             PrintCommas(s->mergeRecordsWritten[i]);
             printf(" records  (%.2f GB)\n", gb);
@@ -94,10 +171,12 @@ static void PrintStatus(const OLEStatusBlock* s)
         printf("  Total:     %.2f GB written\n", totalGB);
         printf("  Parts done: %d / %d\n", s->mergePartsDone, s->mergePartsTotal);
     }
-    else if (s->phase == OLE_PHASE_DONE) {
+    else if (s->phase == OLE_PHASE_DONE)
+    {
         printf("  Phase: DONE (all levels complete)\n");
     }
-    else {
+    else
+    {
         printf("  Phase: IDLE\n");
     }
 
@@ -121,10 +200,10 @@ int main(int argc, char* argv[])
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--loop") == 0) {
-            loopSecs = 5;
+            loopSecs = 600;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 loopSecs = atoi(argv[++i]);
-            if (loopSecs < 1) loopSecs = 5;
+            if (loopSecs < 1) loopSecs = 600;
         }
     }
 
@@ -139,7 +218,11 @@ int main(int argc, char* argv[])
     OLEStatusBlock snap = {};
 
     do {
-        if (loopSecs > 0) system("cls");
+        if (loopSecs > 0) {
+            system("cls");
+            PrintTimestamp();
+            printf("\n");
+        }
 
         memcpy(&snap, (void*)blk, sizeof(snap));
         PrintStatus(&snap);

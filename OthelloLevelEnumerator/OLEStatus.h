@@ -14,7 +14,7 @@
 // slightly stale values between updates — acceptable for a status display.
 // ---------------------------------------------------------------------------
 
-#define OLE_STATUS_VERSION   2
+#define OLE_STATUS_VERSION   3
 #define OLE_STATUS_MAGIC     0x4F4C4553u   // 'OLES'
 #define OLE_STATUS_SHM_NAME  L"Local\\OthelloLevelEnumeratorStatus"
 #define OLE_STATUS_MAX_PARTS 4
@@ -38,6 +38,7 @@ struct OLEStatusBlock {
     // --- Current phase ---
     volatile int32_t  currentLevel;
     volatile OLEPhase phase;
+    volatile uint64_t phaseStartMs;  // GetTickCount64() when current phase began
 
     // --- Solve phase (updated by GPUPipeline) ---
     volatile uint64_t solveBoardsIn;       // total boards to read (set before PipelineRun)

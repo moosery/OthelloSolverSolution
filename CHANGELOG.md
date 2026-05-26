@@ -1,5 +1,27 @@
 # Changelog
 
+## [OLE v0.2.9] - 2026-05-25
+
+### Changed
+- **`OthelloLevelEnumeratorStatus` / `OLEStatusQuery`** — added elapsed time, boards/s rate, and ETA to both solve and merge phase displays; `--loop` default interval changed from 5 s to 600 s (10 min); each loop refresh prints a `[YYYY-MM-DD HH:MM:SS]` timestamp header; added version-mismatch warning when status block version does not match query binary
+- **`OthelloLevelEnumerator` / `OLEStatus.h`** — added `phaseStartMs` field (`volatile uint64_t`, `GetTickCount64()` snapshot) after the `phase` field; written by OLEMain at each solve/merge phase transition so the query can compute elapsed time; `OLE_STATUS_VERSION` bumped 2 → 3 (struct layout changed)
+- **`OthelloLevelEnumerator` / `OLEMain`** — writes `g_status->phaseStartMs = GetTickCount64()` at both phase transitions (solve start and merge start); version bumped to 0.2.9
+
+### Query output (SOLVE example)
+```
+OthelloLevelEnumerator v0.2.9  [SOLVE]
+Run:    D:\OLEDataDir\2026_05_25.19_05_39\BoardSize6x6\
+Board:  6x6    Level: 14 / 33
+
+  Phase: SOLVE
+  Elapsed:   23m 14s
+  Progress:  550,554,389 / 1,208,836,883 boards read  (45.5%)
+  Rate:      394,762 boards/s
+  ETA:       ~27m 55s remaining
+  GPU:       8,402 dispatches   |   4,198,787,300 slots expanded
+  Files:     19 written
+```
+
 ## [OLE v0.2.8] - 2026-05-25
 
 ### Added
