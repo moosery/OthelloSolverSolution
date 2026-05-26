@@ -1,5 +1,10 @@
 # Changelog
 
+## [OLE v0.2.11] - 2026-05-26
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — updated default output directories: `outputDirs[2]` → `E:\OLEDataDir3\`, `outputDirs[3]` → `E:\OLEDataDir4\` (second NVMe); default NAS archive dir changed from `Z:\OthelloRuns\` to `F:\OthelloRuns\` (local striped HDD pool); version bumped to 0.2.11
+
 ## [OLE v0.2.10] - 2026-05-25
 
 ### Changed

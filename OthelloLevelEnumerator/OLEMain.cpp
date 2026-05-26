@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.10"
+#define APP_VERSION "0.2.11"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -281,7 +281,7 @@ static void usage()
     printf("  --output-dir3 <dir>          Extra data directory (drive 3)\n");
     printf("  --output-dir4 <dir>          Extra data directory (drive 4)\n");
     printf("  --restart                    Resume the most recent run\n");
-    printf("  --nas-dir [path]             NAS archive root (default=Z:\\OthelloRuns\\); NAS archival is ON by default\n");
+    printf("  --nas-dir [path]             NAS archive root (default=F:\\OthelloRuns\\); NAS archival is ON by default\n");
     printf("  --no-nas                     Disable NAS archival\n");
     printf("Memory options (default: --use-recommended-memory):\n");
     printf("  --use-max-memory             Use ~95%% of available RAM for merge buffers\n");
@@ -420,12 +420,12 @@ int main(int argc, char* argv[])
     config.numRotations      = 16;
     config.outputDirs[0]     = "D:\\OLEDataDir\\";
     config.outputDirs[1]     = "D:\\OLEDataDir2\\";
-    config.outputDirs[2]     = "D:\\OLEDataDir3\\";
-    config.outputDirs[3]     = "D:\\OLEDataDir4\\";
+    config.outputDirs[2]     = "E:\\OLEDataDir3\\";
+    config.outputDirs[3]     = "E:\\OLEDataDir4\\";
     config.numOutputDirs     = 4;
     config.restart           = false;
     config.nasEnabled        = true;
-    config.nasDir            = "Z:\\OthelloRuns\\";
+    config.nasDir            = "F:\\OthelloRuns\\";
     config.memMode           = MM_RECOMMENDED;
     config.specifiedMemBytes = 0;
 
