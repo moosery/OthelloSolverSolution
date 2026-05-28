@@ -14,10 +14,10 @@
 // slightly stale values between updates — acceptable for a status display.
 // ---------------------------------------------------------------------------
 
-#define OLE_STATUS_VERSION   3
+#define OLE_STATUS_VERSION   4
 #define OLE_STATUS_MAGIC     0x4F4C4553u   // 'OLES'
 #define OLE_STATUS_SHM_NAME  L"Local\\OthelloLevelEnumeratorStatus"
-#define OLE_STATUS_MAX_PARTS 4
+#define OLE_STATUS_MAX_PARTS 5
 
 enum OLEPhase : uint32_t {
     OLE_PHASE_IDLE  = 0,

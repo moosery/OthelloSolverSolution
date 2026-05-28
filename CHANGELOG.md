@@ -1,5 +1,14 @@
 # Changelog
 
+## [OLE v0.2.14] - 2026-05-28
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — added 5th default output directory `F:\OLEDataDir5\` (`numOutputDirs` now defaults to 5); solve output files distribute across D:×2, E:×2, F:×1 via round-robin, so ~20% of solve output (~1.55 TB at L17) lands on F: instead of the NVMe drives; prevents the ~290 GB NVMe overflow that would otherwise occur at L17+; F: (HDD) is not a bottleneck since the GPU pipeline writes at ~11.6 MB/s per dir, well within HDD sustained write speed; added `--output-dir5` CLI flag; `outputDirs[4]` → `[5]`; version bumped to 0.2.14
+- **`OthelloLevelEnumerator` / `OLEStatus.h`** — `OLE_STATUS_MAX_PARTS` 4 → 5 to accommodate 5th merge output partition; `OLE_STATUS_VERSION` bumped 3 → 4
+
+### Note
+F: is also used for NAS archive writes; concurrent HDD usage is modest (~11.6 MB/s solve writes vs ~130 MB/s archive peak) and acceptable.  Use `--output-dir5` to redirect to a different drive if desired.
+
 ## [OLE v0.2.13] - 2026-05-28
 
 ### Fixed

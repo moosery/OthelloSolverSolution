@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.13"
+#define APP_VERSION "0.2.14"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -36,7 +36,7 @@ typedef struct OLEConfig
 {
     int         boardSize;
     int         numRotations;
-    const char* outputDirs[4];    // [0]=primary (logs, meta); [1..3]=extra data dirs
+    const char* outputDirs[5];    // [0]=primary (logs, meta); [1..4]=extra data dirs
     int         numOutputDirs;
     bool        restart;
     bool        nasEnabled;
@@ -292,6 +292,7 @@ static void usage()
     printf("  --output-dir2 <dir>          Extra data directory (drive 2)\n");
     printf("  --output-dir3 <dir>          Extra data directory (drive 3)\n");
     printf("  --output-dir4 <dir>          Extra data directory (drive 4)\n");
+    printf("  --output-dir5 <dir>          Extra data directory (drive 5, e.g. HDD overflow)\n");
     printf("  --restart                    Resume the most recent run\n");
     printf("  --nas-dir [path]             NAS archive root (default=F:\\OthelloRuns\\); NAS archival is ON by default\n");
     printf("  --no-nas                     Disable NAS archival\n");
@@ -335,6 +336,11 @@ static void processArgs(int argc, char* argv[], POLEConfig cfg)
         {
             cfg->outputDirs[3] = argv[++i];
             if (cfg->numOutputDirs < 4) cfg->numOutputDirs = 4;
+        }
+        else if (strcmp(argv[i], "--output-dir5") == 0 && i + 1 < argc)
+        {
+            cfg->outputDirs[4] = argv[++i];
+            if (cfg->numOutputDirs < 5) cfg->numOutputDirs = 5;
         }
         else if (strcmp(argv[i], "--restart") == 0)
         {
@@ -434,7 +440,8 @@ int main(int argc, char* argv[])
     config.outputDirs[1]     = "D:\\OLEDataDir2\\";
     config.outputDirs[2]     = "E:\\OLEDataDir3\\";
     config.outputDirs[3]     = "E:\\OLEDataDir4\\";
-    config.numOutputDirs     = 4;
+    config.outputDirs[4]     = "F:\\OLEDataDir5\\";
+    config.numOutputDirs     = 5;
     config.restart           = false;
     config.nasEnabled        = true;
     config.nasDir            = "F:\\OthelloRuns\\";
@@ -480,7 +487,7 @@ int main(int argc, char* argv[])
     // ---- Compute timestamped run directories ----
     // Each user-specified dir is a root; actual data lives under
     // <root>\<YYYY_MM_DD.HH_MM_SS>\BoardSize<N>x<N>\  (same convention as CL solver).
-    char runDirs[4][MAX_PATH];
+    char runDirs[5][MAX_PATH];
     char nasRunDir[MAX_PATH] = {};
     {
         SYSTEMTIME st;
