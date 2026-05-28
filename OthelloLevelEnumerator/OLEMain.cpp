@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.12"
+#define APP_VERSION "0.2.13"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -186,14 +186,16 @@ static void StopMemStatsThread()
 }
 
 // ---------------------------------------------------------------------------
-// NAS archival — per-file, driven during the solve phase
+// NAS archival — per-file, triggered after each input file is fully read
 //
-// Each input file is copied to NAS as soon as PipelineRun begins reading it
-// (all copies start concurrently before the first board is processed).
-// After each file is fully read, OnInputFileConsumed joins the copy thread
-// and deletes the local copy, freeing disk space progressively during solve
-// rather than holding all input files on disk until solve completes.
+// When PipelineRun finishes reading input file N it calls OnInputFileConsumed.
+// That callback launches a background thread that copies file N to NAS and
+// then deletes the local copy, freeing disk space while the solve is still
+// reading file N+1 (a different file — no page-cache or bandwidth conflict).
 // ---------------------------------------------------------------------------
+
+static std::mutex               g_archiveMtx;
+static std::vector<std::thread> g_archiveThreads;
 
 // ---------------------------------------------------------------------------
 // Live status — shared memory block readable by OLEStatusQuery.exe
@@ -202,8 +204,8 @@ static void StopMemStatsThread()
 static OLEStatusBlock* g_status        = nullptr;
 static HANDLE          g_statusHandle  = nullptr;
 
-// Copy src → dst and log the result.  Delete is done separately by the caller.
-static void ArchiveCopyFile(const std::string& src, const std::string& dst, int level)
+// Copy src → dst, log result, then delete src.
+static void ArchiveOneFile(std::string src, std::string dst, int level)
 {
     ClockTick t; ClockStart(&t);
     if (!CopyFileA(src.c_str(), dst.c_str(), FALSE)) {
@@ -212,6 +214,7 @@ static void ArchiveCopyFile(const std::string& src, const std::string& dst, int 
                   level, err, src.c_str());
         return;
     }
+    remove(src.c_str());
     double secs = (double)ClockNanosSinceStart(&t) / 1e9;
     WIN32_FILE_ATTRIBUTE_DATA fa = {};
     double gb = 0.0;
@@ -225,39 +228,54 @@ static void ArchiveCopyFile(const std::string& src, const std::string& dst, int 
               level, fname, gb, secs);
 }
 
+static void JoinArchiveThreads()
+{
+    std::lock_guard<std::mutex> lk(g_archiveMtx);
+    for (auto& t : g_archiveThreads)
+        if (t.joinable()) t.join();
+    g_archiveThreads.clear();
+}
+
 // Per-level context threaded through the GPUPipeline callback.
 struct InputArchiveCtx {
-    int        level;       // current solve level number (for log labels)
-    bool       nasEnabled;
-    std::mutex mu;
-    // One entry per input file: (localPath, copy-thread).
-    // Consumed (joined + erased) by OnInputFileConsumed as each file is read.
-    std::vector<std::pair<std::string, std::thread>> copyThreads;
+    int         level;
+    bool        nasEnabled;
+    std::string nasRunDir;
+    const char* const* outputDirs;
+    int         numOutputDirs;
 };
 
-// GPUPipeline callback: called after each input file is fully read.
-// Joins the NAS copy thread for that file (normally already done) then
-// deletes the local copy to free disk space during the solve phase.
+// GPUPipeline callback: called after each input file is fully read and closed.
+// Starts a background thread that copies the file to NAS then deletes the
+// local copy.  The copy runs while the solve reads the *next* input file
+// (different file → no page-cache or bandwidth conflict with the solve reader).
 static void OnInputFileConsumed(const char* path, void* vctx)
 {
     auto* ctx = static_cast<InputArchiveCtx*>(vctx);
 
-    if (ctx->nasEnabled) {
-        std::thread t;
-        {
-            std::lock_guard<std::mutex> lk(ctx->mu);
-            for (auto it = ctx->copyThreads.begin(); it != ctx->copyThreads.end(); ++it) {
-                if (it->first == path) {
-                    t = std::move(it->second);
-                    ctx->copyThreads.erase(it);
-                    break;
-                }
-            }
-        }
-        if (t.joinable()) t.join();   // wait for NAS copy (usually already done)
+    if (!ctx->nasEnabled) {
+        remove(path);
+        return;
     }
 
-    remove(path);   // free local disk space
+    const char* rel = nullptr;
+    for (int i = 0; i < ctx->numOutputDirs && !rel; i++) {
+        size_t plen = strlen(ctx->outputDirs[i]);
+        if (_strnicmp(path, ctx->outputDirs[i], plen) == 0)
+            rel = path + plen;
+    }
+    if (!rel) { rel = strrchr(path, '\\'); rel = rel ? rel + 1 : path; }
+    char dstBuf[MAX_PATH];
+    snprintf(dstBuf, MAX_PATH, "%s%s", ctx->nasRunDir.c_str(), rel);
+
+    std::string src = path;
+    std::string dst = dstBuf;
+    int lv          = ctx->level;
+    std::thread t([src, dst, lv] { ArchiveOneFile(src, dst, lv); });
+    {
+        std::lock_guard<std::mutex> lk(g_archiveMtx);
+        g_archiveThreads.push_back(std::move(t));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -667,56 +685,26 @@ int main(int argc, char* argv[])
             g_status->solveFilesWritten  = 0;
         }
 
-        // --- Archive: launch NAS copies of all input files before solve begins.
-        // Files are deleted from local disk as each is fully read (OnInputFileConsumed),
-        // freeing space progressively rather than holding all input files on disk
-        // until solve completes.
+        // --- Archive: register callback so each input file is archived and deleted
+        // immediately after PipelineRun finishes reading it.  The copy+delete runs
+        // in a background thread (non-blocking) while the solve reads the next file.
         InputArchiveCtx archCtx;
-        archCtx.level      = level + 1;   // matches old labelling convention
-        archCtx.nasEnabled = config.nasEnabled && nasRunDir[0] != '\0';
+        archCtx.level         = level;
+        archCtx.nasEnabled    = config.nasEnabled && nasRunDir[0] != '\0';
+        archCtx.nasRunDir     = nasRunDir;
+        archCtx.outputDirs    = config.outputDirs;
+        archCtx.numOutputDirs = config.numOutputDirs;
 
         if (archCtx.nasEnabled)
-        {
             LogPrintf("  [Archive] Level %2d  queued %zu file(s) to NAS\n",
-                      level + 1, currentReg.files.size());
-            for (const OLEFileDesc& fd : currentReg.files) {
-                const char* rel = nullptr;
-                for (int i = 0; i < config.numOutputDirs && !rel; i++) {
-                    size_t plen = strlen(config.outputDirs[i]);
-                    if (_strnicmp(fd.path, config.outputDirs[i], plen) == 0)
-                        rel = fd.path + plen;
-                }
-                if (!rel) { rel = strrchr(fd.path, '\\'); rel = rel ? rel + 1 : fd.path; }
-                char dstBuf[MAX_PATH];
-                snprintf(dstBuf, MAX_PATH, "%s%s", nasRunDir, rel);
-                std::string src = fd.path;
-                std::string dst = dstBuf;
-                int lv          = level + 1;
-                std::thread t([src, dst, lv] { ArchiveCopyFile(src, dst, lv); });
-                std::lock_guard<std::mutex> lk(archCtx.mu);
-                archCtx.copyThreads.push_back({src, std::move(t)});
-            }
-        }
+                      level, currentReg.files.size());
 
         pipelineCfg.onInputFileConsumed = OnInputFileConsumed;
         pipelineCfg.inputFileCtx        = &archCtx;
 
         OLEFileRegistry  solveReg = {};
         OLEPipelineStats stats    = {};
-        bool pipelineOk = PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool);
-
-        // Join any copy threads not yet consumed by the callback (error path or
-        // NAS-disabled path) and delete their local files.
-        {
-            std::lock_guard<std::mutex> lk(archCtx.mu);
-            for (auto& [path, t] : archCtx.copyThreads) {
-                if (t.joinable()) t.join();
-                remove(path.c_str());
-            }
-            archCtx.copyThreads.clear();
-        }
-
-        if (!pipelineOk)
+        if (!PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool))
         {
             LogPrintf("  ERROR: PipelineRun failed at level %d\n", level);
             break;
@@ -837,6 +825,11 @@ int main(int argc, char* argv[])
 
     mergePool.Stop();
     StopMemStatsThread();
+    if (config.nasEnabled) {
+        LogPrintf("  Waiting for NAS archive threads to complete...\n");
+        JoinArchiveThreads();
+        LogPrintf("  NAS archival complete.\n");
+    }
     OLEStatusClose(g_status, g_statusHandle);
     g_status = nullptr; g_statusHandle = nullptr;
     CloseLogFile();

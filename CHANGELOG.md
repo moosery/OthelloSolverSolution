@@ -1,5 +1,10 @@
 # Changelog
 
+## [OLE v0.2.13] - 2026-05-28
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — v0.2.12 regression: archive copy threads started before `PipelineRun` ran concurrently with solve reads on the same input files, causing 2–4× GPU pipeline slowdown (likely CPU bus contention from CopyFileA's buffer copies interfering with CUDA dispatch); fixed by starting each file's copy+delete thread in the callback *after* the file is fully read and closed, so the copy of file N runs while the solve reads file N+1 (different file — no contention); copy and delete both run in the background thread, so neither blocks the GPU pipeline; `JoinArchiveThreads` at shutdown restored; version bumped to 0.2.13
+
 ## [OLE v0.2.12] - 2026-05-27
 
 ### Changed
