@@ -196,6 +196,10 @@ bool PipelineRun(
         }
 
         SFReaderClose(&reader);
+
+        // Notify caller that this input file has been fully read.
+        if (ok && cfg->onInputFileConsumed)
+            cfg->onInputFileConsumed(fd.path, cfg->inputFileCtx);
     }
 
     // Flush any remaining data in the current buffer.

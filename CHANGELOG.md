@@ -1,5 +1,15 @@
 # Changelog
 
+## [OLE v0.2.12] - 2026-05-27
+
+### Changed
+- **`OthelloLevelEnumerator` / `GPUPipeline.h`** — added `onInputFileConsumed` callback (`void (*)(const char* path, void* ctx)`) and `inputFileCtx` to `OLEPipelineConfig`; `PipelineRun` calls the callback after each input file's handle is closed (all records consumed)
+- **`OthelloLevelEnumerator` / `GPUPipeline.cpp`** — calls `cfg->onInputFileConsumed(fd.path, cfg->inputFileCtx)` after `SFReaderClose` for each input file, if the callback is set
+- **`OthelloLevelEnumerator` / `OLEMain`** — archive now starts **before** `PipelineRun`: NAS copies of all input files are launched concurrently in background threads at the start of each level's solve phase; as each input file is fully read, `OnInputFileConsumed` joins that file's copy thread (copy is typically long complete by then) and immediately deletes the local copy, freeing disk space progressively during solve; removed `ArchiveLevelAsync`, `g_archiveThreads`, `g_archiveMtx`, `JoinArchiveThreads`, and the end-of-run NAS wait log; version bumped to 0.2.12
+
+### Fixed
+- **Disk overflow during large solve phases**: previously all input files (e.g. 1.47 TB of L16 merge output) remained on local NVMe for the entire duration of the solve phase because the NAS archive fired only after `PipelineRun` returned; at L17+ the combined peak of input files + accumulating solve output exceeded 8 TB NVMe capacity; with this fix each input file is deleted as soon as it is read, keeping peak local disk usage at roughly the solve output size alone
+
 ## [OLE v0.2.11] - 2026-05-26
 
 ### Changed

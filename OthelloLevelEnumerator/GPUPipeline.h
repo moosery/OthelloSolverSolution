@@ -19,6 +19,13 @@ struct OLEPipelineConfig {
     const char* const* outputDirs;   // one per drive
     int         numOutputDirs;
     OLEStatusBlock* statusBlock;     // optional live status (nullptr = disabled)
+
+    // Called by PipelineRun after each input file is fully read (all records consumed
+    // and the file handle closed).  Intended use: archive copy to NAS + delete local.
+    // Fires on the reader thread — implementation must not block for long.
+    // Set to nullptr to disable.
+    void (*onInputFileConsumed)(const char* path, void* ctx);
+    void*           inputFileCtx;
 };
 
 // Counters returned after a pipeline run.
