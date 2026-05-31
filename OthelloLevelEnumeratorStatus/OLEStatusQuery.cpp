@@ -80,8 +80,15 @@ static void PrintStatus(const OLEStatusBlock* s)
     printf("OthelloLevelEnumerator v%s  [%s]\n",
            (const char*)s->appVersion, PhaseName(s->phase));
     printf("Run:    %s\n", (const char*)s->runDir);
-    printf("Board:  %dx%d    Level: %d / %d\n\n",
+    printf("Board:  %dx%d    Level: %d / %d\n",
            s->boardSize, s->boardSize, s->currentLevel, s->maxLevels);
+
+    if (s->runStartMs > 0 && nowMs > s->runStartMs) {
+        char runBuf[32];
+        FormatDuration(nowMs - s->runStartMs, runBuf, sizeof(runBuf));
+        printf("Run time: %s\n", runBuf);
+    }
+    printf("\n");
 
     if (s->phase == OLE_PHASE_SOLVE)
     {
@@ -141,35 +148,51 @@ static void PrintStatus(const OLEStatusBlock* s)
             printf("  Elapsed:   %s\n", elBuf);
         }
 
-        if (s->mergeSrcFilesTotal > 0) {
-            double fraction = (double)s->mergeSrcFilesConsumed / (double)s->mergeSrcFilesTotal;
-            printf("  Sources:   %llu total   |   %llu consumed (%.1f%%)\n",
-                   (unsigned long long)s->mergeSrcFilesTotal,
-                   (unsigned long long)s->mergeSrcFilesConsumed,
-                   fraction * 100.0);
-
-            if (elapsedMs > 0 && s->mergeSrcFilesConsumed > 0
-                && fraction > 0.001 && fraction < 1.0)
-            {
-                uint64_t etaMs = (uint64_t)((double)elapsedMs * (1.0 - fraction) / fraction);
-                char etaBuf[32];
-                FormatDuration(etaMs, etaBuf, sizeof(etaBuf));
-                printf("  ETA:       ~%s remaining\n", etaBuf);
+        // Phase 1: per-directory pre-merge progress.
+        int nDirs = (s->mergePartsTotal > 0 && s->mergePartsTotal <= OLE_STATUS_MAX_PARTS)
+                  ? s->mergePartsTotal : OLE_STATUS_MAX_PARTS;
+        printf("  Ph1 (pre-merge):\n");
+        for (int i = 0; i < nDirs; i++) {
+            uint64_t tot = s->mergePreDirTotal[i];
+            uint64_t con = s->mergePreDirConsumed[i];
+            if (tot == 0) {
+                printf("    Dir %d:  (empty)\n", i);
+                continue;
+            }
+            bool done = (con >= tot);
+            if (done) {
+                printf("    Dir %d:  %llu / %llu  [done]\n",
+                       i, (unsigned long long)con, (unsigned long long)tot);
+            } else {
+                double frac = (double)con / (double)tot;
+                printf("    Dir %d:  %llu / %llu  (%.1f%%)",
+                       i, (unsigned long long)con, (unsigned long long)tot, frac * 100.0);
+                if (elapsedMs > 0 && con > 0 && frac > 0.001 && frac < 1.0) {
+                    uint64_t etaMs = (uint64_t)((double)elapsedMs * (1.0 - frac) / frac);
+                    char etaBuf[32];
+                    FormatDuration(etaMs, etaBuf, sizeof(etaBuf));
+                    printf("  — ETA: ~%s", etaBuf);
+                }
+                printf("\n");
             }
         }
 
+        // Phase 2: final N-way merge of intermediates → output.
+        int nParts = nDirs;
         double totalGB = 0.0;
-        int nParts = (s->mergePartsTotal > 0 && s->mergePartsTotal <= OLE_STATUS_MAX_PARTS)
-                   ? s->mergePartsTotal : OLE_STATUS_MAX_PARTS;
-        for (int i = 0; i < nParts; i++) {
-            double gb = RecordsToGB(s->mergeRecordsWritten[i]);
-            totalGB  += gb;
-            printf("  Part %d:    ", i);
-            PrintCommas(s->mergeRecordsWritten[i]);
-            printf(" records  (%.2f GB)\n", gb);
+        for (int i = 0; i < nParts; i++)
+            totalGB += RecordsToGB(s->mergeRecordsWritten[i]);
+
+        printf("  Ph2 (final): %d / %d parts written   %.2f GB total\n",
+               s->mergePartsDone, s->mergePartsTotal, totalGB);
+        if (s->mergePartsDone > 0 || totalGB > 0.0) {
+            for (int i = 0; i < nParts; i++) {
+                if (s->mergeRecordsWritten[i] == 0) continue;
+                printf("    Part %d:  ", i);
+                PrintCommas(s->mergeRecordsWritten[i]);
+                printf(" records  (%.2f GB)\n", RecordsToGB(s->mergeRecordsWritten[i]));
+            }
         }
-        printf("  Total:     %.2f GB written\n", totalGB);
-        printf("  Parts done: %d / %d\n", s->mergePartsDone, s->mergePartsTotal);
     }
     else if (s->phase == OLE_PHASE_DONE)
     {
@@ -181,12 +204,22 @@ static void PrintStatus(const OLEStatusBlock* s)
     }
 
     if (s->lastLevel >= 0) {
+        uint64_t slvRecs = (s->lastNewBoards > s->lastGpuDups)
+                         ? s->lastNewBoards - s->lastGpuDups : 0;
+        double slvGB = (double)(slvRecs             * 24ULL) / (1024.0 * 1024 * 1024);
+        double mrgGB = (double)(s->lastUniqueBoards * 24ULL) / (1024.0 * 1024 * 1024);
+
         printf("\n  Last completed: Level %d\n", s->lastLevel);
         printf("    BoardsIn:    "); PrintCommas(s->lastBoardsIn);     printf("\n");
         printf("    NewBoards:   "); PrintCommas(s->lastNewBoards);    printf("\n");
+        printf("    Pass:        "); PrintCommas(s->lastPassBoards);   printf("\n");
+        printf("    Ends:        "); PrintCommas(s->lastEndBoards);    printf("\n");
         printf("    GpuDups:     "); PrintCommas(s->lastGpuDups);      printf("\n");
         printf("    MergeDups:   "); PrintCommas(s->lastMergeDups);    printf("\n");
         printf("    NetUnique:   "); PrintCommas(s->lastUniqueBoards); printf("\n");
+        printf("    SlvFls:      %llu\n", (unsigned long long)s->lastSolveFiles);
+        printf("    SlvGB:       %.2f GB  (temp NVMe during solve)\n", slvGB);
+        printf("    MrgGB:       %.2f GB  (canonical on NAS)\n",       mrgGB);
         printf("    Solve: %.1f s   Merge: %.1f s   Total: %.1f s\n",
                (double)s->lastSolveNs / 1e9,
                (double)s->lastMergeNs / 1e9,

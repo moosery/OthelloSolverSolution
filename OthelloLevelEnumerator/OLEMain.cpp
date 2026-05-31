@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.14"
+#define APP_VERSION "0.2.15"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -71,6 +71,7 @@ struct LevelRecord
     long long elapsedNs;
     long long solveNs;
     long long mergeNs;
+    uint64_t  solveFiles;   // solve output file count (Phase 1 merge fan-in)
 };
 
 // ---------------------------------------------------------------------------
@@ -186,96 +187,18 @@ static void StopMemStatsThread()
 }
 
 // ---------------------------------------------------------------------------
-// NAS archival — per-file, triggered after each input file is fully read
-//
-// When PipelineRun finishes reading input file N it calls OnInputFileConsumed.
-// That callback launches a background thread that copies file N to NAS and
-// then deletes the local copy, freeing disk space while the solve is still
-// reading file N+1 (a different file — no page-cache or bandwidth conflict).
-// ---------------------------------------------------------------------------
-
-static std::mutex               g_archiveMtx;
-static std::vector<std::thread> g_archiveThreads;
-
-// ---------------------------------------------------------------------------
 // Live status — shared memory block readable by OLEStatusQuery.exe
 // ---------------------------------------------------------------------------
 
 static OLEStatusBlock* g_status        = nullptr;
 static HANDLE          g_statusHandle  = nullptr;
 
-// Copy src → dst, log result, then delete src.
-static void ArchiveOneFile(std::string src, std::string dst, int level)
-{
-    ClockTick t; ClockStart(&t);
-    if (!CopyFileA(src.c_str(), dst.c_str(), FALSE)) {
-        DWORD err = GetLastError();
-        LogPrintf("  [Archive] Level %2d ERROR: CopyFile failed (%lu): %s\n",
-                  level, err, src.c_str());
-        return;
-    }
-    remove(src.c_str());
-    double secs = (double)ClockNanosSinceStart(&t) / 1e9;
-    WIN32_FILE_ATTRIBUTE_DATA fa = {};
-    double gb = 0.0;
-    if (GetFileAttributesExA(dst.c_str(), GetFileExInfoStandard, &fa)) {
-        ULONGLONG sz = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
-        gb = (double)sz / (1024.0 * 1024 * 1024);
-    }
-    const char* fname = strrchr(dst.c_str(), '\\');
-    fname = fname ? fname + 1 : dst.c_str();
-    LogPrintf("  [Archive] Level %2d  %-52s  (%.2f GB, %.1f s)\n",
-              level, fname, gb, secs);
-}
-
-static void JoinArchiveThreads()
-{
-    std::lock_guard<std::mutex> lk(g_archiveMtx);
-    for (auto& t : g_archiveThreads)
-        if (t.joinable()) t.join();
-    g_archiveThreads.clear();
-}
-
-// Per-level context threaded through the GPUPipeline callback.
-struct InputArchiveCtx {
-    int         level;
-    bool        nasEnabled;
-    std::string nasRunDir;
-    const char* const* outputDirs;
-    int         numOutputDirs;
-};
-
 // GPUPipeline callback: called after each input file is fully read and closed.
-// Starts a background thread that copies the file to NAS then deletes the
-// local copy.  The copy runs while the solve reads the *next* input file
-// (different file → no page-cache or bandwidth conflict with the solve reader).
-static void OnInputFileConsumed(const char* path, void* vctx)
+// Deletes the solve input immediately; merge output written directly to NAS is
+// the new canonical set for the next level.
+static void OnInputFileConsumed(const char* path, void* /*ctx*/)
 {
-    auto* ctx = static_cast<InputArchiveCtx*>(vctx);
-
-    if (!ctx->nasEnabled) {
-        remove(path);
-        return;
-    }
-
-    const char* rel = nullptr;
-    for (int i = 0; i < ctx->numOutputDirs && !rel; i++) {
-        size_t plen = strlen(ctx->outputDirs[i]);
-        if (_strnicmp(path, ctx->outputDirs[i], plen) == 0)
-            rel = path + plen;
-    }
-    if (!rel) { rel = strrchr(path, '\\'); rel = rel ? rel + 1 : path; }
-    char dstBuf[MAX_PATH];
-    snprintf(dstBuf, MAX_PATH, "%s%s", ctx->nasRunDir.c_str(), rel);
-
-    std::string src = path;
-    std::string dst = dstBuf;
-    int lv          = ctx->level;
-    std::thread t([src, dst, lv] { ArchiveOneFile(src, dst, lv); });
-    {
-        std::lock_guard<std::mutex> lk(g_archiveMtx);
-        g_archiveThreads.push_back(std::move(t));
-    }
+    remove(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,12 +316,14 @@ static void MergeMeta(char* buf, size_t sz, const char* dir, int level)
 
 static void PrintLevelHeader()
 {
-    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s  %s\n",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s %8s %8s %8s  %s\n",
               "Lv", "BoardsIn", "NewBoards", "Pass", "GpuDups", "MrgDups",
-              "Mvs", "Ends", "MaxMv", "SlvTm(s)", "MrgTm(s)", "Tm(s)", "PredTm(s)", "ns/brd", "DateTime");
-    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s  -------------------\n",
+              "Mvs", "Ends", "MaxMv", "SlvTm(s)", "MrgTm(s)", "Tm(s)", "PredTm(s)", "ns/brd",
+              "SlvFls", "SlvGB", "MrgGB", "DateTime");
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s %8s %8s %8s  -------------------\n",
               "--", "--------", "---------", "----", "-------", "-------",
-              "---", "----", "-----", "--------", "--------", "-----", "---------", "------");
+              "---", "----", "-----", "--------", "--------", "-----", "---------", "------",
+              "------", "-----", "-----");
 }
 
 static void PrintLevelRow(const LevelRecord& r)
@@ -409,6 +334,9 @@ static void PrintLevelRow(const LevelRecord& r)
     double    ratio    = (r.boardsIn > 0) ? (double)r.newBoardsNet / (double)r.boardsIn : 0.0;
     double    predSec  = tmSec * ratio;
     long long nsPerBrd = (r.boardsIn > 0) ? r.elapsedNs / (long long)r.boardsIn : 0;
+    uint64_t  slvRecs  = (r.newBoards > r.gpuDups) ? r.newBoards - r.gpuDups : 0;
+    double    slvGB    = (double)(slvRecs * 24ULL) / (1024.0 * 1024 * 1024);
+    double    mrgGB    = (double)(r.newBoardsNet * 24ULL) / (1024.0 * 1024 * 1024);
 
     time_t now = time(nullptr);
     struct tm tmNow;
@@ -416,10 +344,11 @@ static void PrintLevelRow(const LevelRecord& r)
     char dtBuf[32];
     strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
 
-    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %11.3f %11.3f %11.3f %10lld  %s\n",
+    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %11.3f %11.3f %11.3f %10lld %8llu %8.2f %8.2f  %s\n",
               r.level, r.boardsIn, r.newBoards, r.passBoards, r.gpuDups, r.mergeDups,
               r.totalMoves, r.endBoards, r.maxMovesAny,
-              slvSec, mrgSec, tmSec, predSec, nsPerBrd, dtBuf);
+              slvSec, mrgSec, tmSec, predSec, nsPerBrd,
+              r.solveFiles, slvGB, mrgGB, dtBuf);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +583,7 @@ int main(int argc, char* argv[])
 
     // ---- BFS level loop ----
     ClockTick wallStart; ClockStart(&wallStart);
+    if (g_status) g_status->runStartMs = GetTickCount64();
     int maxLevels  = (config.boardSize == 4) ? 13
                    : (config.boardSize == 6) ? 33 : 61;
     uint64_t  skippedBoards = 0;   // boards at skipped levels (for summary total)
@@ -692,22 +622,8 @@ int main(int argc, char* argv[])
             g_status->solveFilesWritten  = 0;
         }
 
-        // --- Archive: register callback so each input file is archived and deleted
-        // immediately after PipelineRun finishes reading it.  The copy+delete runs
-        // in a background thread (non-blocking) while the solve reads the next file.
-        InputArchiveCtx archCtx;
-        archCtx.level         = level;
-        archCtx.nasEnabled    = config.nasEnabled && nasRunDir[0] != '\0';
-        archCtx.nasRunDir     = nasRunDir;
-        archCtx.outputDirs    = config.outputDirs;
-        archCtx.numOutputDirs = config.numOutputDirs;
-
-        if (archCtx.nasEnabled)
-            LogPrintf("  [Archive] Level %2d  queued %zu file(s) to NAS\n",
-                      level, currentReg.files.size());
-
         pipelineCfg.onInputFileConsumed = OnInputFileConsumed;
-        pipelineCfg.inputFileCtx        = &archCtx;
+        pipelineCfg.inputFileCtx        = nullptr;
 
         OLEFileRegistry  solveReg = {};
         OLEPipelineStats stats    = {};
@@ -730,7 +646,8 @@ int main(int argc, char* argv[])
         if (!MergePhaseRun(&solveReg, &mergedReg,
                            config.outputDirs, config.numOutputDirs,
                            level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
-                           config.mergeBufBytesPerThread, &mergePool, g_status))
+                           config.mergeBufBytesPerThread, &mergePool, g_status,
+                           nasRunDir))
         {
             LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
             break;
@@ -764,6 +681,7 @@ int main(int argc, char* argv[])
         rec.elapsedNs    = ns;
         rec.solveNs      = solveNs;
         rec.mergeNs      = mergeNs;
+        rec.solveFiles   = stats.filesWritten;
         history.push_back(rec);
 
         PrintLevelRow(rec);
@@ -777,6 +695,9 @@ int main(int argc, char* argv[])
             g_status->lastUniqueBoards = rec.newBoardsNet;
             g_status->lastSolveNs      = rec.solveNs;
             g_status->lastMergeNs      = rec.mergeNs;
+            g_status->lastPassBoards   = rec.passBoards;
+            g_status->lastEndBoards    = rec.endBoards;
+            g_status->lastSolveFiles   = rec.solveFiles;
         }
 
         currentReg.files = std::move(mergedReg.files);
@@ -832,11 +753,6 @@ int main(int argc, char* argv[])
 
     mergePool.Stop();
     StopMemStatsThread();
-    if (config.nasEnabled) {
-        LogPrintf("  Waiting for NAS archive threads to complete...\n");
-        JoinArchiveThreads();
-        LogPrintf("  NAS archival complete.\n");
-    }
     OLEStatusClose(g_status, g_statusHandle);
     g_status = nullptr; g_statusHandle = nullptr;
     CloseLogFile();

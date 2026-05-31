@@ -1,5 +1,19 @@
 # Changelog
 
+## [OLE v0.2.15] - 2026-05-31
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — L17 merge crash (errno=24 "Too many open files") fixed architecturally via two-phase merge: Phase 1 pre-merges each output directory's solve files into one sorted+deduped intermediate using a min-heap and large streaming read buffers; a shared dynamic semaphore (`_getmaxstdio() - 20`) tracks open FILE* handles across all Phase 1 directory threads and blocks a thread from starting a new batch until handles are available, preventing the CRT limit from being exceeded regardless of solve-file count; Phase 2 performs a lightweight N-way (≤5) merge of the per-directory intermediates, writing final output directly to `nasRunDir` (if enabled); source solve files are deleted progressively during Phase 1 as each is exhausted
+
+### Changed
+- **`OthelloLevelEnumerator` / `MergePhase`** — replaced O(M) linear-scan minimum in Phase 1 with O(log M) binary min-heap; Phase 2 retains linear scan (trivially fast at ≤5 sources); large streaming read buffers in Phase 1 (`~80% of per-thread budget / batch_size` per source file, typically 5–10 MB vs previous 256 KB) dramatically improve NVMe sequential read efficiency; F: (HDD) directory thread is queued first to maximise overlap with the faster NVMe directory threads
+- **`OthelloLevelEnumerator` / `MergePhase.h`** — `MergePhaseRun` gains `nasRunDir` parameter (default `nullptr`); Phase 2 writes final merge output directly to `nasRunDir` when non-empty, eliminating the separate archive-copy step; falls back to `outputDirs[i]` when NAS is disabled
+- **`OthelloLevelEnumerator` / `OLEMain`** — removed NAS archive copy machinery (`ArchiveCopyFile`, `g_archiveThreads`, `g_archiveMtx`, `JoinArchiveThreads`, `InputArchiveCtx`); `OnInputFileConsumed` callback simplified to `remove(path)` — merge output written directly to NAS is the canonical data for the next level; next level's solve reads from NAS (F:\OthelloRuns\, HDD ~130 MB/s); input files deleted as consumed so NAS stays lean ("nuke it" reconnaissance mode)
+- **`OthelloLevelEnumerator` / `OLEMain`** — three new columns in per-level table: `SlvFls` (solve output file count = Phase 1 merge fan-in), `SlvGB` (temporary NVMe needed during solve = `(NewBoards − GpuDups) × 24 B / 1024³`), `MrgGB` (permanent canonical storage for this level = `NetUnique × 24 B / 1024³`); `LevelRecord` gains `solveFiles` field populated from `stats.filesWritten`; purpose: reconnaissance run collects per-level storage requirements for planning the final production run
+- **`OthelloLevelEnumerator` / `OLEStatus.h`** — `OLE_STATUS_VERSION` bumped 4 → 5; six new fields added to `OLEStatusBlock`: `runStartMs` (GetTickCount64 at BFS loop start, enables total run-time display in query), `mergePreDirTotal[5]` + `mergePreDirConsumed[5]` (Phase 1 per-directory source-file counts, written by `RunPreMergeDir` so the query can show per-dir progress and per-dir ETA), `lastPassBoards` + `lastEndBoards` + `lastSolveFiles` (complement the existing `lastLevel` snapshot so the query can display the full level row including pass, terminal, and file count)
+- **`OthelloLevelEnumeratorStatus` / `OLEStatusQuery`** — MERGE phase display updated for two-phase design: Phase 1 shows per-directory progress ("Dir 0: 451/451 [done] … Dir 4: 312/451 (69.2%) — ETA: ~48m") so the semaphore behaviour and HDD bottleneck are visible; Phase 2 shows "Ph2 (final): N/5 parts written  X GB total" with per-part breakdown; header gains "Run time: Xh Ym Zs" (from `runStartMs`); "Last completed" section gains `Pass`, `Ends`, `SlvFls`, `SlvGB`, `MrgGB`
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.15
+
 ## [OLE v0.2.14] - 2026-05-28
 
 ### Changed

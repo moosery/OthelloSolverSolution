@@ -14,7 +14,7 @@
 // slightly stale values between updates — acceptable for a status display.
 // ---------------------------------------------------------------------------
 
-#define OLE_STATUS_VERSION   4
+#define OLE_STATUS_VERSION   5
 #define OLE_STATUS_MAGIC     0x4F4C4553u   // 'OLES'
 #define OLE_STATUS_SHM_NAME  L"Local\\OthelloLevelEnumeratorStatus"
 #define OLE_STATUS_MAX_PARTS 5
@@ -34,6 +34,7 @@ struct OLEStatusBlock {
     volatile char     runDir[512];     // primary output directory
     volatile int32_t  boardSize;       // e.g. 6 for 6x6
     volatile int32_t  maxLevels;
+    volatile uint64_t runStartMs;      // GetTickCount64() just before the BFS loop
 
     // --- Current phase ---
     volatile int32_t  currentLevel;
@@ -52,7 +53,9 @@ struct OLEStatusBlock {
     volatile int32_t  mergePartsDone;
     volatile uint64_t mergeSrcFilesTotal;
     volatile uint64_t mergeSrcFilesConsumed;            // files deleted (all parts done)
-    volatile uint64_t mergeRecordsWritten[OLE_STATUS_MAX_PARTS]; // per-partition record count
+    volatile uint64_t mergeRecordsWritten[OLE_STATUS_MAX_PARTS];    // Phase 2: per-partition record count
+    volatile uint64_t mergePreDirTotal[OLE_STATUS_MAX_PARTS];       // Phase 1: source files per dir
+    volatile uint64_t mergePreDirConsumed[OLE_STATUS_MAX_PARTS];    // Phase 1: files consumed per dir
 
     // --- Last completed level (written after each level finishes) ---
     volatile int32_t  lastLevel;
@@ -63,6 +66,9 @@ struct OLEStatusBlock {
     volatile uint64_t lastUniqueBoards;
     volatile int64_t  lastSolveNs;
     volatile int64_t  lastMergeNs;
+    volatile uint64_t lastPassBoards;
+    volatile uint64_t lastEndBoards;
+    volatile uint64_t lastSolveFiles;
 };
 
 // ---------------------------------------------------------------------------
