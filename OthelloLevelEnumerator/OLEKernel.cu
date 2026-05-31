@@ -60,13 +60,18 @@ GpuDeviceInfo QueryGpuDevice()
 // WorkerGpuContext
 // ---------------------------------------------------------------------------
 
-WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard)
+WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard,
+                                         size_t stageCapacity)
 {
     WorkerGpuContext* ctx = new WorkerGpuContext{};
     ctx->batchCapacity    = batchCapacity;
     ctx->maxMovesPerBoard = maxMovesPerBoard;
+    ctx->stageCapacity    = stageCapacity;
 
     CUDA_CHECK(cudaStreamCreate((cudaStream_t*)&ctx->stream));
+    CUDA_CHECK(cudaStreamCreate((cudaStream_t*)&ctx->copyStream));
+    CUDA_CHECK(cudaEventCreateWithFlags((cudaEvent_t*)&ctx->copyDoneEvent,
+                                        cudaEventBlockingSync));
 
     size_t boardsBytes  = (size_t)batchCapacity * sizeof(BOARD_KEY);
     size_t resultsBytes = (size_t)batchCapacity * maxMovesPerBoard * sizeof(GpuResult);
@@ -84,6 +89,11 @@ WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard
     CUDA_CHECK(cudaMallocHost(&ctx->h_writePos,     sizeof(uint32_t)));
     CUDA_CHECK(cudaMallocHost(&ctx->h_batchStats,   3 * sizeof(uint32_t)));
 
+    // Pinned staging for async D2H: one slot per accumulation buffer slot.
+    CUDA_CHECK(cudaMallocHost(&ctx->h_accumStage,   stageCapacity * sizeof(BOARD_KEY)));
+    CUDA_CHECK(cudaMallocHost(&ctx->h_indicesStage, stageCapacity * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMallocHost(&ctx->h_flagsStage,   stageCapacity * sizeof(uint8_t)));
+
     return ctx;
 }
 
@@ -91,7 +101,10 @@ void WorkerGpuContextDestroy(WorkerGpuContext* ctx)
 {
     if (!ctx) return;
     cudaStreamSynchronize((cudaStream_t)ctx->stream);
+    cudaStreamSynchronize((cudaStream_t)ctx->copyStream);
     cudaStreamDestroy((cudaStream_t)ctx->stream);
+    cudaStreamDestroy((cudaStream_t)ctx->copyStream);
+    cudaEventDestroy((cudaEvent_t)ctx->copyDoneEvent);
     cudaFree(ctx->d_inputBoards);
     cudaFree(ctx->d_results);
     cudaFree(ctx->d_outputCounts);
@@ -102,6 +115,9 @@ void WorkerGpuContextDestroy(WorkerGpuContext* ctx)
     cudaFreeHost(ctx->h_outputCounts);
     cudaFreeHost(ctx->h_writePos);
     cudaFreeHost(ctx->h_batchStats);
+    cudaFreeHost(ctx->h_accumStage);
+    cudaFreeHost(ctx->h_indicesStage);
+    cudaFreeHost(ctx->h_flagsStage);
     delete ctx;
 }
 
@@ -520,4 +536,80 @@ uint32_t ExtractUniqueBoards(
     for (uint32_t i = 0; i < slotsFilled; i++)
         if (!hFlags[i]) outBoards[out++] = hAccum[hIndices[i]];
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// BeginExtractUniqueBoards
+//
+// Enqueues three cudaMemcpyAsync D2H calls on ctx->copyStream:
+//   accum buffer  → ctx->h_accumStage
+//   d_indicesA    → ctx->h_indicesStage   (always d_indicesA; SortAndDedup result)
+//   dup flags     → ctx->h_flagsStage
+// Then records ctx->copyDoneEvent so callers can block on completion.
+//
+// The copy engine handles these transfers; SM engines are free for
+// AccumulateBatch on ctx->stream concurrently.
+// ---------------------------------------------------------------------------
+
+void BeginExtractUniqueBoards(
+    WorkerGpuContext* ctx,
+    OLEGpuBuffers*    bufs,
+    int               bufferIdx,
+    uint32_t          slotsFilled)
+{
+    cudaStream_t cs      = (cudaStream_t)ctx->copyStream;
+    BOARD_KEY*   d_accum = (bufferIdx == 0) ? bufs->d_accumA    : bufs->d_accumB;
+    uint8_t*     d_flags = (bufferIdx == 0) ? bufs->d_dupFlagsA : bufs->d_dupFlagsB;
+
+    CUDA_CHECK(cudaMemcpyAsync(ctx->h_accumStage,   d_accum,          slotsFilled * sizeof(BOARD_KEY),
+                               cudaMemcpyDeviceToHost, cs));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->h_indicesStage, bufs->d_indicesA, slotsFilled * sizeof(uint32_t),
+                               cudaMemcpyDeviceToHost, cs));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->h_flagsStage,   d_flags,          slotsFilled * sizeof(uint8_t),
+                               cudaMemcpyDeviceToHost, cs));
+    CUDA_CHECK(cudaEventRecord((cudaEvent_t)ctx->copyDoneEvent, cs));
+}
+
+// ---------------------------------------------------------------------------
+// GatherUniqueFromStaging
+//
+// CPU-side gather from the pinned staging buffers populated by
+// BeginExtractUniqueBoards (call only after ctx->copyDoneEvent fires).
+// ---------------------------------------------------------------------------
+
+uint32_t GatherUniqueFromStaging(
+    WorkerGpuContext* ctx,
+    uint32_t          slotsFilled,
+    BOARD_KEY*        outBoards)
+{
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < slotsFilled; i++)
+        if (!ctx->h_flagsStage[i])
+            outBoards[out++] = ctx->h_accumStage[ctx->h_indicesStage[i]];
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// SyncCopyStream
+//
+// Blocks until ctx->copyStream is idle.  Must be called before the next
+// SortAndDedup because d_indicesA is shared sort scratch and must not be
+// overwritten while a prior D2H copy of it is still in flight.
+// In practice this is always a near-instant no-op: the copy finishes in
+// ~250 ms while the next accum window takes several seconds to fill.
+// ---------------------------------------------------------------------------
+
+void SyncCopyStream(WorkerGpuContext* ctx)
+{
+    CUDA_CHECK(cudaStreamSynchronize((cudaStream_t)ctx->copyStream));
+}
+
+void AttachCurrentThread()
+{
+    cudaSetDevice(0);
+}
+
+void WaitForCopyDone(WorkerGpuContext* ctx)
+{
+    cudaEventSynchronize((cudaEvent_t)ctx->copyDoneEvent);
 }

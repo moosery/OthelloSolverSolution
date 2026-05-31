@@ -11,6 +11,8 @@
 #include <string.h>
 #include <vector>
 #include <atomic>
+#include <thread>
+#include <memory>
 
 // Thread-safe sequence counter for unique output file names.
 static std::atomic<int> s_fileSeq{0};
@@ -21,14 +23,34 @@ static void MakeOutputPath(char* buf, size_t sz, const char* dir, int level, int
 }
 
 // ---------------------------------------------------------------------------
-// FlushBuffer
-//
-// Sort + dedup the filled accumulation buffer, extract unique BOARD_KEYs to host,
-// write a sorted file, and register it in outputReg.
-// driveIdx selects which output directory to use (caller increments it).
+// FlushJob — tracks one in-flight async write
 // ---------------------------------------------------------------------------
 
-static bool FlushBuffer(
+struct FlushJob {
+    std::thread thread;
+    bool        ok{true};
+};
+
+// ---------------------------------------------------------------------------
+// StartFlushBuffer
+//
+// 1. GPU sort+dedup (synchronous; saturates SMs — cannot overlap).
+// 2. Async D2H of boards/indices/flags onto pinned staging via ctx->copyStream
+//    (copy engine active; SM engines immediately free for AccumulateBatch).
+// 3. Spawn writer thread that:
+//      a. Calls cudaSetDevice + cudaEventSynchronize (sleeps until D2H done).
+//      b. CPU gather from staging buffers.
+//      c. SFWrite to NVMe.
+//      d. FRRegister.
+//
+// PipelineRun: before starting the NEXT flush, call SyncCopyStream (ensures
+// d_indicesA is free for the upcoming SortAndDedup) then join() the FlushJob
+// (ensures staging buffers are free for the upcoming BeginExtractUniqueBoards).
+// In practice both are no-ops: D2H finishes in ~250 ms and the write finishes
+// in ~2 s, while the next accum window takes ~4-5 s to fill.
+// ---------------------------------------------------------------------------
+
+static std::unique_ptr<FlushJob> StartFlushBuffer(
     WorkerGpuContext*        ctx,
     OLEGpuBuffers*           bufs,
     int                      bufferIdx,
@@ -38,66 +60,82 @@ static bool FlushBuffer(
     OLEFileRegistry*         outputReg,
     OLEPipelineStats*        stats)
 {
-    if (slotsFilled == 0) return true;
+    if (slotsFilled == 0) return nullptr;
 
-    // Pass 2: GPU sort + mark dups.
+    // GPU sort + dedup: synchronous, saturates all SMs.
     uint32_t uniqueCount = 0;
     SortAndDedup(bufs, bufferIdx, slotsFilled, &uniqueCount);
     stats->dupBoards += slotsFilled - uniqueCount;
 
-    if (uniqueCount == 0) return true;
+    if (uniqueCount == 0) return nullptr;
 
-    // D2H: gather unique boards into host buffer.
-    // Allocate host staging (unique boards in sorted order).
-    std::vector<BOARD_KEY> hostBoards(slotsFilled);   // over-allocate; uniqueCount <= slotsFilled
-    uint32_t got = ExtractUniqueBoards(bufs, bufferIdx, slotsFilled, hostBoards.data());
-    hostBoards.resize(got);
+    // Kick off async D2H on copyStream (copy engine, not SMs).
+    // AccumulateBatch on the other buffer can start immediately after this returns.
+    BeginExtractUniqueBoards(ctx, bufs, bufferIdx, slotsFilled);
 
-    stats->uniqueBoards += got;
+    // Determine output path on this thread (driveIdx is incremented by caller).
+    int  drive = driveIdx % cfg->numOutputDirs;
+    char pathBuf[512];
+    MakeOutputPath(pathBuf, sizeof(pathBuf), cfg->outputDirs[drive], cfg->level,
+                   s_fileSeq.fetch_add(1));
+    std::string pathStr(pathBuf);
 
-    // Write sorted file.
-    int         drive = driveIdx % cfg->numOutputDirs;
-    const char* dir   = cfg->outputDirs[drive];
+    auto job   = std::make_unique<FlushJob>();
+    bool* okPtr = &job->ok;
 
-    char path[512];
-    MakeOutputPath(path, sizeof(path), dir, cfg->level, s_fileSeq.fetch_add(1));
+    job->thread = std::thread([ctx, slotsFilled, uniqueCount, drive, pathStr,
+                               cfg, outputReg, stats, okPtr]() {
+        // Attach this thread to the CUDA primary context (required for CUDA API calls
+        // from std::thread), then sleep until async D2H is fully committed.
+        AttachCurrentThread();
+        WaitForCopyDone(ctx);
 
-    if (!SFWrite(path, hostBoards.data(), (uint64_t)got,
-                 sizeof(BOARD_KEY), sizeof(BOARD_KEY), cfg->writerBufBytes))
-    {
-        int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
-        Error(FATAL_FILE_OPEN, "GPUPipeline: SFWrite failed: %s (errno=%d: %s)", path, e, eb);
-        ErrorPrint(stderr);
-        return false;
-    }
+        // CPU gather from pinned staging buffers.
+        std::vector<BOARD_KEY> hostBoards(uniqueCount);
+        uint32_t got = GatherUniqueFromStaging(ctx, slotsFilled, hostBoards.data());
+        hostBoards.resize(got);
 
-    // Register.
-    OLEFileDesc desc = {};
-    strncpy_s(desc.path, path, sizeof(desc.path) - 1);
-    desc.drive       = drive;
-    desc.recordCount = got;
-    if (got > 0)
-    {
-        memcpy(desc.minKey, &hostBoards.front(), 24);
-        memcpy(desc.maxKey, &hostBoards.back(),  24);
-    }
-    FRRegister(outputReg, desc);
-    stats->filesWritten++;
-    if (cfg->statusBlock) cfg->statusBlock->solveFilesWritten = stats->filesWritten;
+        stats->uniqueBoards += got;
 
-    return true;
+        if (!SFWrite(pathStr.c_str(), hostBoards.data(), (uint64_t)got,
+                     sizeof(BOARD_KEY), sizeof(BOARD_KEY), cfg->writerBufBytes))
+        {
+            int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+            Error(FATAL_FILE_OPEN, "GPUPipeline: SFWrite failed: %s (errno=%d: %s)",
+                  pathStr.c_str(), e, eb);
+            ErrorPrint(stderr);
+            *okPtr = false;
+            return;
+        }
+
+        OLEFileDesc desc = {};
+        strncpy_s(desc.path, pathStr.c_str(), sizeof(desc.path) - 1);
+        desc.drive       = drive;
+        desc.recordCount = got;
+        if (got > 0) {
+            memcpy(desc.minKey, &hostBoards.front(), 24);
+            memcpy(desc.maxKey, &hostBoards.back(),  24);
+        }
+        FRRegister(outputReg, desc);
+        stats->filesWritten++;
+        if (cfg->statusBlock) cfg->statusBlock->solveFilesWritten = stats->filesWritten;
+    });
+
+    return job;
 }
 
 // ---------------------------------------------------------------------------
 // PipelineRun
 //
-// Serial implementation: reader → GPU expand → sort+dedup → write file.
-// Ping-pong buffers alternate between windows; within each window the GPU
-// accumulates batches until the buffer is full, then flushes.
+// Overlapped implementation: GPU sort+dedup is serial (saturates all SMs),
+// but the subsequent D2H + CPU gather + file write run concurrently with the
+// next accumulation window via a background writer thread and the copy engine.
 //
-// TODO: overlap flush (sort+D2H+write) with next window's GPU fill by
-//       running SortAndDedup and ExtractUniqueBoards on a separate CUDA stream
-//       while AccumulateBatch fills the other buffer concurrently.
+// Timeline per flush cycle:
+//   [SortAndDedup(A)]  ← serial, ~1-2 s, cannot overlap
+//   [BeginExtractUniqueBoards(A)] ← starts D2H on copyStream; returns immediately
+//   [AccumulateBatch(B)...]  ← SM engines busy  }  concurrent via
+//   [writer thread: wait D2H → gather → write]  }  copy engine + CPU
 // ---------------------------------------------------------------------------
 
 bool PipelineRun(
@@ -116,8 +154,8 @@ bool PipelineRun(
 
     DevBoardConsts consts = OBCuda_GetBoardConsts();
 
-    // Allocate GPU resources.
-    WorkerGpuContext* ctx = WorkerGpuContextCreate(cfg->batchSize, maxMovesPerBoard);
+    WorkerGpuContext* ctx = WorkerGpuContextCreate(cfg->batchSize, maxMovesPerBoard,
+                                                    cfg->accumBufSlots);
     if (!ctx) { Fatal(FATAL_ALLOCATION_FAILED, "WorkerGpuContextCreate failed"); return false; }
 
     OLEGpuBuffers* bufs = OLEGpuBuffersCreate(cfg->accumBufSlots);
@@ -134,6 +172,19 @@ bool PipelineRun(
     int      driveIdx    = 0;
     bool     ok          = true;
 
+    // Pending writer thread from the previous flush.
+    std::unique_ptr<FlushJob> pendingFlush;
+
+    // Helper: join the pending writer thread and check its result.
+    auto joinPending = [&]() -> bool {
+        if (!pendingFlush) return true;
+        if (pendingFlush->thread.joinable())
+            pendingFlush->thread.join();
+        bool result = pendingFlush->ok;
+        pendingFlush.reset();
+        return result;
+    };
+
     for (const OLEFileDesc& fd : inputReg->files)
     {
         if (!ok) break;
@@ -142,7 +193,8 @@ bool PipelineRun(
         if (!reader)
         {
             int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
-            Error(FATAL_FILE_OPEN, "GPUPipeline: SFReaderOpen failed: %s (errno=%d: %s)", fd.path, e, eb);
+            Error(FATAL_FILE_OPEN, "GPUPipeline: SFReaderOpen failed: %s (errno=%d: %s)",
+                  fd.path, e, eb);
             ErrorPrint(stderr);
             ok = false; break;
         }
@@ -159,7 +211,6 @@ bool PipelineRun(
 
         while (ok)
         {
-            // Read one batch of boards into pinned host staging.
             int got = SFReaderNext(reader, ctx->h_inputBoards, cfg->batchSize);
             if (got == 0) break;
 
@@ -170,19 +221,22 @@ bool PipelineRun(
                 cfg->statusBlock->solveGpuDispatches = stats->gpuDispatches;
             }
 
-            // If remaining accum capacity can't hold worst-case output, flush first.
             uint32_t worstCase = (uint32_t)got * maxMovesPerBoard;
             if (writeOffset + worstCase > (uint32_t)bufs->slotCapacity)
             {
-                ok = FlushBuffer(ctx, bufs, bufferIdx, writeOffset,
-                                 cfg, driveIdx++, outputReg, stats);
+                // Sync copyStream so d_indicesA is safe for the upcoming SortAndDedup.
+                SyncCopyStream(ctx);
+                // Join writer thread — frees staging buffers for BeginExtractUniqueBoards.
+                if (!joinPending()) { ok = false; break; }
+
+                pendingFlush = StartFlushBuffer(ctx, bufs, bufferIdx, writeOffset,
+                                               cfg, driveIdx++, outputReg, stats);
                 bufferIdx   ^= 1;
                 writeOffset  = 0;
             }
 
             if (!ok) break;
 
-            // Pass 1: expand + scatter into accumulation buffer.
             OLEBatchStats batchStats = {};
             AccumulateBatch(ctx, bufs, bufferIdx, writeOffset,
                             got, cfg->numRotations, consts, &batchStats);
@@ -197,15 +251,22 @@ bool PipelineRun(
 
         SFReaderClose(&reader);
 
-        // Notify caller that this input file has been fully read.
         if (ok && cfg->onInputFileConsumed)
             cfg->onInputFileConsumed(fd.path, cfg->inputFileCtx);
     }
 
     // Flush any remaining data in the current buffer.
     if (ok && writeOffset > 0)
-        ok = FlushBuffer(ctx, bufs, bufferIdx, writeOffset,
-                         cfg, driveIdx, outputReg, stats);
+    {
+        SyncCopyStream(ctx);
+        if (!joinPending()) ok = false;
+        if (ok)
+            pendingFlush = StartFlushBuffer(ctx, bufs, bufferIdx, writeOffset,
+                                           cfg, driveIdx, outputReg, stats);
+    }
+
+    // Final join: wait for the last writer thread to finish.
+    if (!joinPending()) ok = false;
 
     OLEGpuBuffersDestroy(bufs);
     WorkerGpuContextDestroy(ctx);

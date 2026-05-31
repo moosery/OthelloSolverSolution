@@ -1,5 +1,15 @@
 # Changelog
 
+## [OLE v0.2.16] - 2026-05-31
+
+### Changed
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — overlapped flush: after `SortAndDedup` (synchronous, saturates all SMs), `BeginExtractUniqueBoards` enqueues three `cudaMemcpyAsync` D2H transfers on a dedicated `copyStream` (copy engine) and records a `cudaEvent_t`; a background `std::thread` then sleeps on `cudaEventSynchronize`, gathers unique boards from pinned staging, and calls `SFWrite`; `AccumulateBatch` for the next window starts immediately on the SM engines while D2H + gather + write run concurrently; `SyncCopyStream` is called before each `SortAndDedup` to ensure `d_indicesA` (shared sort scratch) is no longer in flight on the copy engine — in practice always a no-op since D2H finishes in ~250 ms and the next window takes several seconds to fill
+- **`OthelloLevelEnumerator` / `OLEKernel.h`** — `WorkerGpuContext` gains `copyStream`, `copyDoneEvent` (created with `cudaEventBlockingSync`), and three pinned host staging arrays (`h_accumStage`, `h_indicesStage`, `h_flagsStage`) sized at `stageCapacity` slots; `WorkerGpuContextCreate` gains `stageCapacity` parameter; new functions: `BeginExtractUniqueBoards`, `GatherUniqueFromStaging`, `SyncCopyStream`
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.16
+
+### Expected improvement
+CPU gather (~0.5 s) + NVMe write (~1–2 s) per flush now overlaps with the next accumulation window rather than blocking it. Savings grow with flush count: L13 ~9 flushes → ~18 s recovered; L14 ~43 flushes → ~85 s; L15 ~170 flushes → ~340 s. GPU sort is still serial (saturates all SMs).
+
 ## [OLE v0.2.15] - 2026-05-31
 
 ### Fixed

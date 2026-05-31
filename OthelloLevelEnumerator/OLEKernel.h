@@ -28,17 +28,32 @@ struct GpuDeviceInfo {
 // Per-batch GPU context: input staging + output staging (small, reused each batch).
 // Separate from the large accumulation buffers which live in OLEGpuBuffers.
 struct WorkerGpuContext {
+    // Accumulation stream: AccumulateBatch dispatches expand+scatter kernels here.
     void*      stream;
+
+    // Copy stream: BeginExtractUniqueBoards issues async D2H here so the copy
+    // engine can run concurrently with SM kernels on the accumulation stream.
+    void*      copyStream;
+    void*      copyDoneEvent;   // cudaEvent_t (cudaEventBlockingSync); recorded after D2H
+
+    // Small per-batch device/host buffers.
     BOARD_KEY* d_inputBoards;
     GpuResult* d_results;
     int*       d_outputCounts;
     BOARD_KEY* h_inputBoards;
-    GpuResult* h_results;      // not used in OLE (results go directly to accum buffer)
+    GpuResult* h_results;
     int*       h_outputCounts;
-    uint32_t*  d_writePos;     // device atomic counter for scatter into accum buffer
-    uint32_t*  h_writePos;     // pinned host mirror to read back final write position
-    uint32_t*  d_batchStats;   // device atomics: [0]=passBoards [1]=endBoards [2]=maxMoves
-    uint32_t*  h_batchStats;   // pinned host mirror (3 elements)
+    uint32_t*  d_writePos;
+    uint32_t*  h_writePos;
+    uint32_t*  d_batchStats;
+    uint32_t*  h_batchStats;
+
+    // Pinned host staging for async D2H (sized at stageCapacity slots).
+    BOARD_KEY* h_accumStage;
+    uint32_t*  h_indicesStage;
+    uint8_t*   h_flagsStage;
+    size_t     stageCapacity;
+
     int        batchCapacity;
     int        maxMovesPerBoard;
 };
@@ -62,8 +77,11 @@ struct OLEGpuBuffers {
 // Query the first CUDA device and return computed parameters.
 GpuDeviceInfo QueryGpuDevice();
 
-// Allocate per-batch GPU context (stream + small staging buffers).
-WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard);
+// Allocate per-batch GPU context.
+// stageCapacity = accumBufSlots (number of BOARD_KEY slots per accum buffer);
+// pinned host staging buffers are sized to this so async D2H always fits.
+WorkerGpuContext* WorkerGpuContextCreate(int batchCapacity, int maxMovesPerBoard,
+                                         size_t stageCapacity);
 void              WorkerGpuContextDestroy(WorkerGpuContext* ctx);
 
 // Allocate the two large ping-pong accumulation buffers.
@@ -111,3 +129,31 @@ uint32_t ExtractUniqueBoards(
     int            bufferIdx,
     uint32_t       slotsFilled,
     BOARD_KEY*     outBoards);
+
+// Async D2H variant: enqueues three cudaMemcpyAsync calls on ctx->copyStream
+// (boards, permutation indices, dup flags) then records ctx->copyDoneEvent.
+// Returns immediately.  The copy engine and SM engines run concurrently.
+// Call SyncCopyStream before the next SortAndDedup (d_indicesA is shared scratch).
+void BeginExtractUniqueBoards(
+    WorkerGpuContext* ctx,
+    OLEGpuBuffers*    bufs,
+    int               bufferIdx,
+    uint32_t          slotsFilled);
+
+// CPU gather from pinned staging buffers (call after ctx->copyDoneEvent fires).
+// Reads h_accumStage, h_indicesStage, h_flagsStage populated by BeginExtractUniqueBoards.
+// outBoards must have capacity >= uniqueCount from SortAndDedup.
+uint32_t GatherUniqueFromStaging(WorkerGpuContext* ctx, uint32_t slotsFilled,
+                                  BOARD_KEY* outBoards);
+
+// Block until ctx->copyStream is idle.  Call before the next SortAndDedup to
+// ensure d_indicesA (shared sort scratch) is no longer being read by the copy engine.
+void SyncCopyStream(WorkerGpuContext* ctx);
+
+// Attach the calling host thread to CUDA device 0 so CUDA runtime calls work
+// on that thread (required for cudaEventSynchronize from a std::thread).
+void AttachCurrentThread();
+
+// Block the calling thread until the async D2H copy signaled by
+// BeginExtractUniqueBoards has fully committed to the pinned staging buffers.
+void WaitForCopyDone(WorkerGpuContext* ctx);
