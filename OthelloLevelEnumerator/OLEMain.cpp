@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.16"
+#define APP_VERSION "0.2.17"
 
 // ---------------------------------------------------------------------------
 // Configuration

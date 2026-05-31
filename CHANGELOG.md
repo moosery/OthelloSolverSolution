@@ -1,5 +1,15 @@
 # Changelog
 
+## [OLE v0.2.17] - 2026-05-31
+
+### Changed
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — simplified flush overlap: D2H + CPU gather remain synchronous on the main thread (heap buffers, no cache competition with AccumulateBatch); only `SFWrite` + `FRRegister` run in a background `WriteJob` thread; `hostBoards` vector is moved into the thread (zero-copy); the sequential NVMe write (~1-2 s) overlaps with the next accumulation window (~4-10 s) without competing for CPU L3 cache or memory bandwidth; `joinPending` before each sort is always a near-instant no-op in practice; no CUDA changes required
+- **`OthelloLevelEnumerator` / `OLEKernel`** — reverted v0.2.16 additions (`copyStream`, `copyDoneEvent`, pinned staging, `BeginExtractUniqueBoards`, `GatherUniqueFromStaging`, `SyncCopyStream`, `AttachCurrentThread`, `WaitForCopyDone`); `WorkerGpuContextCreate` signature restored to two-parameter form
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.17
+
+### Rationale
+v0.2.16 benchmarked slower at L13 (119 s vs 90 s) because `GatherUniqueFromStaging` randomly accessed ~5 GB of pinned memory concurrently with `AccumulateBatch`, thrashing L3 cache and slowing GPU dispatch more than the overlap saved (~3-4 s extra per flush, vs ~2 s saved). The simpler v0.2.17 approach saves only the sequential write time per flush (~1-2 s × 9 flushes ≈ 10-15 s at L13) but does so cleanly without side effects.
+
 ## [OLE v0.2.16] - 2026-05-31
 
 ### Changed

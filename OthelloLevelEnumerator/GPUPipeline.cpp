@@ -23,10 +23,10 @@ static void MakeOutputPath(char* buf, size_t sz, const char* dir, int level, int
 }
 
 // ---------------------------------------------------------------------------
-// FlushJob — tracks one in-flight async write
+// WriteJob — one in-flight background SFWrite + FRRegister
 // ---------------------------------------------------------------------------
 
-struct FlushJob {
+struct WriteJob {
     std::thread thread;
     bool        ok{true};
 };
@@ -34,23 +34,20 @@ struct FlushJob {
 // ---------------------------------------------------------------------------
 // StartFlushBuffer
 //
-// 1. GPU sort+dedup (synchronous; saturates SMs — cannot overlap).
-// 2. Async D2H of boards/indices/flags onto pinned staging via ctx->copyStream
-//    (copy engine active; SM engines immediately free for AccumulateBatch).
-// 3. Spawn writer thread that:
-//      a. Calls cudaSetDevice + cudaEventSynchronize (sleeps until D2H done).
-//      b. CPU gather from staging buffers.
-//      c. SFWrite to NVMe.
-//      d. FRRegister.
+// 1. GPU sort+dedup (synchronous — saturates all SMs).
+// 2. D2H + CPU gather (synchronous — ExtractUniqueBoards, heap buffers,
+//    no cache-thrashing pinned memory).  hostBoards is ready on return.
+// 3. Move hostBoards into a background WriteJob that runs SFWrite + FRRegister
+//    while the caller immediately switches to the other buffer and calls
+//    AccumulateBatch.  The sequential write (~1-2 s) overlaps with the next
+//    accumulation window (~4-10 s) without any shared-memory competition.
 //
-// PipelineRun: before starting the NEXT flush, call SyncCopyStream (ensures
-// d_indicesA is free for the upcoming SortAndDedup) then join() the FlushJob
-// (ensures staging buffers are free for the upcoming BeginExtractUniqueBoards).
-// In practice both are no-ops: D2H finishes in ~250 ms and the write finishes
-// in ~2 s, while the next accum window takes ~4-5 s to fill.
+// Caller must join() the returned WriteJob before starting the next
+// StartFlushBuffer (ensures hostBoards lifetime and stats ordering).
+// In practice the join is always a no-op: fills take far longer than writes.
 // ---------------------------------------------------------------------------
 
-static std::unique_ptr<FlushJob> StartFlushBuffer(
+static std::unique_ptr<WriteJob> StartFlushBuffer(
     WorkerGpuContext*        ctx,
     OLEGpuBuffers*           bufs,
     int                      bufferIdx,
@@ -69,34 +66,25 @@ static std::unique_ptr<FlushJob> StartFlushBuffer(
 
     if (uniqueCount == 0) return nullptr;
 
-    // Kick off async D2H on copyStream (copy engine, not SMs).
-    // AccumulateBatch on the other buffer can start immediately after this returns.
-    BeginExtractUniqueBoards(ctx, bufs, bufferIdx, slotsFilled);
+    // D2H + gather: synchronous, heap buffers (avoids pinned-memory cache effects).
+    std::vector<BOARD_KEY> hostBoards(slotsFilled);
+    uint32_t got = ExtractUniqueBoards(bufs, bufferIdx, slotsFilled, hostBoards.data());
+    hostBoards.resize(got);
+    stats->uniqueBoards += got;
 
-    // Determine output path on this thread (driveIdx is incremented by caller).
+    // Determine output path on this thread.
     int  drive = driveIdx % cfg->numOutputDirs;
     char pathBuf[512];
     MakeOutputPath(pathBuf, sizeof(pathBuf), cfg->outputDirs[drive], cfg->level,
                    s_fileSeq.fetch_add(1));
     std::string pathStr(pathBuf);
 
-    auto job   = std::make_unique<FlushJob>();
+    auto job   = std::make_unique<WriteJob>();
     bool* okPtr = &job->ok;
 
-    job->thread = std::thread([ctx, slotsFilled, uniqueCount, drive, pathStr,
-                               cfg, outputReg, stats, okPtr]() {
-        // Attach this thread to the CUDA primary context (required for CUDA API calls
-        // from std::thread), then sleep until async D2H is fully committed.
-        AttachCurrentThread();
-        WaitForCopyDone(ctx);
-
-        // CPU gather from pinned staging buffers.
-        std::vector<BOARD_KEY> hostBoards(uniqueCount);
-        uint32_t got = GatherUniqueFromStaging(ctx, slotsFilled, hostBoards.data());
-        hostBoards.resize(got);
-
-        stats->uniqueBoards += got;
-
+    // Move hostBoards into the writer thread (zero-copy, no shared access).
+    job->thread = std::thread([hostBoards = std::move(hostBoards),
+                               got, drive, pathStr, cfg, outputReg, stats, okPtr]() mutable {
         if (!SFWrite(pathStr.c_str(), hostBoards.data(), (uint64_t)got,
                      sizeof(BOARD_KEY), sizeof(BOARD_KEY), cfg->writerBufBytes))
         {
@@ -127,15 +115,11 @@ static std::unique_ptr<FlushJob> StartFlushBuffer(
 // ---------------------------------------------------------------------------
 // PipelineRun
 //
-// Overlapped implementation: GPU sort+dedup is serial (saturates all SMs),
-// but the subsequent D2H + CPU gather + file write run concurrently with the
-// next accumulation window via a background writer thread and the copy engine.
-//
-// Timeline per flush cycle:
-//   [SortAndDedup(A)]  ← serial, ~1-2 s, cannot overlap
-//   [BeginExtractUniqueBoards(A)] ← starts D2H on copyStream; returns immediately
-//   [AccumulateBatch(B)...]  ← SM engines busy  }  concurrent via
-//   [writer thread: wait D2H → gather → write]  }  copy engine + CPU
+// Overlapped implementation: D2H + gather remain synchronous (avoiding the
+// L3 cache thrashing that concurrent random-access gather caused in v0.2.16).
+// Only SFWrite + FRRegister run in a background WriteJob, overlapping with
+// the next accumulation window.  The sequential NVMe write (~1-2 s) completes
+// well before the next buffer fills (~4-10 s), so the join is always instant.
 // ---------------------------------------------------------------------------
 
 bool PipelineRun(
@@ -154,8 +138,7 @@ bool PipelineRun(
 
     DevBoardConsts consts = OBCuda_GetBoardConsts();
 
-    WorkerGpuContext* ctx = WorkerGpuContextCreate(cfg->batchSize, maxMovesPerBoard,
-                                                    cfg->accumBufSlots);
+    WorkerGpuContext* ctx = WorkerGpuContextCreate(cfg->batchSize, maxMovesPerBoard);
     if (!ctx) { Fatal(FATAL_ALLOCATION_FAILED, "WorkerGpuContextCreate failed"); return false; }
 
     OLEGpuBuffers* bufs = OLEGpuBuffersCreate(cfg->accumBufSlots);
@@ -172,16 +155,14 @@ bool PipelineRun(
     int      driveIdx    = 0;
     bool     ok          = true;
 
-    // Pending writer thread from the previous flush.
-    std::unique_ptr<FlushJob> pendingFlush;
+    std::unique_ptr<WriteJob> pendingWrite;
 
-    // Helper: join the pending writer thread and check its result.
     auto joinPending = [&]() -> bool {
-        if (!pendingFlush) return true;
-        if (pendingFlush->thread.joinable())
-            pendingFlush->thread.join();
-        bool result = pendingFlush->ok;
-        pendingFlush.reset();
+        if (!pendingWrite) return true;
+        if (pendingWrite->thread.joinable())
+            pendingWrite->thread.join();
+        bool result = pendingWrite->ok;
+        pendingWrite.reset();
         return result;
     };
 
@@ -224,12 +205,11 @@ bool PipelineRun(
             uint32_t worstCase = (uint32_t)got * maxMovesPerBoard;
             if (writeOffset + worstCase > (uint32_t)bufs->slotCapacity)
             {
-                // Sync copyStream so d_indicesA is safe for the upcoming SortAndDedup.
-                SyncCopyStream(ctx);
-                // Join writer thread — frees staging buffers for BeginExtractUniqueBoards.
+                // Join the previous write (almost always instant).
                 if (!joinPending()) { ok = false; break; }
 
-                pendingFlush = StartFlushBuffer(ctx, bufs, bufferIdx, writeOffset,
+                // Sort + D2H + gather (sync), then hand the write to a background thread.
+                pendingWrite = StartFlushBuffer(ctx, bufs, bufferIdx, writeOffset,
                                                cfg, driveIdx++, outputReg, stats);
                 bufferIdx   ^= 1;
                 writeOffset  = 0;
@@ -255,17 +235,16 @@ bool PipelineRun(
             cfg->onInputFileConsumed(fd.path, cfg->inputFileCtx);
     }
 
-    // Flush any remaining data in the current buffer.
+    // Flush remaining data.
     if (ok && writeOffset > 0)
     {
-        SyncCopyStream(ctx);
         if (!joinPending()) ok = false;
         if (ok)
-            pendingFlush = StartFlushBuffer(ctx, bufs, bufferIdx, writeOffset,
+            pendingWrite = StartFlushBuffer(ctx, bufs, bufferIdx, writeOffset,
                                            cfg, driveIdx, outputReg, stats);
     }
 
-    // Final join: wait for the last writer thread to finish.
+    // Final join.
     if (!joinPending()) ok = false;
 
     OLEGpuBuffersDestroy(bufs);
