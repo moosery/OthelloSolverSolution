@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.18"
+#define APP_VERSION "0.2.19"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -373,7 +373,7 @@ int main(int argc, char* argv[])
     config.numOutputDirs     = 5;
     config.restart           = false;
     config.nasEnabled        = true;
-    config.nasDir            = "F:\\OthelloRuns\\";
+    config.nasDir            = "Z:\\OthelloRuns\\";
     config.memMode           = MM_RECOMMENDED;
     config.specifiedMemBytes = 0;
 
@@ -668,6 +668,26 @@ int main(int argc, char* argv[])
                            nasRunDir))
         {
             LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
+            // Print partial row so solve stats (NewBoards, SlvFls, SlvGB) are preserved in the log.
+            // MrgDups and MrgGB are 0 because the merge did not complete.
+            long long partialNs  = ClockNanosSinceStart(&lvStart);
+            LevelRecord partial  = {};
+            partial.level        = level;
+            partial.boardsIn     = stats.boardsIn + stats.passBoards;
+            partial.newBoards    = stats.slotsExpanded;
+            partial.newBoardsNet = 0;
+            partial.passBoards   = stats.passBoards;
+            partial.gpuDups      = stats.dupBoards;
+            partial.mergeDups    = 0;
+            partial.totalMoves   = stats.slotsExpanded + stats.passBoards;
+            partial.endBoards    = stats.endBoards;
+            partial.maxMovesAny  = stats.maxMovesAnyBoard;
+            partial.elapsedNs    = partialNs;
+            partial.solveNs      = solveNs;
+            partial.mergeNs      = partialNs - solveNs;
+            partial.solveFiles   = stats.filesWritten;
+            LogPrintf("  (partial -- merge aborted; MrgDups/MrgGB=0)\n");
+            PrintLevelRow(partial);
             break;
         }
 

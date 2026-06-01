@@ -1,5 +1,12 @@
 # Changelog
 
+## [OLE v0.2.19] - 2026-06-01
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — default `nasDir` changed from `F:\OthelloRuns\` to `Z:\OthelloRuns\`; the NAS (Z:) is now the canonical landing place for final per-level merge output, freeing F: (HDD) for solve overflow (Dir4) and Phase 1 intermediates only; solve for each level reads from Z: and all previous level outputs accumulate there across runs; use `--nas-dir` to override at runtime
+- **`OthelloLevelEnumerator` / `OLEMain`** — when `MergePhaseRun` fails (e.g. disk-full during Phase 2), a partial level row is now printed to the log before aborting; all solve-phase columns (`BoardsIn`, `NewBoards`, `Pass`, `GpuDups`, `SlvFls`, `SlvGB`) are accurate; `MrgDups` and `MrgGB` are 0 to signal that the merge did not complete; preserves reconnaissance data (storage requirements) even when a level fails mid-merge
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.19
+
 ## [OLE v0.2.18] - 2026-05-31
 
 ### Fixed
