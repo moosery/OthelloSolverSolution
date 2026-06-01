@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.19"
+#define APP_VERSION "0.2.20"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -70,7 +70,8 @@ struct LevelRecord
     uint32_t maxMovesAny;     // max children generated for any single board this level
     long long elapsedNs;
     long long solveNs;
-    long long mergeNs;
+    long long merge1Ns;
+    long long merge2Ns;
     uint64_t  solveFiles;   // solve output file count (Phase 1 merge fan-in)
 };
 
@@ -316,20 +317,21 @@ static void MergeMeta(char* buf, size_t sz, const char* dir, int level)
 
 static void PrintLevelHeader()
 {
-    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s %8s %8s %8s  %s\n",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %9s %9s %11s %11s %10s %8s %8s %8s  %s\n",
               "Lv", "BoardsIn", "NewBoards", "Pass", "GpuDups", "MrgDups",
-              "Mvs", "Ends", "MaxMv", "SlvTm(s)", "MrgTm(s)", "Tm(s)", "PredTm(s)", "ns/brd",
+              "Mvs", "Ends", "MaxMv", "SlvTm(s)", "Ph1Tm(s)", "Ph2Tm(s)", "Tm(s)", "PredTm(s)", "ns/brd",
               "SlvFls", "SlvGB", "MrgGB", "DateTime");
-    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %11s %11s %11s %10s %8s %8s %8s  -------------------\n",
+    LogPrintf("%4s %13s %13s %13s %13s %13s %13s %8s %6s %11s %9s %9s %11s %11s %10s %8s %8s %8s  -------------------\n",
               "--", "--------", "---------", "----", "-------", "-------",
-              "---", "----", "-----", "--------", "--------", "-----", "---------", "------",
+              "---", "----", "-----", "--------", "--------", "--------", "-----", "---------", "------",
               "------", "-----", "-----");
 }
 
 static void PrintLevelRow(const LevelRecord& r)
 {
     double    slvSec   = (double)r.solveNs  / 1e9;
-    double    mrgSec   = (double)r.mergeNs  / 1e9;
+    double    mrg1Sec  = (double)r.merge1Ns / 1e9;
+    double    mrg2Sec  = (double)r.merge2Ns / 1e9;
     double    tmSec    = (double)r.elapsedNs / 1e9;
     double    ratio    = (r.boardsIn > 0) ? (double)r.newBoardsNet / (double)r.boardsIn : 0.0;
     double    predSec  = tmSec * ratio;
@@ -344,10 +346,10 @@ static void PrintLevelRow(const LevelRecord& r)
     char dtBuf[32];
     strftime(dtBuf, sizeof(dtBuf), "%Y-%m-%d %H:%M:%S", &tmNow);
 
-    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %11.3f %11.3f %11.3f %10lld %8llu %8.2f %8.2f  %s\n",
+    LogPrintf("%4d %13llu %13llu %13llu %13llu %13llu %13llu %8llu %6u %11.3f %9.3f %9.3f %11.3f %11.3f %10lld %8llu %8.2f %8.2f  %s\n",
               r.level, r.boardsIn, r.newBoards, r.passBoards, r.gpuDups, r.mergeDups,
               r.totalMoves, r.endBoards, r.maxMovesAny,
-              slvSec, mrgSec, tmSec, predSec, nsPerBrd,
+              slvSec, mrg1Sec, mrg2Sec, tmSec, predSec, nsPerBrd,
               r.solveFiles, slvGB, mrgGB, dtBuf);
 }
 
@@ -660,12 +662,13 @@ int main(int argc, char* argv[])
             g_status->phase        = OLE_PHASE_MERGE;
             g_status->phaseStartMs = GetTickCount64();
         }
+        long long merge1Ns = 0, merge2Ns = 0;
         FRClear(&mergedReg);
         if (!MergePhaseRun(&solveReg, &mergedReg,
                            config.outputDirs, config.numOutputDirs,
                            level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
                            config.mergeBufBytesPerThread, &mergePool, g_status,
-                           nasRunDir))
+                           nasRunDir, &merge1Ns, &merge2Ns))
         {
             LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
             // Print partial row so solve stats (NewBoards, SlvFls, SlvGB) are preserved in the log.
@@ -684,7 +687,8 @@ int main(int argc, char* argv[])
             partial.maxMovesAny  = stats.maxMovesAnyBoard;
             partial.elapsedNs    = partialNs;
             partial.solveNs      = solveNs;
-            partial.mergeNs      = partialNs - solveNs;
+            partial.merge1Ns     = merge1Ns;
+            partial.merge2Ns     = merge2Ns;
             partial.solveFiles   = stats.filesWritten;
             LogPrintf("  (partial -- merge aborted; MrgDups/MrgGB=0)\n");
             PrintLevelRow(partial);
@@ -698,8 +702,7 @@ int main(int argc, char* argv[])
         for (const OLEFileDesc& fd : solveReg.files)
             remove(fd.path);
 
-        long long ns      = ClockNanosSinceStart(&lvStart);
-        long long mergeNs = ns - solveNs;
+        long long ns = ClockNanosSinceStart(&lvStart);
 
         uint64_t finalUnique = FRTotalRecords(&mergedReg);
         uint64_t mergeDups   = (solveUniqueBoards >= finalUnique)
@@ -718,7 +721,8 @@ int main(int argc, char* argv[])
         rec.maxMovesAny  = stats.maxMovesAnyBoard;
         rec.elapsedNs    = ns;
         rec.solveNs      = solveNs;
-        rec.mergeNs      = mergeNs;
+        rec.merge1Ns     = merge1Ns;
+        rec.merge2Ns     = merge2Ns;
         rec.solveFiles   = stats.filesWritten;
         history.push_back(rec);
 
@@ -732,7 +736,7 @@ int main(int argc, char* argv[])
             g_status->lastMergeDups    = rec.mergeDups;
             g_status->lastUniqueBoards = rec.newBoardsNet;
             g_status->lastSolveNs      = rec.solveNs;
-            g_status->lastMergeNs      = rec.mergeNs;
+            g_status->lastMergeNs      = rec.merge1Ns + rec.merge2Ns;
             g_status->lastPassBoards   = rec.passBoards;
             g_status->lastEndBoards    = rec.endBoards;
             g_status->lastSolveFiles   = rec.solveFiles;

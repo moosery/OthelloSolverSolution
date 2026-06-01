@@ -26,4 +26,6 @@ bool MergePhaseRun(
     size_t                 mergeBufBytesPerThread,
     ThreadPool*            pool,
     OLEStatusBlock*        statusBlock = nullptr,
-    const char*            nasRunDir   = nullptr);
+    const char*            nasRunDir   = nullptr,
+    int64_t*               phase1NsOut = nullptr,
+    int64_t*               phase2NsOut = nullptr);

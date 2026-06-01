@@ -9,6 +9,7 @@
 #include <string.h>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <future>
 #include <atomic>
 #include <memory>
@@ -616,7 +617,9 @@ bool MergePhaseRun(
     size_t                 mergeBufBytesPerThread,
     ThreadPool*            pool,
     OLEStatusBlock*        statusBlock,
-    const char*            nasRunDir)
+    const char*            nasRunDir,
+    int64_t*               phase1NsOut,
+    int64_t*               phase2NsOut)
 {
     if (srcReg->files.empty()) return true;
     if (numOutputDirs < 1)     return false;
@@ -669,6 +672,8 @@ bool MergePhaseRun(
     // Launch in reverse index order so the HDD dir (highest index, slowest)
     // is queued first and gets the most overlap with the NVMe dirs.
     // -----------------------------------------------------------------------
+    auto tPhase1Start = std::chrono::steady_clock::now();
+
     std::vector<OLEFileDesc>           intermediates(numOutputDirs);
     std::vector<std::future<bool>>     p1futures;
     p1futures.reserve(numOutputDirs);
@@ -700,6 +705,11 @@ bool MergePhaseRun(
 
     bool allOk = true;
     for (auto& f : p1futures) { bool ok = f.get(); allOk = allOk && ok; }
+
+    auto tPhase2Start = std::chrono::steady_clock::now();
+    if (phase1NsOut)
+        *phase1NsOut = std::chrono::duration_cast<std::chrono::nanoseconds>(tPhase2Start - tPhase1Start).count();
+
     if (!allOk) return false;
 
     // -----------------------------------------------------------------------
@@ -756,6 +766,11 @@ bool MergePhaseRun(
     }
 
     for (auto& f : p2futures) { bool ok = f.get(); allOk = allOk && ok; }
+
+    if (phase2NsOut) {
+        auto tPhase2End = std::chrono::steady_clock::now();
+        *phase2NsOut = std::chrono::duration_cast<std::chrono::nanoseconds>(tPhase2End - tPhase2Start).count();
+    }
 
     if (statusBlock) statusBlock->mergePartsDone = numParts;
     return allOk;

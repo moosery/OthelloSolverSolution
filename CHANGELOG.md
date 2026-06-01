@@ -1,5 +1,12 @@
 # Changelog
 
+## [OLE v0.2.20] - 2026-06-01
+
+### Changed
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergePhaseRun` gains two optional output parameters `phase1NsOut` and `phase2NsOut`; Phase 1 wall time (all per-directory pre-merge threads) and Phase 2 wall time (final N-way merge to NAS) are measured with `std::chrono::steady_clock` and written to the caller; both are set on failure as well as success so partial rows carry accurate timing
+- **`OthelloLevelEnumerator` / `OLEMain`** — `LevelRecord` replaces the single `mergeNs` field with `merge1Ns` + `merge2Ns`; `PrintLevelRow` replaces the `MrgTm(s)` column with `Ph1Tm(s)` and `Ph2Tm(s)`; the `lastMergeNs` status-block field is written as their sum so `OLEStatusQuery` continues to show the correct total; partial-failure rows carry the same split
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.20
+
 ## [OLE v0.2.19] - 2026-06-01
 
 ### Changed
