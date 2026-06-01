@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.17"
+#define APP_VERSION "0.2.18"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -416,8 +416,9 @@ int main(int argc, char* argv[])
     // ---- Compute timestamped run directories ----
     // Each user-specified dir is a root; actual data lives under
     // <root>\<YYYY_MM_DD.HH_MM_SS>\BoardSize<N>x<N>\  (same convention as CL solver).
-    char runDirs[5][MAX_PATH];
-    char nasRunDir[MAX_PATH] = {};
+    char    runDirs[5][MAX_PATH];
+    char    nasRunDir[MAX_PATH] = {};
+    wchar_t shmName[128]        = {};   // per-run SHM name (prevents multi-instance collision)
     {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -432,6 +433,10 @@ int main(int argc, char* argv[])
         }
         if (config.nasEnabled)
             snprintf(nasRunDir, MAX_PATH, "%s%s", config.nasDir, suffix);
+
+        swprintf_s(shmName, 128,
+                   L"Local\\OthelloLevelEnumeratorStatus_%04u%02u%02u_%02u%02u%02u",
+                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     }
 
     // ---- Create all run directories ----
@@ -456,7 +461,20 @@ int main(int argc, char* argv[])
     OpenLogFile(config.outputDirs[0]);
 
     // ---- Live status shared memory ----
-    g_status = OLEStatusOpen(true, &g_statusHandle);
+    // Write our per-run SHM name to a well-known temp file so OLEStatusQuery
+    // can discover it without needing a command-line argument.
+    char shmTempFile[MAX_PATH] = {};
+    {
+        char tmp[MAX_PATH];
+        GetTempPathA(MAX_PATH, tmp);
+        snprintf(shmTempFile, MAX_PATH, "%sOLEStatus.shm", tmp);
+        FILE* f = nullptr;
+        if (fopen_s(&f, shmTempFile, "w") == 0 && f) {
+            fprintf(f, "%ls", shmName);
+            fclose(f);
+        }
+    }
+    g_status = OLEStatusOpen(true, &g_statusHandle, shmName);
     if (g_status) {
         memset((void*)g_status, 0, sizeof(OLEStatusBlock));
         g_status->magic   = OLE_STATUS_MAGIC;
@@ -755,6 +773,7 @@ int main(int argc, char* argv[])
     StopMemStatsThread();
     OLEStatusClose(g_status, g_statusHandle);
     g_status = nullptr; g_statusHandle = nullptr;
+    if (shmTempFile[0]) remove(shmTempFile);
     CloseLogFile();
     return 0;
 }

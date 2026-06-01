@@ -240,11 +240,35 @@ int main(int argc, char* argv[])
         }
     }
 
+    // Discover the per-run SHM name written by OLE at startup.
+    // Falls back to the legacy fixed name so old builds still work.
+    wchar_t shmName[128] = {};
+    {
+        char tmp[MAX_PATH];
+        GetTempPathA(MAX_PATH, tmp);
+        char shmFile[MAX_PATH];
+        snprintf(shmFile, MAX_PATH, "%sOLEStatus.shm", tmp);
+        FILE* f = nullptr;
+        if (fopen_s(&f, shmFile, "r") == 0 && f) {
+            char buf[128] = {};
+            if (fgets(buf, sizeof(buf), f)) {
+                size_t len = strlen(buf);
+                while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
+                    buf[--len] = 0;
+                MultiByteToWideChar(CP_ACP, 0, buf, -1, shmName, 128);
+            }
+            fclose(f);
+        }
+    }
+
     HANDLE hMap = nullptr;
-    OLEStatusBlock* blk = OLEStatusOpen(false, &hMap);
+    OLEStatusBlock* blk = nullptr;
+    if (shmName[0])
+        blk = OLEStatusOpen(false, &hMap, shmName);
+    if (!blk)
+        blk = OLEStatusOpen(false, &hMap);   // legacy fixed name fallback
     if (!blk) {
-        printf("No OLE process found (shared memory '%ls' not present).\n",
-               OLE_STATUS_SHM_NAME);
+        printf("No OLE process found (shared memory not present).\n");
         return 1;
     }
 

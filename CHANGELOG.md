@@ -1,5 +1,15 @@
 # Changelog
 
+## [OLE v0.2.18] - 2026-05-31
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — two instances of OLE running simultaneously no longer corrupt each other's shared memory: each instance now creates its SHM under a unique per-run name (`Local\OthelloLevelEnumeratorStatus_YYYYMMDD_HHMMSS`) derived from the same timestamp used for the run directory; the chosen name is written to `%TEMP%\OLEStatus.shm` at startup and deleted on exit so `OLEStatusQuery` can discover it without a command-line argument
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEStatus.h`** — `OLEStatusOpen` gains an optional `const wchar_t* name` parameter (default `OLE_STATUS_SHM_NAME`) so callers can specify the per-run name; the legacy fixed name is preserved as the default for backwards compatibility
+- **`OthelloLevelEnumeratorStatus` / `OLEStatusQuery`** — reads `%TEMP%\OLEStatus.shm` at startup to find the current instance's SHM name; if the file is absent or the open fails, falls back to the legacy fixed name so old OLE builds still work
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.18
+
 ## [OLE v0.2.17] - 2026-05-31
 
 ### Changed

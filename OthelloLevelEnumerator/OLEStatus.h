@@ -78,15 +78,18 @@ struct OLEStatusBlock {
 // Create (isWriter=true, called by OLE) or open (isWriter=false, called by query)
 // the shared memory block.  Returns mapped pointer or nullptr.
 // *hOut receives the mapping handle — caller must OLEStatusClose() when done.
-inline OLEStatusBlock* OLEStatusOpen(bool isWriter, HANDLE* hOut)
+// name defaults to OLE_STATUS_SHM_NAME; OLE passes a per-run timestamp name so
+// concurrent instances do not collide.
+inline OLEStatusBlock* OLEStatusOpen(bool isWriter, HANDLE* hOut,
+                                      const wchar_t* name = OLE_STATUS_SHM_NAME)
 {
     if (isWriter) {
         *hOut = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
                                    PAGE_READWRITE, 0,
                                    (DWORD)sizeof(OLEStatusBlock),
-                                   OLE_STATUS_SHM_NAME);
+                                   name);
     } else {
-        *hOut = OpenFileMappingW(FILE_MAP_READ, FALSE, OLE_STATUS_SHM_NAME);
+        *hOut = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
     }
     if (!*hOut) return nullptr;
     DWORD access = isWriter ? FILE_MAP_WRITE : FILE_MAP_READ;
