@@ -171,7 +171,7 @@ static void PrintStatus(const OLEStatusBlock* s)
                     uint64_t etaMs = (uint64_t)((double)elapsedMs * (1.0 - frac) / frac);
                     char etaBuf[32];
                     FormatDuration(etaMs, etaBuf, sizeof(etaBuf));
-                    printf("  — ETA: ~%s", etaBuf);
+                    printf("  -- ETA: ~%s", etaBuf);
                 }
                 printf("\n");
             }
