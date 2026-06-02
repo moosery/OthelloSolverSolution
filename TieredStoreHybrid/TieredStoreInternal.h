@@ -155,8 +155,10 @@ struct TSMergeJob
     std::vector<TSFileMergeSlice> slices;        // one per zone needing a merge
     ClockTick                     startTime;     // for statMergeNs
     std::atomic<int>              pendingSlices; // countdown; TSI_FinalizeJob called when hits 0
-    std::mutex                    collectMutex;  // guards toRegister and anyFailed
+    std::mutex                    collectMutex;  // guards toRegister, mergedSrcs, anyFailed
     std::vector<TSFileDesc*>      toRegister;    // outputs collected from completed slices
+    std::vector<TSFileDesc*>      mergedSrcs;    // srcFiles whose merge succeeded; deleted+freed
+                                                 // by FinalizeJob after bgSrcFiles is cleared
     bool                          anyFailed;     // true if any slice had an I/O error
     bool                          splitOccurred; // true if any slice produced 2+ output files
 };

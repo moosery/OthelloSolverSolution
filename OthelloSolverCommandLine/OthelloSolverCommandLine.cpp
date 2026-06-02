@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.5.5"
+#define APP_VERSION "2.5.6"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 
@@ -1134,6 +1134,11 @@ void doRestartProcess(PSolverConfig pConfig, GpuDeviceInfo gpuInfo)
              pConfig->outputDirs[0], latestTimestamp.c_str(), boardSizeDirName);
     SetFullDirPathDirect(runDirBuf);
     SetBoardSizeForRun(pConfig->boardSize);
+
+    // Restore extra data-dir striping so CreateBoardStore/CreateMoveStore inside
+    // RunSolverCore spread new stores across all drives, matching the original run.
+    if (pConfig->numOutputDirs > 1)
+        SetExtraRunDirs(&pConfig->outputDirs[1], pConfig->numOutputDirs - 1);
 
     LogOpen(GetFullDirPathForRun());
     LogPrintf("OthelloSolverCommandLine v" APP_VERSION " restarting\n");

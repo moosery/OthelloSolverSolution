@@ -999,12 +999,15 @@ static void TSI_RunSliceJob(_TieredStore* ts, TSMergeJob* job, int sliceIdx)
                 slice.outDescs.erase(slice.outDescs.begin() + i);
             }
         }
+        std::lock_guard<std::mutex> lk(job->collectMutex);
         if (slice.srcFile) {
-            remove(slice.srcFile->path);
-            TSI_FreeFileDesc(ts, slice.srcFile);
+            // Defer remove()+free to TSI_FinalizeJob so the descriptor and the file on
+            // disk remain valid while bgSrcFiles is still populated.  FinalizeJob clears
+            // bgSrcFiles under the write lock before calling remove()/TSI_FreeFileDesc,
+            // closing the window where TSFind could access a freed or deleted srcFile.
+            job->mergedSrcs.push_back(slice.srcFile);
             slice.srcFile = nullptr;
         }
-        std::lock_guard<std::mutex> lk(job->collectMutex);
         if (slice.outDescs.size() > 1) job->splitOccurred = true;
         for (auto* od : slice.outDescs) job->toRegister.push_back(od);
         slice.outDescs.clear();
@@ -1060,9 +1063,17 @@ static void TSI_FinalizeJob(_TieredStore* ts, TSMergeJob* job)
             if (s.srcFile) { TSI_RegisterFileArray(ts, s.srcFile); s.srcFile = nullptr; }
     }
 
-    // Source files are now either superseded by new output files (success) or restored to
-    // ts->files (failure).  Either way they no longer need to be in the bg search list.
+    // Clear bgSrcFiles under the write lock before touching any descriptor or file on disk.
+    // This closes the window where a concurrent TSFind (read lock) could access a srcFile
+    // that is about to be freed or whose on-disk file is about to be removed.
     ts->bgSrcFiles.clear();
+
+    // Now safe to delete from disk and free the descriptors of successfully merged srcFiles.
+    for (TSFileDesc* fd : job->mergedSrcs)
+    {
+        remove(fd->path);
+        TSI_FreeFileDesc(ts, fd);
+    }
 
     // BPFreeTree resets the arena internally; recycle it as spareArena for the next flush.
     BPFreeTree(job->tree, true);

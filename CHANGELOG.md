@@ -1,5 +1,14 @@
 # Changelog
 
+## [OthelloSolverCommandLine v2.5.6 / TieredStore] - 2026-06-02
+
+### Fixed
+- **`TieredStoreHybrid` / `TieredStore`** — use-after-free and deleted-file window in background merge: `TSI_RunSliceJob` was calling `remove()` and `TSI_FreeFileDesc()` on the source-file descriptor immediately after the merge succeeded, without holding the store lock; `TSFind` (which holds the read lock) could access the freed descriptor via `bgSrcFiles`, and even if it didn't crash, the file was already gone from disk so `fopen_s` in `TSI_FindInFile` would fail — leaving the record invisible in the window between RunSliceJob completing and FinalizeJob registering the output files; fix: RunSliceJob now hands the descriptor to `job->mergedSrcs` (under `collectMutex`) without touching it; `TSI_FinalizeJob` clears `bgSrcFiles` under the write lock first, then iterates `mergedSrcs` to `remove()` and `TSI_FreeFileDesc()` — guaranteeing no concurrent TSFind can access a stale descriptor or a missing file
+- **`OthelloSolverCommandLine` / `doRestartProcess`** — `SetExtraRunDirs` was never called during a restart; `CreateBoardStore` and `CreateMoveStore` inside `RunSolverCore` call `GetNumExtraRunDirs()` which returned 0, so all new stores created during a restart (move[N] and board[N+1]) were written only to the primary directory, ignoring the extra data drives configured by `--data-dir2/3/4`; fix: `doRestartProcess` now calls `SetExtraRunDirs` with the same extra dirs as the original run when `numOutputDirs > 1`
+
+### Changed
+- **`OthelloSolverCommandLine` / `OthelloSolverCommandLine`** — version bumped to 2.5.6
+
 ## [OthelloSolverCommandLine v2.5.5 / TieredStore] - 2026-06-02
 
 ### Fixed
