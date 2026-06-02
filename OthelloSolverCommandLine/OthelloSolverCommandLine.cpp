@@ -22,7 +22,7 @@
 #include <TierdStore.h>
 #include <ArenaMem.h>
 
-#define APP_VERSION "2.5.4"
+#define APP_VERSION "2.5.5"
 
 constexpr auto MAX_INDIVIDUAL_FILE_SIZE_FOR_SOLVER = 1ULL * 1024 * 1024 * 1024;   // 1GB per disk file
 

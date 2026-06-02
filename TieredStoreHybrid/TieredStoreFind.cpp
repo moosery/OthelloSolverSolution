@@ -27,6 +27,17 @@ TSRc TSFind(PTS pTs, const void* keyRecord, void* outRecord)
             TSRc trc = TSI_FindInFile(pTs, pTs->files[i], keyRecord, outRecord);
             if (trc != TS_RC_Not_Found) { result = trc; break; }
         }
+        // bgSrcFiles holds source files extracted from ts->files for the active background
+        // merge — they are no longer in ts->files but not yet deleted.  Search them too so
+        // TSFind remains correct while a merge is in flight.
+        if (result == TS_RC_Not_Found)
+        {
+            for (TSFileDesc* fd : pTs->bgSrcFiles)
+            {
+                TSRc trc = TSI_FindInFile(pTs, fd, keyRecord, outRecord);
+                if (trc != TS_RC_Not_Found) { result = trc; break; }
+            }
+        }
     }
 
     pTs->statFinds++;

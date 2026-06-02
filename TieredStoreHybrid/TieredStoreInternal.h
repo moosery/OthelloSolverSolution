@@ -228,6 +228,9 @@ struct _TieredStore
     PBPTree                  bgTree;      // in-memory tree currently being bg-merged (storeLock)
     PArenaMem                bgArena;     // bgTree's arena; NULL if malloc mode (storeLock)
     PArenaMem                spareArena;  // recycled arena ready for the next flush (storeLock)
+    std::vector<TSFileDesc*> bgSrcFiles;  // source files extracted for the active bg merge;
+                                         // also searched by TSFind so records stay visible
+                                         // while the merge is in flight (storeLock)
 
     // Stats — always read/written while holding storeLock (except statDups)
     uint64_t      statInserts;

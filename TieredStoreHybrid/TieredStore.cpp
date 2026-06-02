@@ -947,6 +947,9 @@ static TSMergeJob* TSI_PrepMergeJob(_TieredStore* ts)
         }
     }
 
+    // Expose extracted source files so TSFind remains correct while merge is in flight.
+    ts->bgSrcFiles = toExtract;
+
     ClockStart(&job->startTime);
     return job;
 }
@@ -1056,6 +1059,10 @@ static void TSI_FinalizeJob(_TieredStore* ts, TSMergeJob* job)
         for (auto& s : job->slices)
             if (s.srcFile) { TSI_RegisterFileArray(ts, s.srcFile); s.srcFile = nullptr; }
     }
+
+    // Source files are now either superseded by new output files (success) or restored to
+    // ts->files (failure).  Either way they no longer need to be in the bg search list.
+    ts->bgSrcFiles.clear();
 
     // BPFreeTree resets the arena internally; recycle it as spareArena for the next flush.
     BPFreeTree(job->tree, true);

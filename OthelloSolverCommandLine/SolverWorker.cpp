@@ -51,6 +51,18 @@ void WorkerProcessBatch(
         exit(1);
     }
 
+    // Zero the explicit _pad1 padding in every child board.  GPU kernels write only
+    // the meaningful fields (ullCellsInUse, ullCellColors, usBoardInfo, ullPossibleMoves)
+    // and leave _pad1 uninitialised.  _pad1 is part of the 24-byte board key used by
+    // the TieredStore memcmp comparison, so garbage bytes would prevent duplicate
+    // detection and corrupt the GPU dedup table's 3-word key comparison.
+    for (int i = 0; i < boardCount; i++)
+    {
+        GpuResult* r = ctx->h_results + ((size_t)i * maxMovesPerBoard);
+        for (int j = 0; j < ctx->h_outputCounts[i]; j++)
+            r[j].childBoard._pad1[0] = r[j].childBoard._pad1[1] = r[j].childBoard._pad1[2] = 0;
+    }
+
     // Track per-level max legal moves (lock-free atomic max).
     {
         int cur = pLevelStats->maxMovesInLevel.load(std::memory_order_relaxed);

@@ -1,5 +1,15 @@
 # Changelog
 
+## [OthelloSolverCommandLine v2.5.5 / TieredStore] - 2026-06-02
+
+### Fixed
+- **`TieredStoreHybrid` / `TieredStoreFind`** — `TSFind` could miss records whose owning disk file was temporarily removed from `ts->files` while a background merge was in flight (`TSI_PrepMergeJob` extracts source files before the merge thread runs, leaving a window where they were invisible to reads); fix: added `bgSrcFiles` vector to `_TieredStore` populated by `TSI_PrepMergeJob` and cleared by `TSI_FinalizeJob`; `TSFind` now falls back to searching `bgSrcFiles` after `ts->files`; in `OthelloSolverCommandLine` this was the root cause of "child not found" crashes during back-propagation Pass 2 at levels 12+ when a concurrent `TSInsert` triggered a background flush on the same board store that was simultaneously being searched
+- **`TieredStoreHybrid` / `TieredStoreInsert`** — `TSInsert` only handled `BP_RC_Tree_Full` (malloc-mode hard limit) as the trigger for flush-and-retry; in arena mode the B+ tree returns `BP_RC_Allocate_Failed` when the arena is exhausted, which fell through to `TS_RC_Out_Of_Memory` and dropped the record; fix: the flush-and-retry path now also activates on `BP_RC_Allocate_Failed`
+- **`OthelloSolverCommandLine` / `SolverWorker`** — GPU kernels populate `ullCellsInUse`, `ullCellColors`, `usBoardInfo`, and `ullPossibleMoves` in each child board but leave the explicit `_pad1[3]` alignment bytes uninitialised; `_pad1` is part of the 24-byte board key used for `memcmp`-based comparison in both `TieredStore` and the GPU dedup table, so the same board position could appear with different padding values, defeating duplicate detection; fix: after the overflow check in `WorkerProcessBatch`, all `_pad1` bytes are zeroed across every child board in `h_results` before any store insertion or dedup processing
+
+### Changed
+- **`OthelloSolverCommandLine` / `OthelloSolverCommandLine`** — version bumped to 2.5.5
+
 ## [OLE v0.2.20] - 2026-06-01
 
 ### Changed

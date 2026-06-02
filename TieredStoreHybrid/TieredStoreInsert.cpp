@@ -13,10 +13,11 @@ TSRc TSInsert(PTS pTs, const void* record)
 
     BPRc rc = BPInsertCopy(pTs->memTree, const_cast<void*>(record));
 
-    if (rc == BP_RC_Tree_Full)
+    if (rc == BP_RC_Tree_Full || rc == BP_RC_Allocate_Failed)
     {
-        // If a previous background merge is still running, release the write lock and
-        // wait for it to finish before triggering a new one.
+        // BP_RC_Tree_Full  = data-count hard limit reached (malloc mode).
+        // BP_RC_Allocate_Failed = arena exhausted (arena mode).
+        // In both cases flush the current tree to disk and retry on the fresh empty tree.
         while (pTs->bgPending)
         {
             RWLockWriteUnlock("TSInsert", &pTs->storeLock);
