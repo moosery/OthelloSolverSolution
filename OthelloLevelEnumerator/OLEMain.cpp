@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.20"
+#define APP_VERSION "0.2.21"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -74,6 +74,25 @@ struct LevelRecord
     long long merge2Ns;
     uint64_t  solveFiles;   // solve output file count (Phase 1 merge fan-in)
 };
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown on Ctrl+C
+// ---------------------------------------------------------------------------
+
+static std::atomic<bool> g_shutdown{false};
+
+static BOOL WINAPI CtrlCHandler(DWORD dwCtrlType)
+{
+    if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT)
+    {
+        g_shutdown.store(true);
+        // Write directly — LogPrintf acquires g_logMtx which may be held.
+        printf("\n[Ctrl+C -- stopping after current batch; printing stats...]\n");
+        fflush(stdout);
+        return TRUE;   // suppress the default "terminate process" behaviour
+    }
+    return FALSE;
+}
 
 // ---------------------------------------------------------------------------
 // Run log: mirrors all formatted console output to a persistent log file.
@@ -359,6 +378,9 @@ static void PrintLevelRow(const LevelRecord& r)
 
 int main(int argc, char* argv[])
 {
+    // ---- Ctrl+C handler ----
+    SetConsoleCtrlHandler(CtrlCHandler, TRUE);
+
     // ---- GPU query ----
     GpuDeviceInfo gpuInfo = QueryGpuDevice();
     _setmaxstdio(2048);
@@ -544,6 +566,7 @@ int main(int argc, char* argv[])
     pipelineCfg.outputDirs       = config.outputDirs;
     pipelineCfg.numOutputDirs    = config.numOutputDirs;
     pipelineCfg.statusBlock      = g_status;
+    pipelineCfg.shutdown         = &g_shutdown;
 
     // ---- Level records ----
     std::vector<LevelRecord> history;
@@ -612,6 +635,7 @@ int main(int argc, char* argv[])
     for (int level = 0; level < maxLevels; level++)
     {
         if (currentReg.files.empty()) break;
+        if (g_shutdown.load()) break;
 
         // Resume check: skip if merged output already exists.
         char mergeMeta[MAX_PATH];
@@ -654,6 +678,26 @@ int main(int argc, char* argv[])
         }
 
         long long solveNs = ClockNanosSinceStart(&lvStart);
+
+        if (g_shutdown.load())
+        {
+            long long partialNs  = solveNs;
+            LevelRecord partial  = {};
+            partial.level        = level;
+            partial.boardsIn     = stats.boardsIn + stats.passBoards;
+            partial.newBoards    = stats.slotsExpanded;
+            partial.passBoards   = stats.passBoards;
+            partial.gpuDups      = stats.dupBoards;
+            partial.totalMoves   = stats.slotsExpanded + stats.passBoards;
+            partial.endBoards    = stats.endBoards;
+            partial.maxMovesAny  = stats.maxMovesAnyBoard;
+            partial.elapsedNs    = partialNs;
+            partial.solveNs      = solveNs;
+            partial.solveFiles   = stats.filesWritten;
+            LogPrintf("  (partial -- interrupted during solve; merge not started)\n");
+            PrintLevelRow(partial);
+            break;
+        }
 
         uint64_t solveUniqueBoards = stats.uniqueBoards;
 
@@ -743,6 +787,7 @@ int main(int argc, char* argv[])
         }
 
         currentReg.files = std::move(mergedReg.files);
+        if (g_shutdown.load()) break;
     }
 
     // ---- Final summary ----

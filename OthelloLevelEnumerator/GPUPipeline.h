@@ -3,6 +3,7 @@
 #include "OLEKernel.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <atomic>
 
 class ThreadPool;
 struct OLEStatusBlock;   // defined in OLEStatus.h
@@ -19,6 +20,9 @@ struct OLEPipelineConfig {
     const char* const* outputDirs;   // one per drive
     int         numOutputDirs;
     OLEStatusBlock* statusBlock;     // optional live status (nullptr = disabled)
+    const std::atomic<bool>* shutdown; // optional graceful-stop flag (nullptr = disabled);
+                                       // PipelineRun checks after each batch and exits early
+                                       // when true, returning true (not an error)
 
     // Called by PipelineRun after each input file is fully read (all records consumed
     // and the file handle closed).  Intended use: archive copy to NAS + delete local.

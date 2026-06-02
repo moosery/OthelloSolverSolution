@@ -1,5 +1,12 @@
 # Changelog
 
+## [OLE v0.2.21] - 2026-06-02
+
+### Added
+- **`OthelloLevelEnumerator` / `OLEMain`** — Ctrl+C (and Ctrl+Break) now triggers a graceful shutdown instead of immediately killing the process; a `SetConsoleCtrlHandler` sets a global `g_shutdown` atomic; the BFS loop checks it at the start of each level (instant response between levels), and `PipelineRun` checks it after each GPU batch so the solve phase exits within ~1 batch-time (~1 s) rather than waiting for the whole level; after any early exit the existing final-summary block prints all completed-level stats and wall-clock totals to the log; if interrupted mid-solve a clearly labelled partial row is printed for the current level (solve data only, merge columns zeroed); if interrupted mid-merge or between phases the completed level row is printed normally and the loop then stops
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — `OLEPipelineConfig` gains `const std::atomic<bool>* shutdown` (nullable); `PipelineRun` checks it after each batch and after each input file, exiting the solve early and returning `true` (not an error) when set; `onInputFileConsumed` is suppressed for the last file when shutting down to avoid deleting input files whose output may be incomplete
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.21
+
 ## [OthelloSolverCommandLine v2.5.6 / TieredStore] - 2026-06-02
 
 ### Fixed

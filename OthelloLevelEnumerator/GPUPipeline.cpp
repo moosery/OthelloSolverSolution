@@ -227,12 +227,18 @@ bool PipelineRun(
             stats->endBoards         += batchStats.endBoards;
             if (batchStats.maxMoves > stats->maxMovesAnyBoard)
                 stats->maxMovesAnyBoard = batchStats.maxMoves;
+
+            // Honour a graceful-stop request: finish this batch cleanly then exit.
+            if (cfg->shutdown && cfg->shutdown->load())
+                break;
         }
 
         SFReaderClose(&reader);
 
-        if (ok && cfg->onInputFileConsumed)
+        if (ok && cfg->onInputFileConsumed && !(cfg->shutdown && cfg->shutdown->load()))
             cfg->onInputFileConsumed(fd.path, cfg->inputFileCtx);
+
+        if (cfg->shutdown && cfg->shutdown->load()) break;
     }
 
     // Flush remaining data.
