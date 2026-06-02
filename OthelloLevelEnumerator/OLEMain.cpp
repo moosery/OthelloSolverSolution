@@ -26,7 +26,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.21"
+#define APP_VERSION "0.2.22"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -214,11 +214,12 @@ static OLEStatusBlock* g_status        = nullptr;
 static HANDLE          g_statusHandle  = nullptr;
 
 // GPUPipeline callback: called after each input file is fully read and closed.
-// Deletes the solve input immediately; merge output written directly to NAS is
-// the new canonical set for the next level.
-static void OnInputFileConsumed(const char* path, void* /*ctx*/)
+// NAS merge output is kept as a permanent per-level archive; do NOT delete it.
+// Local solve files are removed separately after each merge completes (see the
+// solveReg cleanup loop below).  The seed file at level 0 is local and tiny;
+// leaving it is harmless.
+static void OnInputFileConsumed(const char* /*path*/, void* /*ctx*/)
 {
-    remove(path);
 }
 
 // ---------------------------------------------------------------------------

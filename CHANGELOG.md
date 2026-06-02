@@ -1,5 +1,11 @@
 # Changelog
 
+## [OLE v0.2.22] - 2026-06-02
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — NAS merge output was being deleted as each file was consumed by the next level's solve (`OnInputFileConsumed` called `remove(path)`), so Z: never accumulated more than one level's data at a time and appeared empty whenever checked between levels or after a failure; `OnInputFileConsumed` is now a no-op — NAS files are kept permanently as a true per-level archive; local temporary solve files are still removed after each merge completes (existing `solveReg` cleanup loop)
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.2.22
+
 ## [OLE v0.2.21] - 2026-06-02
 
 ### Added
