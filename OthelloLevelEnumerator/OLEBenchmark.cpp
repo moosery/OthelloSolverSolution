@@ -238,6 +238,7 @@ OLEDriveBenchResult OLEBenchmarkDrive(
     }
 
     double prevCombinedWrite = 0.0;
+    double prevCombinedRead  = 0.0;
     int    bestDirs          = 1;
     double bestPerDirWrite   = 0.0;
     double bestPerDirRead    = 0.0;
@@ -258,28 +259,32 @@ OLEDriveBenchResult OLEBenchmarkDrive(
             break;
         }
 
+        double writeGain = (prevCombinedWrite > 0.0)
+                         ? (combinedW - prevCombinedWrite) / prevCombinedWrite : 0.0;
+        double readGain  = (prevCombinedRead  > 0.0)
+                         ? (combinedR - prevCombinedRead)  / prevCombinedRead  : 0.0;
+        double bestGain  = (writeGain + readGain) / 2.0;
+
         if (verbose) {
             if (numDirs == 1) {
                 printf("      Result: write %.0f MB/s  read %.0f MB/s\n", combinedW, combinedR);
             } else {
-                double gain = (prevCombinedWrite > 0.0)
-                            ? (combinedW - prevCombinedWrite) / prevCombinedWrite : 0.0;
-                printf("      Result: combined write %.0f MB/s (%.0f%% vs %d dir)\n",
-                       combinedW, gain * 100.0, numDirs - 1);
-                if (gain < threshold) {
-                    printf("      < %.0f%% gain -- stopping at %d dir%s\n",
-                           threshold * 100.0, bestDirs, bestDirs > 1 ? "s" : "");
+                printf("      Result: combined write %.0f MB/s  read %.0f MB/s"
+                       "  (write +%.0f%%  read +%.0f%%  vs %d dir)\n",
+                       combinedW, combinedR,
+                       writeGain * 100.0, readGain * 100.0, numDirs - 1);
+                if (bestGain < threshold) {
+                    printf("      avg %.0f%% < %.0f%% threshold -- stopping at %d dir%s\n",
+                           bestGain * 100.0, threshold * 100.0, bestDirs, bestDirs > 1 ? "s" : "");
                 } else {
-                    printf("      >= %.0f%% gain -- keeping %d dirs\n",
-                           threshold * 100.0, numDirs);
+                    printf("      avg %.0f%% >= %.0f%% threshold -- keeping %d dirs\n",
+                           bestGain * 100.0, threshold * 100.0, numDirs);
                 }
             }
         }
 
-        // Update best if this is the first test or combined write improved enough.
-        bool improved = (numDirs == 1) ||
-                        (prevCombinedWrite > 0.0 &&
-                         (combinedW - prevCombinedWrite) / prevCombinedWrite >= threshold);
+        // Update best if this is the first test or write OR read improved enough.
+        bool improved = (numDirs == 1) || (bestGain >= threshold);
 
         if (improved) {
             bestDirs          = numDirs;
@@ -290,6 +295,7 @@ OLEDriveBenchResult OLEBenchmarkDrive(
         }
 
         prevCombinedWrite = combinedW;
+        prevCombinedRead  = combinedR;
 
         if (!improved && numDirs > 1)
             break;   // stop testing more dirs

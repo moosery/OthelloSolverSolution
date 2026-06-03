@@ -27,7 +27,7 @@ OLEDriveBenchResult OLEBenchmarkDrive(
     char   driveLetter,
     size_t fileBytes  = 256ULL * 1024 * 1024,
     int    numPasses  = 5,
-    double threshold  = 0.15,
+    double threshold  = 0.10,
     int    maxDirs    = 4,
     bool   verbose    = true);
 

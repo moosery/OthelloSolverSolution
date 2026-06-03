@@ -1,5 +1,11 @@
 # Changelog
 
+## [OLE v0.3.3] - 2026-06-03
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEBenchmark`** — optimal-dir decision now uses average of write and read gain instead of write gain alone; a drive that improves significantly on reads (e.g. NVMe with parallel I/O queues) but not writes would previously be over-counted by a max metric and under-counted by write-only; averaging weights both equally since solve is write-heavy and merge Ph1 is read-heavy; threshold lowered from 15% to 10% to match the less noisy averaged metric; benchmark output now shows `write +X%  read +Y%` per dir-count test and `avg Z% < / >= threshold` for the stop/keep decision
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.3
+
 ## [OLE v0.3.2] - 2026-06-03
 
 ### Fixed
