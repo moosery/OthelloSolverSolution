@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.3.4] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — per-dir sub-rows labeled the Ph2 NAS partition column `MrgGB` which implied the data was on the local directory; when NAS is enabled all merge output goes to Z: and the per-dir value is a NAS partition attributed by index — the column is now labeled `NasPrt` when NAS is active and `MrgGB ` when no NAS so readers are not misled by zeros in the local-dir rows
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.4
+
 ## [OLE v0.3.3] - 2026-06-03
 
 ### Changed

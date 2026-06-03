@@ -33,7 +33,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.3.3"
+#define APP_VERSION "0.3.4"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -415,20 +415,23 @@ static void PrintLevelRow(const LevelRecord& r)
               r.solveFiles, slvGB, mrgGB, dtBuf);
 }
 
-static void PrintDirSubRows(const OLEDirDesc* dirs, int numDirs, bool showMrg)
+static void PrintDirSubRows(const OLEDirDesc* dirs, int numDirs, bool showMrg, bool nasEnabled)
 {
     uint64_t totalSlvFiles = 0;
     for (int i = 0; i < numDirs; i++)
         totalSlvFiles += dirs[i].lvSlvFiles;
     if (totalSlvFiles == 0) return;
 
+    // When NAS is enabled MrgGB is a NAS partition, not local dir data — label accordingly.
+    const char* mrgLabel = nasEnabled ? "NasPrt" : "MrgGB ";
+
     for (int i = 0; i < numDirs; i++) {
         double slvGB = (double)dirs[i].lvSlvBytes / (1024.0 * 1024 * 1024);
         double mrgGB = (double)dirs[i].lvMrgBytes / (1024.0 * 1024 * 1024);
         if (showMrg)
-            LogPrintf("    Dir %d  %s  SlvFls:%6llu  SlvGB:%8.2f  MrgGB:%8.2f\n",
+            LogPrintf("    Dir %d  %s  SlvFls:%6llu  SlvGB:%8.2f  %s:%8.2f\n",
                       i, dirs[i].path,
-                      (unsigned long long)dirs[i].lvSlvFiles, slvGB, mrgGB);
+                      (unsigned long long)dirs[i].lvSlvFiles, slvGB, mrgLabel, mrgGB);
         else
             LogPrintf("    Dir %d  %s  SlvFls:%6llu  SlvGB:%8.2f\n",
                       i, dirs[i].path,
@@ -1076,7 +1079,7 @@ int main(int argc, char* argv[])
             LogPrintf("  (partial -- interrupted during solve; merge not started)\n");
             PrintLevelHeader();
             PrintLevelRow(partial);
-            PrintDirSubRows(config.dirs, config.numDirs, false);
+            PrintDirSubRows(config.dirs, config.numDirs, false, config.nasDrive != '\0');
             LogPrintf("\n");
             break;
         }
@@ -1119,7 +1122,7 @@ int main(int argc, char* argv[])
             LogPrintf("  (partial -- merge aborted; MrgDups/MrgGB=0)\n");
             PrintLevelHeader();
             PrintLevelRow(partial);
-            PrintDirSubRows(config.dirs, config.numDirs, false);
+            PrintDirSubRows(config.dirs, config.numDirs, false, config.nasDrive != '\0');
             LogPrintf("\n");
             break;
         }
@@ -1188,7 +1191,7 @@ int main(int argc, char* argv[])
 
         PrintLevelHeader();
         PrintLevelRow(rec);
-        PrintDirSubRows(config.dirs, config.numDirs, true);
+        PrintDirSubRows(config.dirs, config.numDirs, true, config.nasDrive != '\0');
 
         // Update level stats cache with observed sizes.
         {
