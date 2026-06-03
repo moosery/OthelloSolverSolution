@@ -1,5 +1,14 @@
 # Changelog
 
+## [OLE v0.4.1] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeRunFilesToNAS` was constructing temp file paths as `ole_ph2tmp_L%02d_D%d.sf` but `RunMergePartition` writes `ole_merge_L%02d_D%d.sf`; the mismatch caused `SFReaderOpen` to fail on the temp, `CopyFileRaw` to fail (file not found), and `MergeRunFilesToNAS` to return false on every level; aligning the format string fixes the crash at level 0
+- **`OthelloLevelEnumerator` / `OLEMain`** — two `LogPrintf` format strings contained the Unicode right-arrow character (U+2192); Windows console renders multi-byte UTF-8 as garbage under the default code page; replaced with ASCII `->` in the `[FlushMon]` and `[FinalFlush]` flush log lines
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.1
+
 ## [OLE v0.4.0] - 2026-06-03
 
 ### Changed (architectural overhaul — new solve/merge pipeline)
