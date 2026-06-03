@@ -1125,7 +1125,7 @@ bool MergeRunFilesToNAS(
 
         const char* tempDir = fastTempDirs[k % numFastTempDirs];
         char tempPath[512];
-        snprintf(tempPath, sizeof(tempPath), "%sole_ph2tmp_L%02d_D%d.sf", tempDir, level, k);
+        snprintf(tempPath, sizeof(tempPath), "%sole_merge_L%02d_D%d.sf", tempDir, level, k);
         char nasPath[512];
         snprintf(nasPath,  sizeof(nasPath),  "%sole_merge_L%02d_D%d.sf",  nasOutputDir, level, k);
 

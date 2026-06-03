@@ -1241,7 +1241,7 @@ int main(int argc, char* argv[])
 
                     // Disable this dir in the pipeline and launch flush thread.
                     dirEnabled[fi].store(false);
-                    LogPrintf("  [FlushMon] Flushing Fast dir %d (%s, files=%d, free=%.0f GB) → %s\n",
+                    LogPrintf("  [FlushMon] Flushing Fast dir %d (%s, files=%d, free=%.0f GB) -> %s\n",
                               fi, fastDirPaths[fi], fileCount,
                               (double)fastFree / (1024.0*1024*1024), bestModDir);
 
@@ -1288,7 +1288,7 @@ int main(int argc, char* argv[])
             if (fileCount == 0) continue;
             const char* modDir = (moderateDirCount > 0) ? moderateDirPaths[0] : nullptr;
             if (!modDir) { LogPrintf("  WARNING: no Moderate dir for final flush of Fast dir %d.\n", fi); continue; }
-            LogPrintf("  [FinalFlush] Flushing Fast dir %d (%d files) → %s\n", fi, fileCount, modDir);
+            LogPrintf("  [FinalFlush] Flushing Fast dir %d (%d files) -> %s\n", fi, fileCount, modDir);
             FlushNvmeDir(fi, &solveReg, &runReg, modDir, level,
                          config.mergeBufBytesPerThread, safeFileLimit, &g_shutdown);
         }
