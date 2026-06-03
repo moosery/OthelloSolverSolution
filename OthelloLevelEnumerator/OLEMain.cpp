@@ -33,7 +33,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.3.5"
+#define APP_VERSION "0.3.6"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -893,20 +893,7 @@ int main(int argc, char* argv[])
         LogPrintf("  Level stats cache: %d entries loaded from %s\n\n",
                   numLevelStats, config.cacheDir);
 
-    // ---- Dir routing weights (proportional to usable space) ----
-    {
-        uint64_t totalUsable = 0;
-        for (int i = 0; i < config.numDirs; i++) totalUsable += config.dirs[i].usableBytes;
-        pipelineCfg.totalWeight = 0;
-        if (totalUsable > 0) {
-            for (int i = 0; i < config.numDirs; i++) {
-                int w = (int)((double)config.dirs[i].usableBytes / (double)totalUsable * 100.0 + 0.5);
-                if (w < 1) w = 1;
-                pipelineCfg.dirWeights[i] = w;
-                pipelineCfg.totalWeight  += w;
-            }
-        }
-    }
+    // Dir routing weights are computed per-level inside the BFS loop.
 
     // ---- Level records ----
     std::vector<LevelRecord> history;
@@ -1038,13 +1025,83 @@ int main(int argc, char* argv[])
 
         ClockTick lvStart; ClockStart(&lvStart);
 
-        // Log expected sizes from cache (informational).
+        // ---- Per-level dir routing weights ----
+        // Use cached level stats to compute capacity-aware weights.
+        // If a dir would overflow given the expected solve size, its quota is
+        // capped and the excess redistributed to dirs with remaining room.
+        // Falls back to usable-space proportional weights when no stats exist.
         {
             const OLELevelStatEntry* ls = OLELevelStatsLookup(
                 levelStats, numLevelStats, config.boardSize, config.numRotations, level);
-            if (ls)
+
+            uint64_t totalUsable = 0;
+            for (int i = 0; i < config.numDirs; i++) totalUsable += config.dirs[i].usableBytes;
+
+            double quota[OLE_MAX_SOLVE_DIRS] = {};
+
+            if (ls && ls->slvGB >= 0.10) {
+                uint64_t expectedBytes = (uint64_t)(ls->slvGB * 1024.0 * 1024.0 * 1024.0);
+
+                double totalAvailGB = (double)totalUsable / (1024.0 * 1024 * 1024);
+                if (ls->slvGB > totalAvailGB * 0.90)
+                    LogPrintf("  WARNING: Level %d expected %.2f GB solve but only %.2f GB available!\n",
+                              level, ls->slvGB, totalAvailGB);
+
+                // Initial allocation proportional to usable space.
+                for (int i = 0; i < config.numDirs; i++)
+                    quota[i] = (totalUsable > 0)
+                             ? (double)expectedBytes * config.dirs[i].usableBytes / (double)totalUsable
+                             : (double)expectedBytes / config.numDirs;
+
+                // Iteratively cap dirs that overflow and redistribute to uncapped dirs.
+                bool capped[OLE_MAX_SOLVE_DIRS] = {};
+                for (int iter = 0; iter < config.numDirs; iter++) {
+                    uint64_t uncappedUsable = 0;
+                    double   cappedTotal    = 0.0;
+                    bool     anyNew        = false;
+                    for (int i = 0; i < config.numDirs; i++) {
+                        if (capped[i]) { cappedTotal += quota[i]; continue; }
+                        if (quota[i] >= (double)config.dirs[i].usableBytes) {
+                            quota[i] = (double)config.dirs[i].usableBytes;
+                            capped[i] = true; anyNew = true;
+                            cappedTotal += quota[i];
+                        } else {
+                            uncappedUsable += config.dirs[i].usableBytes;
+                        }
+                    }
+                    if (!anyNew) break;
+                    double remaining = (double)expectedBytes - cappedTotal;
+                    if (remaining <= 0.0 || uncappedUsable == 0) break;
+                    for (int i = 0; i < config.numDirs; i++) {
+                        if (!capped[i])
+                            quota[i] = remaining * (double)config.dirs[i].usableBytes / (double)uncappedUsable;
+                    }
+                }
+
                 LogPrintf("  Level %d: expected SlvGB=%.2f  MrgGB=%.2f  (from cache)\n",
                           level, ls->slvGB, ls->mrgGB);
+            } else {
+                // No stats yet — allocate proportional to usable space.
+                for (int i = 0; i < config.numDirs; i++)
+                    quota[i] = (totalUsable > 0)
+                             ? (double)config.dirs[i].usableBytes : 1.0;
+                if (ls)
+                    LogPrintf("  Level %d: expected SlvGB=%.2f  MrgGB=%.2f  (from cache)\n",
+                              level, ls->slvGB, ls->mrgGB);
+            }
+
+            // Convert quotas to integer weights for GPUPipeline.
+            double totalQuota = 0.0;
+            for (int i = 0; i < config.numDirs; i++) totalQuota += quota[i];
+            pipelineCfg.totalWeight = 0;
+            for (int i = 0; i < config.numDirs; i++) {
+                int w = (totalQuota > 0.0)
+                      ? (int)(quota[i] / totalQuota * 100.0 + 0.5)
+                      : 1;
+                if (w < 1) w = 1;
+                pipelineCfg.dirWeights[i] = w;
+                pipelineCfg.totalWeight   += w;
+            }
         }
 
         // Solve phase: expand all boards in currentReg → solveReg.

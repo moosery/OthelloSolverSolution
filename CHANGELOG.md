@@ -1,5 +1,11 @@
 # Changelog
 
+## [OLE v0.3.6] - 2026-06-03
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — dir routing weights are now recomputed before every level using the cached level stats; when `level_stats.json` has a size entry for the current level the expected solve bytes are distributed across dirs proportional to usable space, then any dir whose quota would exceed its capacity is capped and the excess redistributed iteratively to uncapped dirs; if total expected exceeds 90% of total available a warning is printed; levels with no cached stats fall back to plain usable-space-proportional weights; the old single static weight computation at startup is removed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.6
+
 ## [OLE v0.3.5] - 2026-06-03
 
 ### Fixed
