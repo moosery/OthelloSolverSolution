@@ -1248,7 +1248,7 @@ int main(int argc, char* argv[])
                     if (flushThreads[fi].joinable()) flushThreads[fi].join();
                     const char* capturedModDir = bestModDir;
                     flushThreads[fi] = std::thread([fi, capturedModDir, level, &solveReg, &runReg,
-                                                    &dirEnabled, &config, safeFileLimit, &g_shutdown]() {
+                                                    &dirEnabled, &config, safeFileLimit]() {
                         bool ok = FlushNvmeDir(fi, &solveReg, &runReg, capturedModDir, level,
                                                config.mergeBufBytesPerThread, safeFileLimit,
                                                &g_shutdown);
@@ -1516,7 +1516,7 @@ int main(int argc, char* argv[])
     LogPrintf("======================================================================\n");
     LogPrintf("Drive layout (benchmark summary):\n");
     for (int i = 0; i < config.numDirs; i++) {
-        const char* typeStr   = config.dirs[i].isNvme ? "NVMe" : "HDD ";
+        const char* typeStr   = OLEDriveClassName(config.dirs[i].driveClass);
         double      usableTB  = (double)config.dirs[i].usableBytes / (1024.0*1024*1024*1024);
         if (config.dirs[i].writeMBs > 0.0)
             LogPrintf("  Dir %d  %s  %s  Usable: %.2f TB  Write: %.0f MB/s  Read: %.0f MB/s\n",
