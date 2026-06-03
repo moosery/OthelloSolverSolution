@@ -36,31 +36,56 @@ static int BoardKeyCompare(const uint8_t* a, const uint8_t* b)
 // Pivot computation
 //
 // Produces numParts+1 boundary keys that divide the key space into numParts
-// non-overlapping ranges.  pivots[0]=0x00..00 (−∞), pivots[numParts]=0xFF..FF (+∞).
-// Intermediate pivots are sampled from the sorted distribution of source minKeys.
+// non-overlapping ranges.  pivots[0]=0x00..00 (inf), pivots[numParts]=0xFF..FF (+inf).
+// Pivots are sampled from actual records at regular intervals across all source files.
+// Sampling minKeys only (the old approach) failed because all intermediate files cover
+// the full key space (round-robin distribution), so every minKey clusters near 0x00,
+// leaving ~100% of records in the last partition.
 // ---------------------------------------------------------------------------
 static void ComputePivots(
     const OLEFileRegistry*               srcReg,
     int                                  numParts,
     uint32_t                             keySize,
+    uint32_t                             recordSize,
     std::vector<std::vector<uint8_t>>&   pivots)
 {
     pivots.assign(numParts + 1, std::vector<uint8_t>(keySize, 0x00));
     std::fill(pivots[numParts].begin(), pivots[numParts].end(), 0xFF);
     if (numParts <= 1) return;
 
-    int M = (int)srcReg->files.size();
-    std::vector<const uint8_t*> minKeys;
-    minKeys.reserve(M);
-    for (const auto& fd : srcReg->files)
-        minKeys.push_back(fd.minKey);
-    std::sort(minKeys.begin(), minKeys.end(), [](const uint8_t* a, const uint8_t* b) {
-        return BoardKeyCompare(a, b) < 0;
+    const int SAMPLES_PER_FILE = 200;
+    std::vector<std::vector<uint8_t>> samples;
+    std::vector<uint8_t> rec(recordSize);
+
+    for (const auto& fd : srcReg->files) {
+        if (fd.recordCount == 0) continue;
+        FILE* f = nullptr;
+        if (fopen_s(&f, fd.path, "rb") != 0 || !f) continue;
+
+        uint64_t count = fd.recordCount;
+        int n = (int)std::min((uint64_t)SAMPLES_PER_FILE, count);
+
+        for (int j = 0; j < n; j++) {
+            uint64_t pos    = (uint64_t)j * count / n;
+            int64_t  offset = (int64_t)sizeof(SortedFileHeader) + (int64_t)(pos * recordSize);
+            if (_fseeki64(f, offset, SEEK_SET) != 0) break;
+            if (fread(rec.data(), 1, recordSize, f) != recordSize) break;
+            samples.emplace_back(rec.data(), rec.data() + keySize);
+        }
+        fclose(f);
+    }
+
+    if (samples.empty()) return;
+
+    std::sort(samples.begin(), samples.end(), [](const std::vector<uint8_t>& a,
+                                                  const std::vector<uint8_t>& b) {
+        return BoardKeyCompare(a.data(), b.data()) < 0;
     });
 
+    int S = (int)samples.size();
     for (int i = 1; i < numParts; i++) {
-        int idx = std::min((i * M) / numParts, M - 1);
-        pivots[i].assign(minKeys[idx], minKeys[idx] + keySize);
+        int idx = std::min((i * S) / numParts, S - 1);
+        pivots[i] = samples[idx];
     }
 }
 
@@ -729,7 +754,7 @@ bool MergePhaseRun(
 
     int numParts = numOutputDirs;
     std::vector<std::vector<uint8_t>> pivots;
-    ComputePivots(&intermReg, numParts, keySize, pivots);
+    ComputePivots(&intermReg, numParts, keySize, recordSize, pivots);
 
     size_t p2BufBytes = std::max(mergeBufBytesPerThread, (size_t)(4ULL * 1024 * 1024));
 

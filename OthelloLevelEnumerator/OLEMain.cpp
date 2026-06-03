@@ -13,12 +13,19 @@
 #include <vector>
 #include <windows.h>
 #include <psapi.h>
+#include <shlobj.h>
 #pragma comment(lib, "Psapi.lib")
+#pragma comment(lib, "Shell32.lib")
 #include <Utility.h>
 #include <ClockTick.h>
 #include <SysMemInfo.h>
 #include <Mem.h>
 #include <OthelloBasics.h>
+#include "OLEStartup.h"
+#include "OLEDriveDetect.h"
+#include "OLEBenchmark.h"
+#include "OLERunConfig.h"
+#include "OLECache.h"
 #include "OLEKernel.h"
 #include "SortedFile.h"
 #include "FileRegistry.h"
@@ -26,30 +33,64 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.2.22"
+#define APP_VERSION "0.3.0"
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
+#define OLE_MAX_SOLVE_DRIVES  8
+#define OLE_MAX_SOLVE_DIRS   32
+
+// Per-solve-directory descriptor — populated by benchmark + auto-layout.
+struct OLEDirDesc {
+    char     path[MAX_PATH];   // full path e.g. D:\OLEData\dir.0000000001
+    char     driveLetter;      // e.g. 'D'
+    bool     isNvme;
+    double   writeMBs;         // benchmark write MB/s (concurrent result)
+    double   readMBs;          // benchmark read MB/s (concurrent result)
+    uint64_t usableBytes;      // free space minus 200 GB safety margin
+    // Per-level stats (reset before each level):
+    uint64_t lvSlvFiles;
+    uint64_t lvSlvBytes;
+    uint64_t lvMrgBytes;       // NAS partition bytes for this dir's partition index
+};
+
 typedef struct OLEConfig
 {
+    // --- User-specified args ---
     int         boardSize;
     int         numRotations;
-    const char* outputDirs[5];    // [0]=primary (logs, meta); [1..4]=extra data dirs
-    int         numOutputDirs;
+    char        drives[OLE_MAX_SOLVE_DRIVES];  // drive letters e.g. {'D','E','F'}
+    int         numDrives;
+    char        nasDrive;                      // NAS drive letter e.g. 'Z'; '\0' = no NAS
+    char        baseName[64];                  // base dir name e.g. "OLEData"
+    MemoryMode  memMode;                       // maps from --usage flag
+    uint64_t    specifiedMemBytes;             // --usage specific + --memory <size>
+    int         specifiedThreads;              // --usage specific + --threads <N>; 0 = auto
     bool        restart;
-    bool        nasEnabled;
-    const char* nasDir;         // NAS root dir (run-suffix appended at startup)
-    MemoryMode  memMode;
-    uint64_t    specifiedMemBytes;
 
-    // Computed in main():
-    uint64_t    memBudgetBytes;           // free RAM × mode pct
-    uint64_t    mergeBufBytesPerThread;   // RAM budget / numMergeThreads
-    int         numMergeThreads;          // CPU threads for merge phase
-    size_t      accumBufSlots;            // BOARD_KEY slots per ping-pong buffer
-    int         batchSize;                // boards per GPU dispatch
+    // --- Computed by startup (benchmark + auto-layout) ---
+    OLEDirDesc  dirs[OLE_MAX_SOLVE_DIRS];
+    int         numDirs;
+    char        nasRunDir[MAX_PATH];           // full NAS run path
+    char        nasLogsDir[MAX_PATH];          // e.g. Z:\OLELogs
+    char        runTimestamp[32];              // e.g. "2026_06_02.18_26_12"
+    char        configFilePath[MAX_PATH];      // path to ole_run_config.json
+
+    // --- Resource config (computed from usage mode + hardware) ---
+    uint64_t    memBudgetBytes;
+    uint64_t    mergeBufBytesPerThread;
+    int         numMergeThreads;
+    size_t      accumBufSlots;
+    int         batchSize;
+
+    // --- Restart state ---
+    int         lastCompletedLevel;            // -1 = none
+
+    // --- Cache ---
+    bool        forceBenchmark;                // --force-benchmark: ignore bench cache
+    char        cacheDir[MAX_PATH];            // OLECache\ directory path
 } OLEConfig, *POLEConfig;
 
 // ---------------------------------------------------------------------------
@@ -232,18 +273,18 @@ static void usage()
     printf("Usage: OthelloLevelEnumerator [options]\n");
     printf("  --board-size <N>             Board size: 4, 6, or 8 (default=6)\n");
     printf("  --rotations <N>              Symmetry rotations: 1, 4, 8, or 16 (default=16)\n");
-    printf("  --output-dir <dir>           Primary output directory (default=D:\\OLEDataDir\\)\n");
-    printf("  --output-dir2 <dir>          Extra data directory (drive 2)\n");
-    printf("  --output-dir3 <dir>          Extra data directory (drive 3)\n");
-    printf("  --output-dir4 <dir>          Extra data directory (drive 4)\n");
-    printf("  --output-dir5 <dir>          Extra data directory (drive 5, e.g. HDD overflow)\n");
-    printf("  --restart                    Resume the most recent run\n");
-    printf("  --nas-dir [path]             NAS archive root (default=F:\\OthelloRuns\\); NAS archival is ON by default\n");
-    printf("  --no-nas                     Disable NAS archival\n");
-    printf("Memory options (default: --use-recommended-memory):\n");
-    printf("  --use-max-memory             Use ~95%% of available RAM for merge buffers\n");
-    printf("  --use-recommended-memory     Use ~75%% of available RAM (default)\n");
-    printf("  --max-memory <size>          Use specified amount (e.g. 34GB, 16000MB)\n");
+    printf("  --drives <X:,Y:,...>         Comma-separated solve drive letters (default=D:,E:,F:)\n");
+    printf("  --nas <X:>                   NAS archive drive letter (default=Z:)\n");
+    printf("  --no-nas                     Disable NAS archival and spill\n");
+    printf("  --base <name>                Base directory name on each drive (default=OLEData)\n");
+    printf("  --usage recommended|max|specific  Resource usage mode (default=recommended)\n");
+    printf("    recommended: leave ~8 GB RAM + 2 cores free for user\n");
+    printf("    max:         use nearly all available RAM and cores\n");
+    printf("    specific:    use --memory and --threads to set exact limits\n");
+    printf("  --memory <size>              Memory limit for --usage specific (e.g. 40GB)\n");
+    printf("  --threads <N>                Merge thread count for --usage specific\n");
+    printf("  --restart                    Resume the most recent run (reads ole_run_config.json)\n");
+    printf("  --force-benchmark            Ignore benchmark cache; re-run and overwrite it\n");
 }
 
 static void processArgs(int argc, char* argv[], POLEConfig cfg)
@@ -262,57 +303,58 @@ static void processArgs(int argc, char* argv[], POLEConfig cfg)
         {
             cfg->numRotations = atoi(argv[++i]);
         }
-        else if (strcmp(argv[i], "--output-dir") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--drives") == 0 && i + 1 < argc)
         {
-            cfg->outputDirs[0] = argv[++i];
+            // Parse comma-separated drive letters: "D:,E:,F:" or "D,E,F"
+            const char* s = argv[++i];
+            cfg->numDrives = 0;
+            while (*s && cfg->numDrives < OLE_MAX_SOLVE_DRIVES) {
+                if (isalpha((unsigned char)*s)) {
+                    cfg->drives[cfg->numDrives++] = (char)toupper((unsigned char)*s);
+                    while (*s && *s != ',') s++;
+                }
+                if (*s == ',') s++;
+            }
         }
-        else if (strcmp(argv[i], "--output-dir2") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--nas") == 0 && i + 1 < argc)
         {
-            cfg->outputDirs[1] = argv[++i];
-            if (cfg->numOutputDirs < 2) cfg->numOutputDirs = 2;
+            const char* s = argv[++i];
+            if (isalpha((unsigned char)*s))
+                cfg->nasDrive = (char)toupper((unsigned char)*s);
         }
-        else if (strcmp(argv[i], "--output-dir3") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--no-nas") == 0)
         {
-            cfg->outputDirs[2] = argv[++i];
-            if (cfg->numOutputDirs < 3) cfg->numOutputDirs = 3;
+            cfg->nasDrive = '\0';
         }
-        else if (strcmp(argv[i], "--output-dir4") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--base") == 0 && i + 1 < argc)
         {
-            cfg->outputDirs[3] = argv[++i];
-            if (cfg->numOutputDirs < 4) cfg->numOutputDirs = 4;
+            strncpy_s(cfg->baseName, sizeof(cfg->baseName), argv[++i], _TRUNCATE);
         }
-        else if (strcmp(argv[i], "--output-dir5") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--usage") == 0 && i + 1 < argc)
         {
-            cfg->outputDirs[4] = argv[++i];
-            if (cfg->numOutputDirs < 5) cfg->numOutputDirs = 5;
+            const char* mode = argv[++i];
+            if (strcmp(mode, "max") == 0)
+                cfg->memMode = MM_USE_MAX;
+            else if (strcmp(mode, "specific") == 0)
+                cfg->memMode = MM_SPECIFIED;
+            else  // "recommended" or anything else
+                cfg->memMode = MM_RECOMMENDED;
+        }
+        else if (strcmp(argv[i], "--memory") == 0 && i + 1 < argc)
+        {
+            cfg->specifiedMemBytes = ParseMemorySize(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc)
+        {
+            cfg->specifiedThreads = atoi(argv[++i]);
         }
         else if (strcmp(argv[i], "--restart") == 0)
         {
             cfg->restart = true;
         }
-        else if (strcmp(argv[i], "--nas-dir") == 0)
+        else if (strcmp(argv[i], "--force-benchmark") == 0)
         {
-            cfg->nasEnabled = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                cfg->nasDir = argv[++i];
-            // else: keep default NAS path
-        }
-        else if (strcmp(argv[i], "--no-nas") == 0)
-        {
-            cfg->nasEnabled = false;
-        }
-        else if (strcmp(argv[i], "--use-max-memory") == 0)
-        {
-            cfg->memMode = MM_USE_MAX;
-        }
-        else if (strcmp(argv[i], "--use-recommended-memory") == 0)
-        {
-            cfg->memMode = MM_RECOMMENDED;
-        }
-        else if (strcmp(argv[i], "--max-memory") == 0 && i + 1 < argc)
-        {
-            cfg->memMode           = MM_SPECIFIED;
-            cfg->specifiedMemBytes = ParseMemorySize(argv[++i]);
+            cfg->forceBenchmark = true;
         }
         else
         {
@@ -373,12 +415,54 @@ static void PrintLevelRow(const LevelRecord& r)
               r.solveFiles, slvGB, mrgGB, dtBuf);
 }
 
+static void PrintDirSubRows(const OLEDirDesc* dirs, int numDirs, bool showMrg)
+{
+    double totalSlvGB = 0.0;
+    for (int i = 0; i < numDirs; i++)
+        totalSlvGB += (double)dirs[i].lvSlvBytes / (1024.0 * 1024 * 1024);
+    if (totalSlvGB < 0.10) return;
+
+    for (int i = 0; i < numDirs; i++) {
+        double slvGB = (double)dirs[i].lvSlvBytes / (1024.0 * 1024 * 1024);
+        double mrgGB = (double)dirs[i].lvMrgBytes / (1024.0 * 1024 * 1024);
+        if (showMrg)
+            LogPrintf("    Dir %d  %s  SlvFls:%6llu  SlvGB:%8.2f  MrgGB:%8.2f\n",
+                      i, dirs[i].path,
+                      (unsigned long long)dirs[i].lvSlvFiles, slvGB, mrgGB);
+        else
+            LogPrintf("    Dir %d  %s  SlvFls:%6llu  SlvGB:%8.2f\n",
+                      i, dirs[i].path,
+                      (unsigned long long)dirs[i].lvSlvFiles, slvGB);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+static void GetTimestampStr(char* buf, size_t sz)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(buf, sz, "%04d-%02d-%02d %02d:%02d:%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[])
 {
+    // ---- Single-instance guard ----
+    // Named mutex is released automatically on process exit or crash — no stale lock possible.
+    HANDLE g_instanceMutex = CreateMutexW(nullptr, TRUE, L"Global\\OthelloLevelEnumerator");
+    if (!g_instanceMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        printf("OthelloLevelEnumerator is already running. Exiting.\n");
+        if (g_instanceMutex) CloseHandle(g_instanceMutex);
+        return 1;
+    }
+
     // ---- Ctrl+C handler ----
     SetConsoleCtrlHandler(CtrlCHandler, TRUE);
 
@@ -390,100 +474,283 @@ int main(int argc, char* argv[])
     OLEConfig config = {};
     config.boardSize         = 6;
     config.numRotations      = 16;
-    config.outputDirs[0]     = "D:\\OLEDataDir\\";
-    config.outputDirs[1]     = "D:\\OLEDataDir2\\";
-    config.outputDirs[2]     = "E:\\OLEDataDir3\\";
-    config.outputDirs[3]     = "E:\\OLEDataDir4\\";
-    config.outputDirs[4]     = "F:\\OLEDataDir5\\";
-    config.numOutputDirs     = 5;
-    config.restart           = false;
-    config.nasEnabled        = true;
-    config.nasDir            = "Z:\\OthelloRuns\\";
+    config.drives[0]         = 'D';
+    config.drives[1]         = 'E';
+    config.drives[2]         = 'F';
+    config.numDrives         = 3;
+    config.nasDrive          = 'Z';
+    strncpy_s(config.baseName, sizeof(config.baseName), "OLEData", _TRUNCATE);
     config.memMode           = MM_RECOMMENDED;
     config.specifiedMemBytes = 0;
+    config.specifiedThreads  = 0;
+    config.restart           = false;
+    config.lastCompletedLevel = -1;
 
     if (argc > 1)
         processArgs(argc, argv, &config);
 
+    // ---- Compute OLECache directory (stable; needed before restart/fresh branch) ----
+    {
+        uint64_t drvTotal[OLE_MAX_SOLVE_DRIVES] = {};
+        for (int i = 0; i < config.numDrives; i++) {
+            char root[4] = { config.drives[i], ':', '\\', '\0' };
+            ULARGE_INTEGER fa = {}, tot = {}, tf = {};
+            GetDiskFreeSpaceExA(root, &fa, &tot, &tf);
+            drvTotal[i] = tot.QuadPart;
+        }
+        OLECacheGetDir(config.cacheDir, sizeof(config.cacheDir),
+                       config.nasDrive, config.drives, config.numDrives, drvTotal);
+        OLECacheEnsureDir(config.cacheDir);
+    }
+
+    wchar_t shmName[128] = {};
+
+    // ---- Compute run timestamp and NAS paths (needed before cleanup) ----
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        snprintf(config.runTimestamp, sizeof(config.runTimestamp),
+                 "%04d_%02d_%02d.%02d_%02d_%02d",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        if (config.nasDrive != '\0') {
+            snprintf(config.nasRunDir, MAX_PATH, "%c:\\%s\\%s\\BoardSize%dx%d\\",
+                     config.nasDrive, config.baseName, config.runTimestamp,
+                     config.boardSize, config.boardSize);
+            snprintf(config.nasLogsDir, MAX_PATH, "%c:\\OLELogs\\", config.nasDrive);
+        }
+    }
+
+    // ---- Empty Recycle Bin on each drive (ensures GetDiskFreeSpaceEx is accurate) ----
+    if (!config.restart) {
+        for (int i = 0; i < config.numDrives; i++) {
+            char root[4] = { config.drives[i], ':', '\\', '\0' };
+            SHEmptyRecycleBinA(nullptr, root,
+                SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
+        }
+        if (config.nasDrive != '\0') {
+            char root[4] = { config.nasDrive, ':', '\\', '\0' };
+            SHEmptyRecycleBinA(nullptr, root,
+                SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
+        }
+    }
+
+    // ---- Cleanup: archive *.log to NAS, wipe --base dirs on all drives ----
+    if (!config.restart) {
+        // Ensure nasLogsDir exists before archiving (best-effort).
+        if (config.nasDrive != '\0' && config.nasLogsDir[0])
+            CreateDirectoryA(config.nasLogsDir, nullptr);
+        OLECleanupAndArchiveLogs(
+            config.drives, config.numDrives,
+            config.nasDrive,
+            config.baseName,
+            config.nasLogsDir);
+        printf("  Cleanup complete.\n");
+    }
+    // Config file always lives at <drive0>:\<baseName>\ole_run_config.json
+    if (config.numDrives > 0)
+        snprintf(config.configFilePath, MAX_PATH, "%c:\\%s\\ole_run_config.json",
+                 config.drives[0], config.baseName);
+
+    if (!config.restart) {
+        // ---- Drive detection ----
+        OLEDriveQueryResult driveInfo[OLE_MAX_SOLVE_DRIVES] = {};
+        printf("  Querying drives...\n");
+        for (int i = 0; i < config.numDrives; i++) {
+            driveInfo[i] = OLEQueryDrive(config.drives[i]);
+            if (!driveInfo[i].success) {
+                fprintf(stderr, "  ERROR: drive %c: is not accessible. Aborting.\n",
+                        config.drives[i]);
+                return 1;
+            }
+            OLEPrintDriveQueryResult(driveInfo[i]);
+        }
+        if (config.nasDrive != '\0') {
+            OLEDriveQueryResult nasInfo = OLEQueryDrive(config.nasDrive);
+            if (!nasInfo.success) {
+                fprintf(stderr, "  ERROR: NAS drive %c: is not accessible. Aborting.\n",
+                        config.nasDrive);
+                return 1;
+            }
+            OLEPrintDriveQueryResult(nasInfo);
+        }
+
+        // ---- Benchmark drives (use cache where available) ----
+        OLEDriveBenchResult benchResults[OLE_MAX_SOLVE_DRIVES] = {};
+        OLEBenchCacheEntry  benchCache[64] = {};
+        int                 numBenchCache  = OLEBenchCacheRead(config.cacheDir, benchCache, 64);
+        bool                benchCacheUpdated = false;
+
+        printf("\n  Benchmarking drives...\n");
+        if (config.forceBenchmark)
+            printf("  (--force-benchmark: ignoring cache)\n");
+
+        for (int i = 0; i < config.numDrives; i++) {
+            const OLEBenchCacheEntry* cached = nullptr;
+            if (!config.forceBenchmark)
+                cached = OLEBenchCacheLookup(benchCache, numBenchCache,
+                                             config.drives[i], driveInfo[i].serial);
+            if (cached) {
+                benchResults[i].success     = true;
+                benchResults[i].optimalDirs = cached->optimalDirs;
+                benchResults[i].writeMBs    = cached->writeMBs;
+                benchResults[i].readMBs     = cached->readMBs;
+                benchResults[i].combinedWriteMBs = cached->writeMBs * cached->optimalDirs;
+                benchResults[i].combinedReadMBs  = cached->readMBs  * cached->optimalDirs;
+                printf("    %c:  [cached %s]  optimalDirs=%d  Write=%.0f MB/s  Read=%.0f MB/s\n",
+                       config.drives[i], cached->timestamp,
+                       cached->optimalDirs, cached->writeMBs, cached->readMBs);
+            } else {
+                benchResults[i] = OLEBenchmarkDrive(config.drives[i]);
+                if (!benchResults[i].success) {
+                    fprintf(stderr, "  ERROR: benchmark failed for drive %c:. Aborting.\n",
+                            config.drives[i]);
+                    return 1;
+                }
+                // Upsert into cache array.
+                bool found = false;
+                for (int j = 0; j < numBenchCache; j++) {
+                    if (benchCache[j].driveLetter == config.drives[i] &&
+                        strcmp(benchCache[j].serial, driveInfo[i].serial) == 0) {
+                        benchCache[j].optimalDirs = benchResults[i].optimalDirs;
+                        benchCache[j].writeMBs    = benchResults[i].writeMBs;
+                        benchCache[j].readMBs     = benchResults[i].readMBs;
+                        GetTimestampStr(benchCache[j].timestamp, sizeof(benchCache[j].timestamp));
+                        found = true; break;
+                    }
+                }
+                if (!found && numBenchCache < 64) {
+                    int j = numBenchCache++;
+                    benchCache[j].driveLetter = config.drives[i];
+                    strncpy_s(benchCache[j].serial, driveInfo[i].serial, _TRUNCATE);
+                    benchCache[j].optimalDirs = benchResults[i].optimalDirs;
+                    benchCache[j].writeMBs    = benchResults[i].writeMBs;
+                    benchCache[j].readMBs     = benchResults[i].readMBs;
+                    GetTimestampStr(benchCache[j].timestamp, sizeof(benchCache[j].timestamp));
+                }
+                benchCacheUpdated = true;
+            }
+        }
+        if (config.nasDrive != '\0') {
+            printf("    Benchmarking NAS (%c:)...\n", config.nasDrive);
+            OLEBenchmarkDrive(config.nasDrive, 256ULL*1024*1024, 5, 0.15, 1, true);
+        }
+        if (benchCacheUpdated)
+            OLEBenchCacheWrite(config.cacheDir, benchCache, numBenchCache);
+
+        // ---- Auto-layout: assign solve dirs based on benchmark results ----
+        config.numDirs = 0;
+        int globalDirNum = 1;
+        for (int i = 0; i < config.numDrives; i++) {
+            int      nd           = benchResults[i].optimalDirs;
+            uint64_t perDirUsable = (driveInfo[i].usableBytes > 0 && nd > 0)
+                                  ? driveInfo[i].usableBytes / nd : 0;
+            for (int d = 0; d < nd && config.numDirs < OLE_MAX_SOLVE_DIRS; d++) {
+                OLEDirDesc& dir = config.dirs[config.numDirs];
+                snprintf(dir.path, MAX_PATH, "%c:\\%s\\dir.%010d\\",
+                         config.drives[i], config.baseName, globalDirNum++);
+                dir.driveLetter = config.drives[i];
+                dir.isNvme      = driveInfo[i].isNvme;
+                dir.writeMBs    = benchResults[i].writeMBs;
+                dir.readMBs     = benchResults[i].readMBs;
+                dir.usableBytes = perDirUsable;
+                config.numDirs++;
+            }
+        }
+    } else {
+        // ---- Restart: restore layout from config file ----
+        printf("  Restarting from config file: %s\n", config.configFilePath);
+        OLERunConfigData rcd = {};
+        if (!OLERunConfigRead(config.configFilePath, rcd)) {
+            fprintf(stderr, "  ERROR: cannot read config file %s -- cannot restart.\n",
+                    config.configFilePath);
+            return 1;
+        }
+        config.numDirs            = rcd.numDirs;
+        config.numMergeThreads    = rcd.numMergeThreads;
+        config.lastCompletedLevel = rcd.lastCompletedLevel;
+        strncpy_s(config.runTimestamp, rcd.runTimestamp, _TRUNCATE);
+        strncpy_s(config.nasRunDir,    rcd.nasRunDir,    _TRUNCATE);
+        strncpy_s(config.nasLogsDir,   rcd.nasLogsDir,   _TRUNCATE);
+        for (int i = 0; i < rcd.numDirs && i < OLE_MAX_SOLVE_DIRS; i++) {
+            strncpy_s(config.dirs[i].path, sizeof(config.dirs[i].path),
+                      rcd.dirPaths[i], _TRUNCATE);
+            config.dirs[i].driveLetter = rcd.dirDriveLetters[i];
+            config.dirs[i].isNvme      = rcd.dirIsNvme[i];
+            config.dirs[i].writeMBs    = rcd.dirWriteMBs[i];
+            config.dirs[i].readMBs     = rcd.dirReadMBs[i];
+            config.dirs[i].usableBytes = rcd.dirUsableBytes[i];
+        }
+        printf("  Resuming from level %d (last completed: %d)\n",
+               config.lastCompletedLevel + 1, config.lastCompletedLevel);
+    }
+
+    swprintf_s(shmName, 128,
+               L"Local\\OthelloLevelEnumeratorStatus_%S", config.runTimestamp);
+
     // ---- CPU core detection → merge thread count ----
-    int totalCores = (int)std::thread::hardware_concurrency();
-    if (totalCores < 1) totalCores = 1;
-    // Reserve: 1 GPU thread + 1 reader thread + 1 OS headroom.
-    int remaining = totalCores - 3;
-    config.numMergeThreads = (remaining >= config.numOutputDirs) ? config.numOutputDirs
-                           : (remaining > 1 ? remaining : 1);
+    {
+        int totalCores = (int)std::thread::hardware_concurrency();
+        if (totalCores < 1) totalCores = 1;
+        if (config.memMode == MM_SPECIFIED && config.specifiedThreads > 0) {
+            config.numMergeThreads = config.specifiedThreads;
+        } else {
+            // recommended: reserve 2 cores; max: reserve 1
+            int reserve = (config.memMode == MM_USE_MAX) ? 1 : 2;
+            int avail   = totalCores - reserve;
+            if (avail < 1) avail = 1;
+            config.numMergeThreads = (avail >= config.numDirs) ? config.numDirs
+                                   : (avail > 1 ? avail : 1);
+        }
+    }
 
     // ---- Memory budget ----
     {
         uint64_t budget = CalcMemoryBudget(config.memMode, config.specifiedMemBytes);
         config.memBudgetBytes = budget;
-        // Solve phase: GPU holds both ping-pong buffers; RAM mostly free.
-        // Merge phase: GPU idle; full RAM budget goes to I/O buffers.
-        static constexpr uint64_t k_overhead = 2ULL * 1024 * 1024 * 1024; // 2 GB OS headroom
+        static constexpr uint64_t k_overhead = 2ULL * 1024 * 1024 * 1024;
         uint64_t mergeTotal = (budget > k_overhead) ? budget - k_overhead : budget / 2;
         config.mergeBufBytesPerThread = mergeTotal / (uint64_t)config.numMergeThreads;
     }
 
     // ---- GPU buffer sizing ----
     {
-        // Reserve ~1 GB for CUDA runtime and driver overhead.
         static constexpr size_t k_gpuOverhead = 1ULL * 1024 * 1024 * 1024;
         size_t vramAvail = (gpuInfo.totalGlobalMemBytes > k_gpuOverhead)
                          ? gpuInfo.totalGlobalMemBytes - k_gpuOverhead
                          : gpuInfo.totalGlobalMemBytes / 2;
-        // Divide VRAM across all buffer arrays: accum A+B, field A+B, indices A+B, flags A+B.
         static constexpr size_t kBytesPerSlot =
             2 * sizeof(BOARD_KEY) + 2 * sizeof(uint64_t) + 2 * sizeof(uint32_t) + 2 * sizeof(uint8_t);
-        config.accumBufSlots  = vramAvail / kBytesPerSlot;
-        config.batchSize      = gpuInfo.optimalBatchSize;
-    }
-
-    // ---- Compute timestamped run directories ----
-    // Each user-specified dir is a root; actual data lives under
-    // <root>\<YYYY_MM_DD.HH_MM_SS>\BoardSize<N>x<N>\  (same convention as CL solver).
-    char    runDirs[5][MAX_PATH];
-    char    nasRunDir[MAX_PATH] = {};
-    wchar_t shmName[128]        = {};   // per-run SHM name (prevents multi-instance collision)
-    {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        char suffix[80];
-        snprintf(suffix, sizeof(suffix),
-                 "%04d_%02d_%02d.%02d_%02d_%02d\\BoardSize%dx%d\\",
-                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                 config.boardSize, config.boardSize);
-        for (int i = 0; i < config.numOutputDirs; i++) {
-            snprintf(runDirs[i], MAX_PATH, "%s%s", config.outputDirs[i], suffix);
-            config.outputDirs[i] = runDirs[i];
-        }
-        if (config.nasEnabled)
-            snprintf(nasRunDir, MAX_PATH, "%s%s", config.nasDir, suffix);
-
-        swprintf_s(shmName, 128,
-                   L"Local\\OthelloLevelEnumeratorStatus_%04u%02u%02u_%02u%02u%02u",
-                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        config.accumBufSlots = vramAvail / kBytesPerSlot;
+        config.batchSize     = gpuInfo.optimalBatchSize;
     }
 
     // ---- Create all run directories ----
-    for (int i = 0; i < config.numOutputDirs; i++)
+    for (int i = 0; i < config.numDirs; i++)
     {
-        if (!CreateFullPath(config.outputDirs[i]))
+        if (!CreateFullPath(config.dirs[i].path))
             Fatal(UTIL_RC_Could_Not_Create_Directory,
-                  "Cannot create output directory: %s", config.outputDirs[i]);
+                  "Cannot create output directory: %s", config.dirs[i].path);
     }
-    if (config.nasEnabled && nasRunDir[0])
+    if (config.nasDrive != '\0' && config.nasRunDir[0])
     {
-        if (!CreateFullPath(nasRunDir)) {
-            fprintf(stderr, "[NAS] Warning: cannot create %s -- NAS archival disabled\n", nasRunDir);
-            config.nasEnabled = false;
+        if (!CreateFullPath(config.nasRunDir)) {
+            fprintf(stderr, "[NAS] Warning: cannot create %s -- NAS disabled\n", config.nasRunDir);
+            config.nasDrive = '\0';
         }
     }
+    if (config.nasDrive != '\0' && config.nasLogsDir[0])
+        CreateFullPath(config.nasLogsDir);
+
+    // ---- Build flat dir-path array for subsystems that take const char** ----
+    const char* dirPaths[OLE_MAX_SOLVE_DIRS];
+    for (int i = 0; i < config.numDirs; i++)
+        dirPaths[i] = config.dirs[i].path;
 
     // ---- Initialize board-size globals (must precede any BOARD operation) ----
     SetBoardSizeForRun(config.boardSize);
 
     // ---- Open run log (mirrors all console output) ----
-    OpenLogFile(config.outputDirs[0]);
+    OpenLogFile(config.numDirs > 0 ? config.dirs[0].path : "");
 
     // ---- Live status shared memory ----
     // Write our per-run SHM name to a well-known temp file so OLEStatusQuery
@@ -505,11 +772,13 @@ int main(int argc, char* argv[])
         g_status->magic   = OLE_STATUS_MAGIC;
         g_status->version = OLE_STATUS_VERSION;
         strncpy_s((char*)g_status->appVersion, sizeof(g_status->appVersion), APP_VERSION, _TRUNCATE);
-        strncpy_s((char*)g_status->runDir,     sizeof(g_status->runDir),     config.outputDirs[0], _TRUNCATE);
+        strncpy_s((char*)g_status->runDir,     sizeof(g_status->runDir),
+                  config.numDirs > 0 ? config.dirs[0].path : "", _TRUNCATE);
         g_status->boardSize  = config.boardSize;
         g_status->maxLevels  = (config.boardSize == 4) ? 13 : (config.boardSize == 6) ? 33 : 61;
-        g_status->phase      = OLE_PHASE_IDLE;
-        g_status->lastLevel  = -1;
+        g_status->phase        = config.restart ? OLE_PHASE_IDLE : OLE_PHASE_BENCHMARK;
+        g_status->phaseStartMs = GetTickCount64();
+        g_status->lastLevel    = -1;
     }
 
     // ---- Print startup banner ----
@@ -523,34 +792,55 @@ int main(int argc, char* argv[])
         double accumGB     = (double)(config.accumBufSlots * sizeof(BOARD_KEY)) / (1024.0*1024*1024);
         double vramGB      = (double)gpuInfo.totalGlobalMemBytes     / (1024.0*1024*1024);
         int    l2KB        = gpuInfo.l2CacheSizeBytes / 1024;
+        const char* usageName = (config.memMode == MM_USE_MAX)  ? "Max"
+                              : (config.memMode == MM_SPECIFIED) ? "Specific"
+                              :                                    "Recommended";
 
         LogPrintf("OthelloLevelEnumerator v%s starting\n", APP_VERSION);
         LogPrintf("  Board Size:    %dx%d\n",  config.boardSize, config.boardSize);
         LogPrintf("  Num Rotations: %d\n",     config.numRotations);
-        LogPrintf("  Output Dir:    %s\n",     config.outputDirs[0]);
-        for (int i = 1; i < config.numOutputDirs; i++)
-            LogPrintf("  Data Dir %d:    %s\n", i + 1, config.outputDirs[i]);
-        LogPrintf("  Memory:        %.1f GB free -> %.1f GB budget\n", freeGB, budgetGB);
-        LogPrintf("                 %.1f GB/merge-thread  (%d merge threads)\n",
-                  perThreadGB, config.numMergeThreads);
-        LogPrintf("  GPU Device:    %s (compute %d.%d)\n",
-                  gpuInfo.name, gpuInfo.computeCapabilityMajor, gpuInfo.computeCapabilityMinor);
-        LogPrintf("                 %d SMs x %d threads/SM  |  %d async copy engines\n",
-                  gpuInfo.smCount, gpuInfo.maxThreadsPerSM, gpuInfo.asyncEngineCount);
-        LogPrintf("                 L2 = %d KB  |  VRAM = %.1f GB\n", l2KB, vramGB);
-        LogPrintf("  Accum Buffer:  %.1f GB x2  (%zu slots each)\n",
+        LogPrintf("  Usage Mode:    %s\n",     usageName);
+        LogPrintf("\n");
+
+        LogPrintf("  Final Dir Layout:\n");
+        for (int i = 0; i < config.numDirs; i++) {
+            const char* typeStr = config.dirs[i].isNvme ? "NVMe" : "HDD ";
+            double usableTB = (double)config.dirs[i].usableBytes / (1024.0*1024*1024*1024);
+            if (config.dirs[i].writeMBs > 0.0)
+                LogPrintf("    Dir %d  %s  %s  Usable: %.2f TB  Write: %.0f MB/s  Read: %.0f MB/s\n",
+                          i, config.dirs[i].path, typeStr, usableTB,
+                          config.dirs[i].writeMBs, config.dirs[i].readMBs);
+            else
+                LogPrintf("    Dir %d  %s\n", i, config.dirs[i].path);
+        }
+        LogPrintf("\n");
+
+        LogPrintf("  System Resources:\n");
+        LogPrintf("    Memory:        %.1f GB budget  (%.1f GB free)\n", budgetGB, freeGB);
+        LogPrintf("    Merge Threads: %d  (%.1f GB/thread)\n",
+                  config.numMergeThreads, perThreadGB);
+        LogPrintf("    Accum Buffer:  %.1f GB x2  (%zu slots each)\n",
                   accumGB, config.accumBufSlots);
-        LogPrintf("  Batch Size:    %d\n",     config.batchSize);
-        LogPrintf("  Merge Threads: %d\n",     config.numMergeThreads);
-        if (config.nasEnabled)
-            LogPrintf("  NAS Archive:   %s\n", nasRunDir);
-        else
+        LogPrintf("    Batch Size:    %d\n",     config.batchSize);
+        LogPrintf("    GPU:           %s (compute %d.%d)\n",
+                  gpuInfo.name, gpuInfo.computeCapabilityMajor, gpuInfo.computeCapabilityMinor);
+        LogPrintf("                   %d SMs x %d threads/SM  |  %d async copy engines\n",
+                  gpuInfo.smCount, gpuInfo.maxThreadsPerSM, gpuInfo.asyncEngineCount);
+        LogPrintf("                   L2 = %d KB  |  VRAM = %.1f GB\n", l2KB, vramGB);
+        LogPrintf("\n");
+
+        if (config.nasDrive != '\0') {
+            LogPrintf("  NAS Archive:   %s\n", config.nasRunDir);
+            LogPrintf("  Log Archive:   %s\n", config.nasLogsDir);
+        } else {
             LogPrintf("  NAS Archive:   disabled\n");
+        }
+        LogPrintf("  Config File:   %s\n", config.configFilePath);
         LogPrintf("\n");
     }
 
     // ---- Start memory stats thread ----
-    StartMemStatsThread(config.outputDirs[0]);
+    StartMemStatsThread(config.numDirs > 0 ? config.dirs[0].path : "");
 
     // ---- Thread pool for merge phase ----
     ThreadPool mergePool(config.numMergeThreads, "OLEMerge");
@@ -564,10 +854,32 @@ int main(int argc, char* argv[])
     pipelineCfg.accumBufSlots    = config.accumBufSlots;
     pipelineCfg.writerBufBytes   = 256ULL * 1024 * 1024;  // 256 MB writer buffer per thread
     pipelineCfg.numWriterThreads = (config.numMergeThreads > 2) ? 2 : 1;
-    pipelineCfg.outputDirs       = config.outputDirs;
-    pipelineCfg.numOutputDirs    = config.numOutputDirs;
+    pipelineCfg.outputDirs       = dirPaths;
+    pipelineCfg.numOutputDirs    = config.numDirs;
     pipelineCfg.statusBlock      = g_status;
     pipelineCfg.shutdown         = &g_shutdown;
+
+    // ---- Level stats cache (accumulated across runs) ----
+    OLELevelStatEntry levelStats[128] = {};
+    int numLevelStats = OLELevelStatsRead(config.cacheDir, levelStats, 128);
+    if (numLevelStats > 0)
+        LogPrintf("  Level stats cache: %d entries loaded from %s\n\n",
+                  numLevelStats, config.cacheDir);
+
+    // ---- Dir routing weights (proportional to usable space) ----
+    {
+        uint64_t totalUsable = 0;
+        for (int i = 0; i < config.numDirs; i++) totalUsable += config.dirs[i].usableBytes;
+        pipelineCfg.totalWeight = 0;
+        if (totalUsable > 0) {
+            for (int i = 0; i < config.numDirs; i++) {
+                int w = (int)((double)config.dirs[i].usableBytes / (double)totalUsable * 100.0 + 0.5);
+                if (w < 1) w = 1;
+                pipelineCfg.dirWeights[i] = w;
+                pipelineCfg.totalWeight  += w;
+            }
+        }
+    }
 
     // ---- Level records ----
     std::vector<LevelRecord> history;
@@ -590,15 +902,25 @@ int main(int argc, char* argv[])
     LogPrintf("    NewBoards[N] = gross boards generated at level N+1 (before any dedup)\n");
     LogPrintf("    GpuDups[N]   = dups caught by GPU sort+dedup within each accumulation window\n");
     LogPrintf("    MrgDups[N]   = additional dups caught by merge-phase k-way merge (cross-window)\n\n");
-    PrintLevelHeader();
 
     // ---- Seed: level 0 contains only the starting board ----
     OLEFileRegistry currentReg = {};
 
-    if (config.restart)
+    if (config.restart && config.lastCompletedLevel >= 0)
     {
-        // TODO: implement resume — scan for deepest completed merge meta.
-        LogPrintf("  [restart not yet implemented — starting fresh]\n\n");
+        // Seed currentReg from the merge meta of the last completed level.
+        char mergeMeta[MAX_PATH];
+        MergeMeta(mergeMeta, sizeof(mergeMeta),
+                  config.numDirs > 0 ? config.dirs[0].path : "",
+                  config.lastCompletedLevel);
+        if (!FRLoad(&currentReg, mergeMeta) || currentReg.files.empty()) {
+            LogPrintf("  ERROR: restart requested but merge meta not found: %s\n", mergeMeta);
+            LogPrintf("  Cannot resume — starting fresh from level 0.\n\n");
+            config.lastCompletedLevel = -1;
+        } else {
+            LogPrintf("  Resuming from level %d (seed from level %d merge output).\n\n",
+                      config.lastCompletedLevel + 1, config.lastCompletedLevel);
+        }
     }
 
     if (currentReg.files.empty())
@@ -612,7 +934,8 @@ int main(int argc, char* argv[])
         MemFree(pRoot);
 
         char seedPath[MAX_PATH];
-        snprintf(seedPath, MAX_PATH, "%sole_level00_seed.sf", config.outputDirs[0]);
+        snprintf(seedPath, MAX_PATH, "%sole_level00_seed.sf",
+                 config.numDirs > 0 ? config.dirs[0].path : "");
 
         if (!SFWrite(seedPath, &rootKey, 1, sizeof(BOARD_KEY), sizeof(BOARD_KEY), 64ULL * 1024 * 1024))
             Fatal(FATAL_FILE_OPEN, "Failed to write seed file: %s", seedPath);
@@ -623,6 +946,29 @@ int main(int argc, char* argv[])
         memcpy(d.minKey, &rootKey, 24);
         memcpy(d.maxKey, &rootKey, 24);
         FRRegister(&currentReg, d);
+    }
+
+    // ---- Write run config file (enables --restart) ----
+    {
+        OLERunConfigData rcd = {};
+        rcd.boardSize            = config.boardSize;
+        rcd.numRotations         = config.numRotations;
+        strncpy_s(rcd.runTimestamp, config.runTimestamp, _TRUNCATE);
+        rcd.numMergeThreads      = config.numMergeThreads;
+        rcd.lastCompletedLevel   = -1;
+        strncpy_s(rcd.nasRunDir,  config.nasRunDir,  _TRUNCATE);
+        strncpy_s(rcd.nasLogsDir, config.nasLogsDir, _TRUNCATE);
+        rcd.numDirs = config.numDirs;
+        for (int i = 0; i < config.numDirs; i++) {
+            strncpy_s(rcd.dirPaths[i],    sizeof(rcd.dirPaths[i]),
+                      config.dirs[i].path, _TRUNCATE);
+            rcd.dirDriveLetters[i] = config.dirs[i].driveLetter;
+            rcd.dirIsNvme[i]       = config.dirs[i].isNvme;
+            rcd.dirWriteMBs[i]     = config.dirs[i].writeMBs;
+            rcd.dirReadMBs[i]      = config.dirs[i].readMBs;
+            rcd.dirUsableBytes[i]  = config.dirs[i].usableBytes;
+        }
+        OLERunConfigWrite(config.configFilePath, rcd);
     }
 
     // ---- BFS level loop ----
@@ -638,9 +984,13 @@ int main(int argc, char* argv[])
         if (currentReg.files.empty()) break;
         if (g_shutdown.load()) break;
 
+        // Skip levels already completed in a prior run (restart path).
+        if (config.restart && level <= config.lastCompletedLevel) continue;
+
         // Resume check: skip if merged output already exists.
         char mergeMeta[MAX_PATH];
-        MergeMeta(mergeMeta, sizeof(mergeMeta), config.outputDirs[0], level);
+        MergeMeta(mergeMeta, sizeof(mergeMeta),
+                  config.numDirs > 0 ? config.dirs[0].path : "", level);
         OLEFileRegistry mergedReg = {};
         if (FRLoad(&mergedReg, mergeMeta) && !mergedReg.files.empty())
         {
@@ -652,7 +1002,20 @@ int main(int argc, char* argv[])
             continue;
         }
 
+        // Reset per-dir stats for this level.
+        for (int i = 0; i < config.numDirs; i++)
+            config.dirs[i].lvSlvFiles = config.dirs[i].lvSlvBytes = config.dirs[i].lvMrgBytes = 0;
+
         ClockTick lvStart; ClockStart(&lvStart);
+
+        // Log expected sizes from cache (informational).
+        {
+            const OLELevelStatEntry* ls = OLELevelStatsLookup(
+                levelStats, numLevelStats, config.boardSize, config.numRotations, level);
+            if (ls)
+                LogPrintf("  Level %d: expected SlvGB=%.2f  MrgGB=%.2f  (from cache)\n",
+                          level, ls->slvGB, ls->mrgGB);
+        }
 
         // Solve phase: expand all boards in currentReg → solveReg.
         pipelineCfg.level = level;
@@ -680,6 +1043,15 @@ int main(int argc, char* argv[])
 
         long long solveNs = ClockNanosSinceStart(&lvStart);
 
+        // Accumulate per-dir solve stats from the output registry.
+        for (const OLEFileDesc& fd : solveReg.files) {
+            int di = fd.drive;
+            if (di >= 0 && di < config.numDirs) {
+                config.dirs[di].lvSlvFiles++;
+                config.dirs[di].lvSlvBytes += fd.recordCount * sizeof(BOARD_KEY);
+            }
+        }
+
         if (g_shutdown.load())
         {
             long long partialNs  = solveNs;
@@ -696,7 +1068,9 @@ int main(int argc, char* argv[])
             partial.solveNs      = solveNs;
             partial.solveFiles   = stats.filesWritten;
             LogPrintf("  (partial -- interrupted during solve; merge not started)\n");
+            PrintLevelHeader();
             PrintLevelRow(partial);
+            PrintDirSubRows(config.dirs, config.numDirs, false);
             break;
         }
 
@@ -710,10 +1084,10 @@ int main(int argc, char* argv[])
         long long merge1Ns = 0, merge2Ns = 0;
         FRClear(&mergedReg);
         if (!MergePhaseRun(&solveReg, &mergedReg,
-                           config.outputDirs, config.numOutputDirs,
+                           dirPaths, config.numDirs,
                            level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
                            config.mergeBufBytesPerThread, &mergePool, g_status,
-                           nasRunDir, &merge1Ns, &merge2Ns))
+                           config.nasRunDir, &merge1Ns, &merge2Ns))
         {
             LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
             // Print partial row so solve stats (NewBoards, SlvFls, SlvGB) are preserved in the log.
@@ -736,12 +1110,21 @@ int main(int argc, char* argv[])
             partial.merge2Ns     = merge2Ns;
             partial.solveFiles   = stats.filesWritten;
             LogPrintf("  (partial -- merge aborted; MrgDups/MrgGB=0)\n");
+            PrintLevelHeader();
             PrintLevelRow(partial);
+            PrintDirSubRows(config.dirs, config.numDirs, false);
             break;
         }
 
         // Checkpoint: persist merged registry.
         FRSave(&mergedReg, mergeMeta);
+
+        // Accumulate per-dir merge stats (partition index == dir index).
+        for (const OLEFileDesc& fd : mergedReg.files) {
+            int di = fd.drive;
+            if (di >= 0 && di < config.numDirs)
+                config.dirs[di].lvMrgBytes += fd.recordCount * sizeof(BOARD_KEY);
+        }
 
         // Delete intermediate solve files — merge files are now the canonical set.
         for (const OLEFileDesc& fd : solveReg.files)
@@ -770,8 +1153,46 @@ int main(int argc, char* argv[])
         rec.merge2Ns     = merge2Ns;
         rec.solveFiles   = stats.filesWritten;
         history.push_back(rec);
+        config.lastCompletedLevel = level;
 
+        // Update config file so --restart can resume from here.
+        if (config.configFilePath[0]) {
+            OLERunConfigData rcd = {};
+            rcd.boardSize          = config.boardSize;
+            rcd.numRotations       = config.numRotations;
+            strncpy_s(rcd.runTimestamp, config.runTimestamp, _TRUNCATE);
+            rcd.numMergeThreads    = config.numMergeThreads;
+            rcd.lastCompletedLevel = level;
+            strncpy_s(rcd.nasRunDir,  config.nasRunDir,  _TRUNCATE);
+            strncpy_s(rcd.nasLogsDir, config.nasLogsDir, _TRUNCATE);
+            rcd.numDirs = config.numDirs;
+            for (int ci = 0; ci < config.numDirs; ci++) {
+                strncpy_s(rcd.dirPaths[ci], sizeof(rcd.dirPaths[ci]),
+                          config.dirs[ci].path, _TRUNCATE);
+                rcd.dirDriveLetters[ci] = config.dirs[ci].driveLetter;
+                rcd.dirIsNvme[ci]       = config.dirs[ci].isNvme;
+                rcd.dirWriteMBs[ci]     = config.dirs[ci].writeMBs;
+                rcd.dirReadMBs[ci]      = config.dirs[ci].readMBs;
+                rcd.dirUsableBytes[ci]  = config.dirs[ci].usableBytes;
+            }
+            OLERunConfigWrite(config.configFilePath, rcd);
+        }
+
+        PrintLevelHeader();
         PrintLevelRow(rec);
+        PrintDirSubRows(config.dirs, config.numDirs, true);
+
+        // Update level stats cache with observed sizes.
+        {
+            double totalSlvGB = 0.0;
+            for (int i = 0; i < config.numDirs; i++)
+                totalSlvGB += (double)config.dirs[i].lvSlvBytes / (1024.0 * 1024 * 1024);
+            double totalMrgGB = (double)(rec.newBoardsNet * 24ULL) / (1024.0 * 1024 * 1024);
+            numLevelStats = OLELevelStatsUpsert(levelStats, numLevelStats, 128,
+                                                config.boardSize, config.numRotations, level,
+                                                totalSlvGB, totalMrgGB);
+            OLELevelStatsWrite(config.cacheDir, levelStats, numLevelStats);
+        }
 
         if (g_status) {
             g_status->lastLevel        = level;
@@ -820,6 +1241,21 @@ int main(int argc, char* argv[])
     // + net unique boards at every skipped level (resumed from a prior run).
     uint64_t totalUniqueBoards = 1 + totalNetBoards + skippedBoards;
 
+    LogPrintf("\n");
+    LogPrintf("======================================================================\n");
+    LogPrintf("Drive layout (benchmark summary):\n");
+    for (int i = 0; i < config.numDirs; i++) {
+        const char* typeStr   = config.dirs[i].isNvme ? "NVMe" : "HDD ";
+        double      usableTB  = (double)config.dirs[i].usableBytes / (1024.0*1024*1024*1024);
+        if (config.dirs[i].writeMBs > 0.0)
+            LogPrintf("  Dir %d  %s  %s  Usable: %.2f TB  Write: %.0f MB/s  Read: %.0f MB/s\n",
+                      i, config.dirs[i].path, typeStr, usableTB,
+                      config.dirs[i].writeMBs, config.dirs[i].readMBs);
+        else
+            LogPrintf("  Dir %d  %s\n", i, config.dirs[i].path);
+    }
+    if (config.nasDrive != '\0')
+        LogPrintf("  NAS:   %s\n", config.nasRunDir);
     LogPrintf("\n");
     LogPrintf("----------------------------------------------------------------------\n");
     LogPrintf("Wall clock:           %.1f s\n",  (double)wallNs / 1e9);

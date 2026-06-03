@@ -159,7 +159,12 @@
     <ClCompile Include="FileRegistry.cpp" />
     <ClCompile Include="GPUPipeline.cpp" />
     <ClCompile Include="MergePhase.cpp" />
+    <ClCompile Include="OLEBenchmark.cpp" />
+    <ClCompile Include="OLECache.cpp" />
+    <ClCompile Include="OLEDriveDetect.cpp" />
     <ClCompile Include="OLEMain.cpp" />
+    <ClCompile Include="OLERunConfig.cpp" />
+    <ClCompile Include="OLEStartup.cpp" />
     <ClCompile Include="SortedFile.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -169,7 +174,12 @@
     <ClInclude Include="FileRegistry.h" />
     <ClInclude Include="GPUPipeline.h" />
     <ClInclude Include="MergePhase.h" />
+    <ClInclude Include="OLEBenchmark.h" />
+    <ClInclude Include="OLECache.h" />
+    <ClInclude Include="OLEDriveDetect.h" />
     <ClInclude Include="OLEKernel.h" />
+    <ClInclude Include="OLERunConfig.h" />
+    <ClInclude Include="OLEStartup.h" />
     <ClInclude Include="SortedFile.h" />
   </ItemGroup>
   <ItemGroup>

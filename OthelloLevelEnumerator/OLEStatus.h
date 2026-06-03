@@ -14,16 +14,17 @@
 // slightly stale values between updates — acceptable for a status display.
 // ---------------------------------------------------------------------------
 
-#define OLE_STATUS_VERSION   5
+#define OLE_STATUS_VERSION   6
 #define OLE_STATUS_MAGIC     0x4F4C4553u   // 'OLES'
 #define OLE_STATUS_SHM_NAME  L"Local\\OthelloLevelEnumeratorStatus"
 #define OLE_STATUS_MAX_PARTS 5
 
 enum OLEPhase : uint32_t {
-    OLE_PHASE_IDLE  = 0,
-    OLE_PHASE_SOLVE = 1,
-    OLE_PHASE_MERGE = 2,
-    OLE_PHASE_DONE  = 3,
+    OLE_PHASE_IDLE      = 0,
+    OLE_PHASE_BENCHMARK = 1,
+    OLE_PHASE_SOLVE     = 2,
+    OLE_PHASE_MERGE     = 3,
+    OLE_PHASE_DONE      = 4,
 };
 
 struct OLEStatusBlock {

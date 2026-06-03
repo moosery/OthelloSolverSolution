@@ -1,5 +1,28 @@
 # Changelog
 
+## [OLE v0.3.0] - 2026-06-03
+
+### Changed (breaking — hard break from v0.2.x command line)
+- **`OthelloLevelEnumerator` / `OLEMain`** — complete redesign of configuration system; `--output-dir`, `--output-dir2/3/4/5`, `--nas-dir` flags removed; replaced by `--drives D:,E:,F:`, `--nas Z:`, `--base OLEData`, `--usage recommended|max|specific`, `--restart`, `--force-benchmark`; program is now fully self-configuring — it detects drives, benchmarks them, and decides the optimal directory layout automatically
+- **`OthelloLevelEnumerator` / `OLEMain`** — startup sequence on a fresh run: (1) single-instance mutex, (2) Recycle Bin empty on all drives for accurate free-space queries, (3) cleanup — archive `*.log` files to `<nas>:\OLELogs\` then wipe `--base` directories, (4) drive detection, (5) benchmark (or cache hit), (6) auto-layout and resource config, (7) run
+- **`OthelloLevelEnumerator` / `OLEMain`** — `--restart` skips cleanup, detection, and benchmark; reads `ole_run_config.json` from the primary drive and resumes from `lastCompletedLevel + 1`; config file is written at startup and updated after every completed level
+- **`OthelloLevelEnumerator` / `OLEMain`** — level table now reprints column headers before every level row; per-dir sub-rows (`SlvFls`, `SlvGB`, `MrgGB`) printed after each completed level when total `SlvGB >= 0.10`; benchmark results echoed again in the final summary so the log is self-contained
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — solve-file round-robin replaced with capacity-proportional weighted round-robin; dirs with more usable space receive proportionally more files, preventing smaller drives from overflowing while larger drives sit idle at high levels
+- **`OthelloLevelEnumerator` / `MergePhase`** — `ComputePivots` now samples 200 actual records per intermediate file at regular intervals instead of only `minKey`; fixes severe Ph2 partition skew (previously dir D4 received ~93% of merge output because all `minKeys` cluster near 0x00 in a round-robin layout)
+- **`OthelloLevelEnumeratorStatus` / `OLEStatusQuery`** — `OLE_STATUS_VERSION` bumped to 6; new `OLE_PHASE_BENCHMARK = 1` phase (SOLVE renumbered to 2, MERGE to 3, DONE to 4); status display shows elapsed time during benchmarking
+
+### Added
+- **`OthelloLevelEnumerator` / `OLEDriveDetect`** — `OLEQueryDrive()` detects NVMe vs HDD via `IOCTL_STORAGE_QUERY_PROPERTY` (seek penalty + bus type), maps volumes to physical disks via `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`, and reads drive serial number from `STORAGE_DEVICE_DESCRIPTOR` for cache keying
+- **`OthelloLevelEnumerator` / `OLEBenchmark`** — `OLEBenchmarkDrive()` tests 1–4 concurrent directories per drive using `FILE_FLAG_NO_BUFFERING + FILE_FLAG_WRITE_THROUGH`, 5 passes × 256 MB (pass 1 discarded), spin-barrier for simultaneous start, stops when combined-write improvement < 15%; returns `optimalDirs` — the concurrency level that saturates the drive
+- **`OthelloLevelEnumerator` / `OLECache`** — new `OLECache.h/.cpp`; two JSON files in `<nas>:\OLECache\` (or largest local drive when `--no-nas`): `benchmark_cache.json` keyed by drive letter + serial (avoids re-benchmarking unchanged hardware; `--force-benchmark` overrides) and `level_stats.json` keyed by `(boardSize, numRotations, level)` storing `SlvGB`/`MrgGB` accumulated across runs; expected sizes logged before each level; stats written after each level completes so even interrupted runs contribute data
+- **`OthelloLevelEnumerator` / `OLEStartup`** — new `OLEStartup.h/.cpp`; `OLECleanupAndArchiveLogs()` collects `*.log` files, copies to NAS log archive, then `DeleteFileA`-deletes everything under matching `--base` directories (uses `DeleteFileA` not `remove()` to bypass Recycle Bin)
+- **`OthelloLevelEnumerator` / `OLERunConfig`** — new `OLERunConfig.h/.cpp`; minimal hand-written JSON writer/reader for `ole_run_config.json`; stores complete drive layout, benchmark results, merge thread count, board size, and `lastCompletedLevel`
+- **`OthelloLevelEnumerator` / `OLEMain`** — named Windows mutex `Global\OthelloLevelEnumerator` prevents concurrent instances; auto-releases on process exit or crash
+- **`OthelloLevelEnumerator` / `OLEMain`** — `SHEmptyRecycleBinA` called at startup on every specified drive so `GetDiskFreeSpaceEx` reflects true available space regardless of how the user cleaned up previously
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.0
+
 ## [OLE v0.2.22] - 2026-06-02
 
 ### Fixed

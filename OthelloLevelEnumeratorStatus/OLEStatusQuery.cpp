@@ -19,11 +19,12 @@
 static const char* PhaseName(OLEPhase p)
 {
     switch (p) {
-        case OLE_PHASE_IDLE:  return "IDLE";
-        case OLE_PHASE_SOLVE: return "SOLVE";
-        case OLE_PHASE_MERGE: return "MERGE";
-        case OLE_PHASE_DONE:  return "DONE";
-        default:              return "???";
+        case OLE_PHASE_IDLE:      return "IDLE";
+        case OLE_PHASE_BENCHMARK: return "BENCHMARK";
+        case OLE_PHASE_SOLVE:     return "SOLVE";
+        case OLE_PHASE_MERGE:     return "MERGE";
+        case OLE_PHASE_DONE:      return "DONE";
+        default:                  return "???";
     }
 }
 
@@ -90,7 +91,16 @@ static void PrintStatus(const OLEStatusBlock* s)
     }
     printf("\n");
 
-    if (s->phase == OLE_PHASE_SOLVE)
+    if (s->phase == OLE_PHASE_BENCHMARK)
+    {
+        uint64_t elapsedMs = (s->phaseStartMs > 0 && nowMs > s->phaseStartMs)
+                           ? nowMs - s->phaseStartMs : 0;
+        char elBuf[32] = "0s";
+        if (elapsedMs > 0) FormatDuration(elapsedMs, elBuf, sizeof(elBuf));
+        printf("  Phase: BENCHMARK  (elapsed: %s)\n", elBuf);
+        printf("  Benchmarking drives -- querying, measuring write/read MB/s...\n");
+    }
+    else if (s->phase == OLE_PHASE_SOLVE)
     {
         uint64_t elapsedMs = (s->phaseStartMs > 0 && nowMs > s->phaseStartMs)
                            ? nowMs - s->phaseStartMs : 0;

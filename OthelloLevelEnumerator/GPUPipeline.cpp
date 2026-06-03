@@ -72,8 +72,19 @@ static std::unique_ptr<WriteJob> StartFlushBuffer(
     hostBoards.resize(got);
     stats->uniqueBoards += got;
 
-    // Determine output path on this thread.
-    int  drive = driveIdx % cfg->numOutputDirs;
+    // Determine output path: weighted round-robin if weights set, else equal.
+    int drive;
+    if (cfg->totalWeight > 0) {
+        int slot = driveIdx % cfg->totalWeight;
+        drive = 0;
+        int cum = 0;
+        for (int i = 0; i < cfg->numOutputDirs; i++) {
+            cum += cfg->dirWeights[i];
+            if (slot < cum) { drive = i; break; }
+        }
+    } else {
+        drive = driveIdx % cfg->numOutputDirs;
+    }
     char pathBuf[512];
     MakeOutputPath(pathBuf, sizeof(pathBuf), cfg->outputDirs[drive], cfg->level,
                    s_fileSeq.fetch_add(1));

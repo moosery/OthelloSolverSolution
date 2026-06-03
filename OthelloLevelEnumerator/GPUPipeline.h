@@ -19,6 +19,8 @@ struct OLEPipelineConfig {
     int         numWriterThreads;    // 2-4
     const char* const* outputDirs;   // one per drive
     int         numOutputDirs;
+    int         dirWeights[32];      // capacity-proportional routing weights per dir
+    int         totalWeight;         // sum of dirWeights; 0 = equal round-robin
     OLEStatusBlock* statusBlock;     // optional live status (nullptr = disabled)
     const std::atomic<bool>* shutdown; // optional graceful-stop flag (nullptr = disabled);
                                        // PipelineRun checks after each batch and exits early
