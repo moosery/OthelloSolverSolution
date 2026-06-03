@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.3"
+#define APP_VERSION "0.4.4"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1284,22 +1284,6 @@ int main(int argc, char* argv[])
 
         long long solveNs = ClockNanosSinceStart(&lvStart);
 
-        // Final flush: merge remaining solver files on each Fast dir → run files.
-        for (int fi = 0; fi < fastDirCount; fi++) {
-            int fileCount = 0;
-            {
-                std::lock_guard<std::mutex> lk(solveReg.mu);
-                for (const auto& fd : solveReg.files)
-                    if (fd.drive == fi) fileCount++;
-            }
-            if (fileCount == 0) continue;
-            const char* modDir = (moderateDirCount > 0) ? moderateDirPaths[0] : nullptr;
-            if (!modDir) { LogPrintf("  WARNING: no Moderate dir for final flush of Fast dir %d.\n", fi); continue; }
-            LogPrintf("  [FinalFlush] Flushing Fast dir %d (%d files) -> %s\n", fi, fileCount, modDir);
-            FlushNvmeDir(fi, &solveReg, &runReg, modDir, level,
-                         config.mergeBufBytesPerThread, safeFileLimit, &g_shutdown);
-        }
-
         // Accumulate per-dir solve stats from the output registry.
         // fd.drive is a Fast-dir index (0..fastDirCount-1); map to config.dirs via fastDirConfigIdx.
         for (const OLEFileDesc& fd : solveReg.files) {
@@ -1344,9 +1328,14 @@ int main(int argc, char* argv[])
         }
         long long merge1Ns = 0, merge2Ns = 0;
 
-        // Convert RunFileRegistry → OLEFileRegistry for MergeRunFilesToNAS.
+        // Build the merge input registry: run files from mid-solve flushes (on F: or NAS)
+        // plus any remaining solver files still on Fast drives.  Passing solver files
+        // directly skips the unnecessary F: write when data fits on Fast drives.
+        // MergeRunFilesToNAS deduplicates across all inputs; deleteRunFiles=true cleans
+        // up both F: run files and Fast-drive solver files after the merge.
         OLEFileRegistry runOleReg;
         {
+            // F: / NAS run files from mid-solve flushes.
             auto snap = runReg.Snapshot();
             for (const auto& rfd : snap) {
                 OLEFileDesc fd = {};
@@ -1356,6 +1345,15 @@ int main(int argc, char* argv[])
                 memcpy(fd.minKey, rfd.minKey, 24);
                 memcpy(fd.maxKey, rfd.maxKey, 24);
                 FRRegister(&runOleReg, fd);
+            }
+            // Remaining solver files on Fast drives (sorted+deduped per GPU window).
+            {
+                std::lock_guard<std::mutex> lk(solveReg.mu);
+                for (const auto& fd : solveReg.files) {
+                    OLEFileDesc ofd = fd;
+                    ofd.drive = 0;  // drive index irrelevant for merge input
+                    FRRegister(&runOleReg, ofd);
+                }
             }
         }
 
@@ -1401,11 +1399,8 @@ int main(int argc, char* argv[])
         // Checkpoint: persist merged registry.
         FRSave(&mergedReg, mergeMeta);
 
-        // Run files were deleted by MergeRunFilesToNAS (deleteRunFiles=true).
-        // Any remaining solver files in solveReg were already deleted by FlushNvmeDir.
-        // Clean up any stragglers (harmless remove() on non-existent files).
-        for (const OLEFileDesc& fd : solveReg.files)
-            remove(fd.path);
+        // MergeRunFilesToNAS deleted all source files (run files + solver files) via
+        // deleteRunFiles=true — no separate cleanup needed.
 
         long long ns = ClockNanosSinceStart(&lvStart);
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.4] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — small levels (0–11) were routed through an unnecessary F: (HDD) intermediate: FlushNvmeDir wrote solver files to F: at 190 MB/s, then MergeRunFilesToNAS read them back and copied to NAS, adding ~5–10 s of HDD I/O per level for no benefit; removed the final-flush step entirely and instead feed remaining solver files (still on Fast drives) directly into `runOleReg` alongside any F: run files from mid-solve flushes; `MergeRunFilesToNAS` k-way merges all inputs and deduplicates across sources; `deleteRunFiles=true` cleans up both F: run files and Fast-drive solver files after the merge; levels 0–11 now write directly Fast→NAS with no HDD intermediate
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.4
+
 ## [OLE v0.4.3] - 2026-06-03
 
 ### Fixed
