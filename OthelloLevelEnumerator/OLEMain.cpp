@@ -33,7 +33,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.3.0"
+#define APP_VERSION "0.3.1"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -454,6 +454,9 @@ static void GetTimestampStr(char* buf, size_t sz)
 
 int main(int argc, char* argv[])
 {
+    printf("OthelloLevelEnumerator v%s\n\n", APP_VERSION);
+    fflush(stdout);
+
     // ---- Single-instance guard ----
     // Named mutex is released automatically on process exit or crash — no stale lock possible.
     HANDLE g_instanceMutex = CreateMutexW(nullptr, TRUE, L"Global\\OthelloLevelEnumerator");
@@ -463,8 +466,8 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // ---- Ctrl+C handler ----
-    SetConsoleCtrlHandler(CtrlCHandler, TRUE);
+    // Ctrl+C handler installed later (after benchmark) so benchmark runs are
+    // terminated immediately by the Windows default rather than silently ignored.
 
     // ---- GPU query ----
     GpuDeviceInfo gpuInfo = QueryGpuDevice();
@@ -970,6 +973,9 @@ int main(int argc, char* argv[])
         }
         OLERunConfigWrite(config.configFilePath, rcd);
     }
+
+    // ---- Ctrl+C handler (installed here so benchmark runs can be killed immediately) ----
+    SetConsoleCtrlHandler(CtrlCHandler, TRUE);
 
     // ---- BFS level loop ----
     ClockTick wallStart; ClockStart(&wallStart);

@@ -114,10 +114,12 @@ OLEDriveQueryResult OLEQueryDrive(char driveLetter)
     }
 
     // Step 2: open volume handle for disk-extent query.
+    // Network/NAS drives (SMB) don't support IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS.
+    // If the handle fails but we already have capacity data, the drive is accessible.
     char volPath[7] = { '\\','\\','.','\\', driveLetter, ':', '\0' };
     HANDLE hVol = OpenDriveHandle(volPath);
     if (hVol == INVALID_HANDLE_VALUE) {
-        r.success = false;
+        r.success = (r.totalBytes > 0);
         return r;
     }
 

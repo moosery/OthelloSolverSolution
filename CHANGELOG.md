@@ -1,5 +1,16 @@
 # Changelog
 
+## [OLE v0.3.1] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEDriveDetect`** — NAS (SMB/network) drives reported as inaccessible because `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` is not supported on network volumes; `OLEQueryDrive` now returns `success=true` when `GetDiskFreeSpaceEx` succeeds but the volume handle cannot be opened, leaving physical disk fields at their zero defaults; NAS drives are correctly identified as accessible
+- **`OthelloLevelEnumerator` / `OLEMain`** — Ctrl+C during benchmark phase silently set `g_shutdown` but did not stop the benchmark, leaving the process running for minutes with no response; `SetConsoleCtrlHandler` is now installed immediately before the BFS level loop (not at startup), so during benchmark the Windows default handler applies and Ctrl+C terminates the process immediately
+- **`OthelloLevelEnumerator` / `OLEBenchmark`** — benchmark temp files left behind by a killed run were not cleaned up by startup cleanup (they live outside the `--base` directory); `OLEBenchmarkDrive` now deletes any pre-existing `ole_bench_tmp_NNN.dat` files for the drive at the start of each benchmark run
+- **`OthelloLevelEnumerator` / `OLEMain`** — version number and a blank line now printed immediately on startup (before mutex check, cleanup, or benchmarking) so the user sees a response right away
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.1
+
 ## [OLE v0.3.0] - 2026-06-03
 
 ### Changed (breaking — hard break from v0.2.x command line)

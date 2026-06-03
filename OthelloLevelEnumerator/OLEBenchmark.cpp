@@ -230,6 +230,13 @@ OLEDriveBenchResult OLEBenchmarkDrive(
     OLEDriveBenchResult r = {};
     r.driveLetter = driveLetter;
 
+    // Delete any stale temp files left by a previously killed benchmark run.
+    for (int i = 1; i <= maxDirs; i++) {
+        char stale[MAX_PATH];
+        snprintf(stale, sizeof(stale), "%c:\\ole_bench_tmp_%03d.dat", driveLetter, i);
+        DeleteFileA(stale);
+    }
+
     double prevCombinedWrite = 0.0;
     int    bestDirs          = 1;
     double bestPerDirWrite   = 0.0;
