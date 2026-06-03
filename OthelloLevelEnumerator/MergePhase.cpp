@@ -1059,6 +1059,188 @@ static bool CopyFileRaw(const char* srcPath, const char* dstPath, size_t bufByte
 }
 
 // ---------------------------------------------------------------------------
+// MergeToPartitions — internal
+//
+// Single-pass k-way heap merge that routes records to K output partition
+// files based on pivot ranges.  Each source file is read exactly once.
+// Returns true on success; outPaths[k]/outDescs[k] filled for each
+// non-empty partition.  Empty partitions: outDescs[k].recordCount == 0
+// and no file is written for that partition.
+// If deleteSrcsOnSuccess, source files are removed after the merge.
+// ---------------------------------------------------------------------------
+static bool MergeToPartitions(
+    const std::vector<const OLEFileDesc*>&    srcFiles,
+    int                                       numParts,
+    const std::vector<std::vector<uint8_t>>&  pivots,
+    const char* const*                        outputDirs,
+    int                                       numOutputDirs,
+    int                                       level,
+    uint32_t                                  recordSize,
+    uint32_t                                  keySize,
+    size_t                                    bufBytes,
+    bool                                      deleteSrcsOnSuccess,
+    OLEFileDesc*                              outDescs,     // [numParts], caller-allocated
+    OLEStatusBlock*                           statusBlock,
+    const std::atomic<bool>*                  shutdown)
+{
+    for (int k = 0; k < numParts; k++) memset(&outDescs[k], 0, sizeof(OLEFileDesc));
+    if (srcFiles.empty()) return true;
+
+    size_t n          = srcFiles.size();
+    size_t outBufEach = std::max(bufBytes / 5 / (size_t)numParts, (size_t)(4ULL * 1024 * 1024));
+    size_t inBufEach  = std::max(bufBytes * 4 / 5 / n, (size_t)(256ULL * 1024));
+    size_t cpyLen     = (keySize < 24) ? keySize : 24;
+
+    // Open input readers and prime the heap.
+    std::vector<PreMergeSrc> srcs(n);
+    bool openOk = true;
+    for (size_t i = 0; i < n && openOk; i++) {
+        srcs[i].curRec.resize(recordSize);
+        srcs[i].dsIdx  = (int)i;
+        srcs[i].reader = SFReaderOpen(srcFiles[i]->path, inBufEach);
+        if (!srcs[i].reader) {
+            int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+            Error(FATAL_FILE_OPEN, "MergeToPartitions: SFReaderOpen failed: %s (errno=%d: %s)",
+                  srcFiles[i]->path, e, eb);
+            ErrorPrint(stderr);
+            for (size_t j = 0; j < i; j++) if (srcs[j].reader) SFReaderClose(&srcs[j].reader);
+            openOk = false;
+        }
+    }
+    if (!openOk) return false;
+
+    std::vector<int> heap;
+    heap.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        if (SFReaderNext(srcs[i].reader, srcs[i].curRec.data(), 1) == 1)
+            PMHeapPush(heap, srcs, keySize, (int)i);
+        else
+            SFReaderClose(&srcs[i].reader);
+    }
+
+    // Open K output files, one per partition on separate Fast dirs.
+    struct PartState {
+        FILE*                f        = nullptr;
+        std::vector<uint8_t> buf;
+        size_t               pos      = 0;
+        uint64_t             written  = 0;
+        uint8_t              minKey24[24] = {};
+        uint8_t              maxKey24[24] = {};
+        char                 path[512]    = {};
+    };
+    std::vector<PartState> parts(numParts);
+
+    for (int k = 0; k < numParts; k++) {
+        snprintf(parts[k].path, sizeof(parts[k].path), "%sole_merge_L%02d_D%d.sf",
+                 outputDirs[k % numOutputDirs], level, k);
+        if (fopen_s(&parts[k].f, parts[k].path, "wb") != 0 || !parts[k].f) {
+            int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+            for (auto& s : srcs) if (s.reader) SFReaderClose(&s.reader);
+            for (int j = 0; j < k; j++) if (parts[j].f) { fclose(parts[j].f); remove(parts[j].path); }
+            Error(FATAL_FILE_OPEN, "MergeToPartitions: cannot open output: %s (errno=%d: %s)",
+                  parts[k].path, e, eb);
+            ErrorPrint(stderr);
+            return false;
+        }
+        SortedFileHeader hdr = {};
+        hdr.recordSize = recordSize;
+        hdr.keySize    = keySize;
+        fwrite(&hdr, sizeof(hdr), 1, parts[k].f);
+        parts[k].buf.resize(outBufEach);
+    }
+
+    // Flush one partition's buffer.
+    auto flushPart = [&](int k) -> bool {
+        if (parts[k].pos == 0) return true;
+        bool r = fwrite(parts[k].buf.data(), 1, parts[k].pos, parts[k].f) == parts[k].pos;
+        parts[k].pos = 0;
+        return r;
+    };
+
+    // Binary search: which partition does this key belong to?
+    auto getPart = [&](const uint8_t* key) -> int {
+        int lo = 0, hi = numParts - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (BoardKeyCompare(key, pivots[mid + 1].data()) < 0) hi = mid;
+            else                                                    lo = mid + 1;
+        }
+        return lo;
+    };
+
+    std::vector<uint8_t> lastKey(keySize, 0x00);
+    bool     hasLast     = false;
+    bool     ok          = true;
+    bool     wasShutdown = false;
+    uint64_t loopCount   = 0;
+
+    while (ok && !heap.empty()) {
+        if ((++loopCount & 0xFFFFF) == 0 && shutdown && shutdown->load()) {
+            ok = false; wasShutdown = true; break;
+        }
+        int minIdx = heap[0];
+        PMHeapPop(heap, srcs, keySize);
+        const uint8_t* rec = srcs[minIdx].curRec.data();
+
+        if (!hasLast || memcmp(rec, lastKey.data(), keySize) != 0) {
+            memcpy(lastKey.data(), rec, keySize);
+            hasLast = true;
+            int k = getPart(rec);
+            PartState& p = parts[k];
+            if (p.pos + recordSize > outBufEach) ok = flushPart(k);
+            if (ok) {
+                memcpy(p.buf.data() + p.pos, rec, recordSize);
+                p.pos += recordSize;
+                if (p.written == 0) memcpy(p.minKey24, rec, cpyLen);
+                memcpy(p.maxKey24, rec, cpyLen);
+                p.written++;
+            }
+        }
+
+        if (SFReaderNext(srcs[minIdx].reader, srcs[minIdx].curRec.data(), 1) == 1)
+            PMHeapPush(heap, srcs, keySize, minIdx);
+        else
+            SFReaderClose(&srcs[minIdx].reader);
+    }
+
+    for (auto& s : srcs) if (s.reader) SFReaderClose(&s.reader);
+
+    // Finalize partition files.
+    for (int k = 0; k < numParts; k++) {
+        if (!parts[k].f) continue;
+        if (ok) ok = flushPart(k);
+        if (ok && parts[k].written > 0) {
+            SortedFileHeader hdr = {};
+            hdr.recordSize  = recordSize;
+            hdr.keySize     = keySize;
+            hdr.recordCount = parts[k].written;
+            memcpy(hdr.minKey, parts[k].minKey24, 24);
+            memcpy(hdr.maxKey, parts[k].maxKey24, 24);
+            _fseeki64(parts[k].f, 0, SEEK_SET);
+            if (fwrite(&hdr, sizeof(hdr), 1, parts[k].f) != 1) ok = false;
+        }
+        fclose(parts[k].f);
+        parts[k].f = nullptr;
+        if (!ok || wasShutdown || parts[k].written == 0) remove(parts[k].path);
+    }
+
+    if (!ok || wasShutdown) return false;
+
+    if (deleteSrcsOnSuccess)
+        for (auto* fd : srcFiles) remove(fd->path);
+
+    if (statusBlock) statusBlock->mergeSrcFilesConsumed = (uint64_t)srcFiles.size();
+
+    for (int k = 0; k < numParts; k++) {
+        strncpy_s(outDescs[k].path, parts[k].path, sizeof(outDescs[k].path) - 1);
+        outDescs[k].recordCount = parts[k].written;
+        memcpy(outDescs[k].minKey, parts[k].minKey24, 24);
+        memcpy(outDescs[k].maxKey, parts[k].maxKey24, 24);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // MergeRunFilesToNAS
 // ---------------------------------------------------------------------------
 bool MergeRunFilesToNAS(
@@ -1078,101 +1260,75 @@ bool MergeRunFilesToNAS(
     if (!runReg || runReg->files.empty()) return true;
     if (numFastTempDirs < 1 || !fastTempDirs) return false;
 
-    // Build flat source list from run registry.
+    // Build flat source list.
     std::vector<const OLEFileDesc*> srcFiles;
     srcFiles.reserve(runReg->files.size());
     for (const auto& fd : runReg->files)
         if (fd.recordCount > 0) srcFiles.push_back(&fd);
     if (srcFiles.empty()) return true;
 
-    // Compute pivot ranges — one output partition per Fast temp dir.
     int numParts = numFastTempDirs;
     std::vector<std::vector<uint8_t>> pivots;
     ComputePivots(runReg, numParts, keySize, recordSize, pivots);
 
-    // Delete state: nullptr = don't delete run files during partition merges;
-    // we delete them explicitly after all partitions complete (if requested).
-    MergeDeleteState ds;
-    ds.counts   = std::unique_ptr<std::atomic<int>[]>(new std::atomic<int>[(int)srcFiles.size()]());
-    ds.numParts = deleteRunFiles ? numParts : 0;
-    ds.numFiles = (int)srcFiles.size();
-    ds.srcFiles = &srcFiles;
-    ds.status   = statusBlock;
+    // Single-pass merge: one heap pass writes all K partition temp files
+    // simultaneously (one record read per record, routed by key range).
+    // This replaces K separate RunMergePartition calls that each re-read
+    // the full source data, reducing source reads from K×N to 1×N.
+    std::vector<OLEFileDesc> tempDescs(numParts);
+    if (!MergeToPartitions(srcFiles, numParts, pivots,
+                           fastTempDirs, numFastTempDirs,
+                           level, recordSize, keySize, bufBytes,
+                           deleteRunFiles, tempDescs.data(),
+                           statusBlock, shutdown))
+        return false;
 
-    size_t p2BufBytes = std::max(bufBytes, (size_t)(4ULL * 1024 * 1024));
-    size_t copyBuf    = std::max(bufBytes / 2, (size_t)(256ULL * 1024 * 1024));
-
-    bool allOk = true;
-
-    // Pipelined: merge partition k to Fast temp, launch NAS copy in background,
-    // merge partition k+1 while NAS copy for k runs, join copy before next copy.
-    std::thread nasCopyThread;
-    std::string pendingTempPath;
-    bool        copyOk = true;
-
-    auto joinPendingCopy = [&]() {
-        if (nasCopyThread.joinable()) {
-            nasCopyThread.join();
-            if (!pendingTempPath.empty()) {
-                remove(pendingTempPath.c_str());
-                pendingTempPath.clear();
-            }
-        }
-    };
-
-    for (int k = 0; k < numParts && allOk; k++) {
-        if (shutdown && shutdown->load()) { allOk = false; break; }
-
-        const char* tempDir = fastTempDirs[k % numFastTempDirs];
-        char tempPath[512];
-        snprintf(tempPath, sizeof(tempPath), "%sole_merge_L%02d_D%d.sf", tempDir, level, k);
-        char nasPath[512];
-        snprintf(nasPath,  sizeof(nasPath),  "%sole_merge_L%02d_D%d.sf",  nasOutputDir, level, k);
-
-        // Merge this pivot range → Fast temp file.
-        // RunMergePartition returns true but writes NO file when all source
-        // records fall outside this pivot range (empty partition).  We detect
-        // this via tmpDstReg being empty — no file to copy in that case.
-        OLEFileRegistry tmpDstReg;
-        allOk = RunMergePartition(k, srcFiles, pivots[k], pivots[k + 1],
-                                  tempDir, level, recordSize, keySize,
-                                  p2BufBytes, &tmpDstReg,
-                                  deleteRunFiles ? &ds : nullptr,
-                                  shutdown);
-        if (!allOk) break;
-
-        // Empty partition: RunMergePartition wrote nothing — skip NAS copy.
-        bool hasRecords = !tmpDstReg.files.empty() && tmpDstReg.files[0].recordCount > 0;
-        if (!hasRecords) {
-            remove(tempPath);  // clean up any zero-byte file (harmless if absent)
-            continue;
-        }
-
-        // Build NAS descriptor from the temp file's registered metadata.
-        OLEFileDesc nasDesc = {};
-        strncpy_s(nasDesc.path, nasPath, sizeof(nasDesc.path) - 1);
-        nasDesc.recordCount = tmpDstReg.files[0].recordCount;
-        memcpy(nasDesc.minKey, tmpDstReg.files[0].minKey, 24);
-        memcpy(nasDesc.maxKey, tmpDstReg.files[0].maxKey, 24);
-
-        // Wait for the previous NAS copy to finish (single NAS stream at a time).
-        joinPendingCopy();
-        if (!copyOk) { allOk = false; remove(tempPath); break; }
-
-        // Register the NAS output file (data lands there once copy completes).
-        FRRegister(dstReg, nasDesc);
-
-        // Launch NAS copy in background; next partition merge overlaps with it.
-        std::string tp = tempPath;
-        std::string np = nasPath;
-        pendingTempPath = tp;
-        nasCopyThread   = std::thread([tp, np, copyBuf, &copyOk]() {
-            if (!CopyFileRaw(tp.c_str(), np.c_str(), copyBuf)) copyOk = false;
-        });
+    if (shutdown && shutdown->load()) {
+        for (int k = 0; k < numParts; k++) remove(tempDescs[k].path);
+        return false;
     }
 
-    joinPendingCopy();
-    if (!copyOk) allOk = false;
+    // Launch concurrent NAS copies for non-empty partitions (mirrors old Ph2
+    // concurrent write behaviour; the NAS handles parallel streams efficiently).
+    size_t copyBuf = std::max(bufBytes / (size_t)numParts,
+                               (size_t)(256ULL * 1024 * 1024));
+    struct NasJob { std::string src; std::string dst; bool ok; };
+    std::vector<NasJob>   jobs;
+    std::vector<std::thread> copyThreads;
+
+    for (int k = 0; k < numParts; k++) {
+        if (tempDescs[k].recordCount == 0) { remove(tempDescs[k].path); continue; }
+        char nasPath[512];
+        snprintf(nasPath, sizeof(nasPath), "%sole_merge_L%02d_D%d.sf", nasOutputDir, level, k);
+        jobs.push_back({tempDescs[k].path, nasPath, true});
+    }
+
+    copyThreads.reserve(jobs.size());
+    for (auto& j : jobs) {
+        copyThreads.emplace_back([&j, copyBuf]() {
+            j.ok = CopyFileRaw(j.src.c_str(), j.dst.c_str(), copyBuf);
+        });
+    }
+    for (auto& t : copyThreads) t.join();
+
+    // Delete temp files and register NAS outputs.
+    bool allOk = true;
+    for (auto& j : jobs) {
+        remove(j.src.c_str());
+        if (!j.ok) { allOk = false; remove(j.dst.c_str()); continue; }
+        OLEFileDesc d = {};
+        strncpy_s(d.path, j.dst.c_str(), sizeof(d.path) - 1);
+        // Find matching tempDesc to copy recordCount/minKey/maxKey.
+        for (int k = 0; k < numParts; k++) {
+            if (j.src == tempDescs[k].path) {
+                d.recordCount = tempDescs[k].recordCount;
+                memcpy(d.minKey, tempDescs[k].minKey, 24);
+                memcpy(d.maxKey, tempDescs[k].maxKey, 24);
+                break;
+            }
+        }
+        FRRegister(dstReg, d);
+    }
 
     if (statusBlock) statusBlock->mergePartsDone = numParts;
     return allOk;

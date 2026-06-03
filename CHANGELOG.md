@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.5] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeRunFilesToNAS` was calling `RunMergePartition` once per pivot partition, each call re-reading the full source data to filter its key range; with K=4 partitions and N GB of source data this caused K×N GB of reads instead of 1×N GB, adding ~11 s of unnecessary read overhead at level 12 (5.98 GB source → ~24 GB reads); replaced with `MergeToPartitions`, a new single-pass k-way heap merge that routes each record to the correct partition output file as it passes through the heap, reading source data exactly once; additionally replaced the former sequential-pipelined NAS copy with concurrent NAS copy threads (one per non-empty partition), restoring the parallel-write behaviour of the old Ph2 that was more efficient for this NAS's cache/bandwidth characteristics
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.5
+
 ## [OLE v0.4.4] - 2026-06-03
 
 ### Fixed
