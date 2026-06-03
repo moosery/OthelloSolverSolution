@@ -1352,7 +1352,7 @@ int main(int argc, char* argv[])
             }
         }
 
-        auto tMergeStart = std::chrono::steady_clock::now();
+        ClockTick mergeClk; ClockStart(&mergeClk);
         FRClear(&mergedReg);
         if (!MergeRunFilesToNAS(&runOleReg, config.nasRunDir,
                                 fastDirPaths, fastDirCount,
@@ -1363,9 +1363,7 @@ int main(int argc, char* argv[])
         {
             LogPrintf("  ERROR: MergeRunFilesToNAS failed at level %d\n", level);
             long long partialNs = ClockNanosSinceStart(&lvStart);
-            auto tMergeEnd = std::chrono::steady_clock::now();
-            merge2Ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           tMergeEnd - tMergeStart).count();
+            merge2Ns = ClockNanosSinceStart(&mergeClk);
             LevelRecord partial  = {};
             partial.level        = level;
             partial.boardsIn     = stats.boardsIn + stats.passBoards;
@@ -1390,9 +1388,7 @@ int main(int argc, char* argv[])
             break;
         }
         {
-            auto tMergeEnd = std::chrono::steady_clock::now();
-            merge2Ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           tMergeEnd - tMergeStart).count();
+            merge2Ns = ClockNanosSinceStart(&mergeClk);
         }
 
         // Checkpoint: persist merged registry.
