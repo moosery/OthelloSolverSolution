@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.2"
+#define APP_VERSION "0.4.3"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1184,13 +1184,19 @@ int main(int argc, char* argv[])
         // file count or free space threshold is hit.
         std::thread flushThreads[OLE_MAX_SOLVE_DIRS];
         std::atomic<bool> monitorDone{false};
+        std::mutex monitorMtx;
+        std::condition_variable monitorCV;
         static constexpr uint64_t kFastFreeThresh     = 250ULL * 1024 * 1024 * 1024;  // 250 GB
         static constexpr uint64_t kModerateFreeThresh = 250ULL * 1024 * 1024 * 1024;  // 250 GB
         std::atomic<int> nasInterimSeq{0};
 
         std::thread monitorThread([&]() {
             while (!monitorDone.load() && !g_shutdown.load()) {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                {
+                    std::unique_lock<std::mutex> lk(monitorMtx);
+                    monitorCV.wait_for(lk, std::chrono::seconds(5),
+                                       [&]{ return monitorDone.load() || g_shutdown.load(); });
+                }
                 if (monitorDone.load() || g_shutdown.load()) break;
 
                 for (int fi = 0; fi < fastDirCount; fi++) {
@@ -1264,6 +1270,7 @@ int main(int argc, char* argv[])
 
         // Stop monitor and wait for all in-flight flush threads.
         monitorDone.store(true);
+        monitorCV.notify_one();   // wake monitor immediately rather than waiting out its sleep
         monitorThread.join();
         for (int fi = 0; fi < fastDirCount; fi++)
             if (flushThreads[fi].joinable()) flushThreads[fi].join();

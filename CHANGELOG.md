@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.3] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — flush monitor thread slept 5 seconds unconditionally at the start of each check cycle; `monitorThread.join()` after `PipelineRun` blocked the BFS loop for up to 5 seconds on every level, adding ~5 s overhead to small levels (0–11 took ~8 s each instead of ~1 s); replaced `sleep_for(5s)` with `condition_variable::wait_for(5s, predicate)` and added `monitorCV.notify_one()` after setting `monitorDone`; monitor now wakes immediately when the pipeline finishes
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.3
+
 ## [OLE v0.4.2] - 2026-06-03
 
 ### Fixed
