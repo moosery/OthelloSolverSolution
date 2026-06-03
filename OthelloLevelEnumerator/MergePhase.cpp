@@ -1130,6 +1130,9 @@ bool MergeRunFilesToNAS(
         snprintf(nasPath,  sizeof(nasPath),  "%sole_merge_L%02d_D%d.sf",  nasOutputDir, level, k);
 
         // Merge this pivot range → Fast temp file.
+        // RunMergePartition returns true but writes NO file when all source
+        // records fall outside this pivot range (empty partition).  We detect
+        // this via tmpDstReg being empty — no file to copy in that case.
         OLEFileRegistry tmpDstReg;
         allOk = RunMergePartition(k, srcFiles, pivots[k], pivots[k + 1],
                                   tempDir, level, recordSize, keySize,
@@ -1138,27 +1141,26 @@ bool MergeRunFilesToNAS(
                                   shutdown);
         if (!allOk) break;
 
-        // Read temp file metadata before handing it to the copy thread.
+        // Empty partition: RunMergePartition wrote nothing — skip NAS copy.
+        bool hasRecords = !tmpDstReg.files.empty() && tmpDstReg.files[0].recordCount > 0;
+        if (!hasRecords) {
+            remove(tempPath);  // clean up any zero-byte file (harmless if absent)
+            continue;
+        }
+
+        // Build NAS descriptor from the temp file's registered metadata.
         OLEFileDesc nasDesc = {};
         strncpy_s(nasDesc.path, nasPath, sizeof(nasDesc.path) - 1);
-        {
-            SortedFileReader* r = SFReaderOpen(tempPath, 256ULL * 1024);
-            if (r) {
-                const SortedFileHeader* h = SFReaderHeader(r);
-                nasDesc.recordCount = h->recordCount;
-                memcpy(nasDesc.minKey, h->minKey, 24);
-                memcpy(nasDesc.maxKey, h->maxKey, 24);
-                SFReaderClose(&r);
-            }
-        }
+        nasDesc.recordCount = tmpDstReg.files[0].recordCount;
+        memcpy(nasDesc.minKey, tmpDstReg.files[0].minKey, 24);
+        memcpy(nasDesc.maxKey, tmpDstReg.files[0].maxKey, 24);
 
         // Wait for the previous NAS copy to finish (single NAS stream at a time).
         joinPendingCopy();
         if (!copyOk) { allOk = false; remove(tempPath); break; }
 
         // Register the NAS output file (data lands there once copy completes).
-        if (nasDesc.recordCount > 0)
-            FRRegister(dstReg, nasDesc);
+        FRRegister(dstReg, nasDesc);
 
         // Launch NAS copy in background; next partition merge overlaps with it.
         std::string tp = tempPath;

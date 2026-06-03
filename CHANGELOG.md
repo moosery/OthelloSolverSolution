@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.2] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeRunFilesToNAS` launched a NAS copy thread even when `RunMergePartition` wrote no output file (empty pivot partition — all source records fell outside the key range); `RunMergePartition` returns true but registers nothing into its `dstReg` in this case; the copy thread would fail trying to open a non-existent temp file, setting `copyOk = false` and aborting the merge; fix: check `tmpDstReg.files.empty()` after each partition and skip the copy step entirely for empty partitions; also use the already-registered file metadata from `tmpDstReg` instead of re-opening the temp file to read its header
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.2
+
 ## [OLE v0.4.1] - 2026-06-03
 
 ### Fixed

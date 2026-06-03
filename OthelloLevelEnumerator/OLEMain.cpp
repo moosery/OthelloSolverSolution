@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.1"
+#define APP_VERSION "0.4.2"
 
 // ---------------------------------------------------------------------------
 // Configuration
