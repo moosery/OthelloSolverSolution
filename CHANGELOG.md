@@ -1,5 +1,17 @@
 # Changelog
 
+## [OLE v0.4.0] - 2026-06-03
+
+### Changed (architectural overhaul — new solve/merge pipeline)
+- **`OthelloLevelEnumerator` / `OLERunConfig`** — added `OLEDriveClass` enum (`Fast ≥ 500 MB/s`, `Moderate 30–500 MB/s`, `Slow < 30 MB/s`) derived from benchmark write speeds; replaces the old `isNvme` bool; `OLEDirDesc.driveClass` drives all routing decisions; `OLERunConfigData.dirDriveClass[]` persists class across restarts (reads old `"nvme": true/false` configs with backward-compatible fallback); display now shows `Fast`/`Mod ` instead of `NVMe`/`HDD `
+- **`OthelloLevelEnumerator` / `OLEMain`** — no-Moderate-drives fallback: if benchmark finds only Fast drives, the slowest Fast drive is demoted to Moderate (flush target) with a logged warning
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — GPU pipeline now writes solver files exclusively to Fast (NVMe-class) drives; Moderate drives are no longer GPU targets; per-dir routing enable flags (`dirEnabled[]`) added to `OLEPipelineConfig` — flush monitor sets a dir's flag `false` while it is being flushed, routing advances to the next enabled dir; if all dirs disabled the pipeline spin-waits (50 ms) until one re-enables
+- **`OthelloLevelEnumerator` / `OLEMain`** — per-level routing weights now computed over Fast dirs only; Moderate dirs excluded from weight/quota calculation
+- **`OthelloLevelEnumerator` / `NVMeFlush` (new)** — `FlushNvmeDir`: when a Fast dir hits the file-count limit (`_getmaxstdio() - 20`) or drops below 250 GB free, its solver files are k-way merged into a single sorted+deduped run file on the best Moderate dir; multi-pass merge if fan-in exceeds the CRT handle limit; solver files deleted from disk and registry after merge; `FlushRunFilesToNas`: when Moderate drives approach 250 GB free, existing run files are merged into a NAS interim file; `RunFileRegistry`: thread-safe list of run files accumulated across flushes, consumed by Ph2
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeFilesToOne` (new, exported): k-way heap merge of an arbitrary list of sorted files into one; handles multi-pass if fan-in exceeds safe limit; used by `FlushNvmeDir`; `MergeRunFilesToNAS` (new, replaces `MergePhaseRun` in the BFS loop): reads all run files from Moderate drives, merges each pivot-range partition to a Fast-dir temp file (NVMe speed), then pipelines NAS copy in background while the next partition merges — NAS write is no longer on the critical path of the merge computation; one NAS stream at a time avoids multi-stream contention
+- **`OthelloLevelEnumerator` / `OLEMain`** — flush monitor thread runs alongside `PipelineRun` each level; checks Fast dirs every 5 s; triggers `FlushNvmeDir` (disables dir in pipeline, re-enables after flush); handles Moderate overflow to NAS via `FlushRunFilesToNas`; after `PipelineRun` completes: monitor stopped, all flush threads joined, final flush of remaining Fast-dir solver files; `MergeRunFilesToNAS` then merges run files using the now-empty Fast drives as temp workspace
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.0
+
 ## [OLE v0.3.6] - 2026-06-03
 
 ### Changed

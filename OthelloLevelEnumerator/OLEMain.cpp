@@ -31,9 +31,10 @@
 #include "FileRegistry.h"
 #include "GPUPipeline.h"
 #include "MergePhase.h"
+#include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.3.6"
+#define APP_VERSION "0.4.0"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -45,8 +46,8 @@
 // Per-solve-directory descriptor — populated by benchmark + auto-layout.
 struct OLEDirDesc {
     char     path[MAX_PATH];   // full path e.g. D:\OLEData\dir.0000000001
-    char     driveLetter;      // e.g. 'D'
-    bool     isNvme;
+    char         driveLetter;  // e.g. 'D'
+    OLEDriveClass driveClass;  // Fast/Moderate/Slow derived from benchmark writeMBs
     double   writeMBs;         // benchmark write MB/s (concurrent result)
     double   readMBs;          // benchmark read MB/s (concurrent result)
     uint64_t usableBytes;      // free space minus 200 GB safety margin
@@ -676,7 +677,7 @@ int main(int argc, char* argv[])
                 snprintf(dir.path, MAX_PATH, "%c:\\%s\\dir.%010d\\",
                          config.drives[i], config.baseName, globalDirNum++);
                 dir.driveLetter = config.drives[i];
-                dir.isNvme      = driveInfo[i].isNvme;
+                dir.driveClass  = OLEDriveClassFromWriteMBs(benchResults[i].writeMBs);
                 dir.writeMBs    = benchResults[i].writeMBs;
                 dir.readMBs     = benchResults[i].readMBs;
                 dir.usableBytes = perDirUsable;
@@ -702,13 +703,39 @@ int main(int argc, char* argv[])
             strncpy_s(config.dirs[i].path, sizeof(config.dirs[i].path),
                       rcd.dirPaths[i], _TRUNCATE);
             config.dirs[i].driveLetter = rcd.dirDriveLetters[i];
-            config.dirs[i].isNvme      = rcd.dirIsNvme[i];
+            config.dirs[i].driveClass  = (OLEDriveClass)rcd.dirDriveClass[i];
             config.dirs[i].writeMBs    = rcd.dirWriteMBs[i];
             config.dirs[i].readMBs     = rcd.dirReadMBs[i];
             config.dirs[i].usableBytes = rcd.dirUsableBytes[i];
         }
         printf("  Resuming from level %d (last completed: %d)\n",
                config.lastCompletedLevel + 1, config.lastCompletedLevel);
+    }
+
+    // ---- No-Moderate fallback: demote slowest Fast dir to Moderate ----
+    {
+        int numFast = 0, numMod = 0;
+        for (int i = 0; i < config.numDirs; i++) {
+            if (config.dirs[i].driveClass == OLEDriveClass::Fast)     numFast++;
+            if (config.dirs[i].driveClass == OLEDriveClass::Moderate) numMod++;
+        }
+        if (numFast == 0) {
+            fprintf(stderr, "ERROR: no Fast (NVMe-class) drives found — cannot run solver.\n");
+            return 1;
+        }
+        if (numMod == 0) {
+            // Find slowest Fast dir (lowest writeMBs) and demote it.
+            int slowIdx = -1;
+            for (int i = 0; i < config.numDirs; i++) {
+                if (config.dirs[i].driveClass != OLEDriveClass::Fast) continue;
+                if (slowIdx < 0 || config.dirs[i].writeMBs < config.dirs[slowIdx].writeMBs)
+                    slowIdx = i;
+            }
+            config.dirs[slowIdx].driveClass = OLEDriveClass::Moderate;
+            LogPrintf("  WARNING: no HDD-class drives found — demoting dir %d (%c:, %.0f MB/s) "
+                      "to flush target.\n", slowIdx, config.dirs[slowIdx].driveLetter,
+                      config.dirs[slowIdx].writeMBs);
+        }
     }
 
     swprintf_s(shmName, 128,
@@ -773,6 +800,29 @@ int main(int argc, char* argv[])
     for (int i = 0; i < config.numDirs; i++)
         dirPaths[i] = config.dirs[i].path;
 
+    // ---- Separate Fast (solver) and Moderate (flush target) dirs ----
+    const char* fastDirPaths[OLE_MAX_SOLVE_DIRS];
+    int fastDirConfigIdx[OLE_MAX_SOLVE_DIRS];   // fastDir index → config.dirs index
+    int fastDirCount = 0;
+    const char* moderateDirPaths[OLE_MAX_SOLVE_DIRS];
+    int moderateDirCount = 0;
+    for (int i = 0; i < config.numDirs; i++) {
+        if (config.dirs[i].driveClass == OLEDriveClass::Fast) {
+            fastDirConfigIdx[fastDirCount] = i;
+            fastDirPaths[fastDirCount++]   = config.dirs[i].path;
+        } else if (config.dirs[i].driveClass == OLEDriveClass::Moderate) {
+            moderateDirPaths[moderateDirCount++] = config.dirs[i].path;
+        }
+    }
+
+    // Per-Fast-dir routing enable flags (all true; set false while a dir is flushing).
+    // Sized to OLE_MAX_SOLVE_DIRS for simplicity; only [0, fastDirCount) are used.
+    std::atomic<bool> dirEnabled[OLE_MAX_SOLVE_DIRS];
+    for (int i = 0; i < OLE_MAX_SOLVE_DIRS; i++) dirEnabled[i].store(true);
+
+    // CRT file-handle budget for merge fan-in (controls multi-pass batch size).
+    const int safeFileLimit = _getmaxstdio() - 20;
+
     // ---- Initialize board-size globals (must precede any BOARD operation) ----
     SetBoardSizeForRun(config.boardSize);
 
@@ -831,7 +881,7 @@ int main(int argc, char* argv[])
 
         LogPrintf("  Final Dir Layout:\n");
         for (int i = 0; i < config.numDirs; i++) {
-            const char* typeStr = config.dirs[i].isNvme ? "NVMe" : "HDD ";
+            const char* typeStr = OLEDriveClassName(config.dirs[i].driveClass);
             double usableTB = (double)config.dirs[i].usableBytes / (1024.0*1024*1024*1024);
             if (config.dirs[i].writeMBs > 0.0)
                 LogPrintf("    Dir %d  %s  %s  Usable: %.2f TB  Write: %.0f MB/s  Read: %.0f MB/s\n",
@@ -881,8 +931,9 @@ int main(int argc, char* argv[])
     pipelineCfg.accumBufSlots    = config.accumBufSlots;
     pipelineCfg.writerBufBytes   = 256ULL * 1024 * 1024;  // 256 MB writer buffer per thread
     pipelineCfg.numWriterThreads = (config.numMergeThreads > 2) ? 2 : 1;
-    pipelineCfg.outputDirs       = dirPaths;
-    pipelineCfg.numOutputDirs    = config.numDirs;
+    pipelineCfg.outputDirs       = fastDirPaths;   // GPU writes only to Fast (NVMe) dirs
+    pipelineCfg.numOutputDirs    = fastDirCount;
+    pipelineCfg.dirEnabled       = dirEnabled;     // flush monitor sets false while flushing
     pipelineCfg.statusBlock      = g_status;
     pipelineCfg.shutdown         = &g_shutdown;
 
@@ -977,7 +1028,7 @@ int main(int argc, char* argv[])
             strncpy_s(rcd.dirPaths[i],    sizeof(rcd.dirPaths[i]),
                       config.dirs[i].path, _TRUNCATE);
             rcd.dirDriveLetters[i] = config.dirs[i].driveLetter;
-            rcd.dirIsNvme[i]       = config.dirs[i].isNvme;
+            rcd.dirDriveClass[i]   = (int)config.dirs[i].driveClass;
             rcd.dirWriteMBs[i]     = config.dirs[i].writeMBs;
             rcd.dirReadMBs[i]      = config.dirs[i].readMBs;
             rcd.dirUsableBytes[i]  = config.dirs[i].usableBytes;
@@ -1034,8 +1085,10 @@ int main(int argc, char* argv[])
             const OLELevelStatEntry* ls = OLELevelStatsLookup(
                 levelStats, numLevelStats, config.boardSize, config.numRotations, level);
 
+            // Weights indexed over Fast dirs (0..fastDirCount-1) to match pipelineCfg.outputDirs.
             uint64_t totalUsable = 0;
-            for (int i = 0; i < config.numDirs; i++) totalUsable += config.dirs[i].usableBytes;
+            for (int fi = 0; fi < fastDirCount; fi++)
+                totalUsable += config.dirs[fastDirConfigIdx[fi]].usableBytes;
 
             double quota[OLE_MAX_SOLVE_DIRS] = {};
 
@@ -1047,59 +1100,61 @@ int main(int argc, char* argv[])
                     LogPrintf("  WARNING: Level %d expected %.2f GB solve but only %.2f GB available!\n",
                               level, ls->slvGB, totalAvailGB);
 
-                // Initial allocation proportional to usable space.
-                for (int i = 0; i < config.numDirs; i++)
-                    quota[i] = (totalUsable > 0)
-                             ? (double)expectedBytes * config.dirs[i].usableBytes / (double)totalUsable
-                             : (double)expectedBytes / config.numDirs;
+                for (int fi = 0; fi < fastDirCount; fi++) {
+                    uint64_t u = config.dirs[fastDirConfigIdx[fi]].usableBytes;
+                    quota[fi]  = (totalUsable > 0)
+                               ? (double)expectedBytes * u / (double)totalUsable
+                               : (double)expectedBytes / fastDirCount;
+                }
 
-                // Iteratively cap dirs that overflow and redistribute to uncapped dirs.
                 bool capped[OLE_MAX_SOLVE_DIRS] = {};
-                for (int iter = 0; iter < config.numDirs; iter++) {
+                for (int iter = 0; iter < fastDirCount; iter++) {
                     uint64_t uncappedUsable = 0;
                     double   cappedTotal    = 0.0;
                     bool     anyNew        = false;
-                    for (int i = 0; i < config.numDirs; i++) {
-                        if (capped[i]) { cappedTotal += quota[i]; continue; }
-                        if (quota[i] >= (double)config.dirs[i].usableBytes) {
-                            quota[i] = (double)config.dirs[i].usableBytes;
-                            capped[i] = true; anyNew = true;
-                            cappedTotal += quota[i];
+                    for (int fi = 0; fi < fastDirCount; fi++) {
+                        uint64_t u = config.dirs[fastDirConfigIdx[fi]].usableBytes;
+                        if (capped[fi]) { cappedTotal += quota[fi]; continue; }
+                        if (quota[fi] >= (double)u) {
+                            quota[fi] = (double)u;
+                            capped[fi] = true; anyNew = true;
+                            cappedTotal += quota[fi];
                         } else {
-                            uncappedUsable += config.dirs[i].usableBytes;
+                            uncappedUsable += u;
                         }
                     }
                     if (!anyNew) break;
                     double remaining = (double)expectedBytes - cappedTotal;
                     if (remaining <= 0.0 || uncappedUsable == 0) break;
-                    for (int i = 0; i < config.numDirs; i++) {
-                        if (!capped[i])
-                            quota[i] = remaining * (double)config.dirs[i].usableBytes / (double)uncappedUsable;
+                    for (int fi = 0; fi < fastDirCount; fi++) {
+                        if (!capped[fi]) {
+                            uint64_t u = config.dirs[fastDirConfigIdx[fi]].usableBytes;
+                            quota[fi]  = remaining * (double)u / (double)uncappedUsable;
+                        }
                     }
                 }
 
                 LogPrintf("  Level %d: expected SlvGB=%.2f  MrgGB=%.2f  (from cache)\n",
                           level, ls->slvGB, ls->mrgGB);
             } else {
-                // No stats yet — allocate proportional to usable space.
-                for (int i = 0; i < config.numDirs; i++)
-                    quota[i] = (totalUsable > 0)
-                             ? (double)config.dirs[i].usableBytes : 1.0;
+                for (int fi = 0; fi < fastDirCount; fi++)
+                    quota[fi] = (totalUsable > 0)
+                               ? (double)config.dirs[fastDirConfigIdx[fi]].usableBytes : 1.0;
                 if (ls)
                     LogPrintf("  Level %d: expected SlvGB=%.2f  MrgGB=%.2f  (from cache)\n",
                               level, ls->slvGB, ls->mrgGB);
             }
 
-            // Convert quotas to integer weights for GPUPipeline.
+            // Convert quotas to integer weights for GPUPipeline (Fast dirs only).
             double totalQuota = 0.0;
-            for (int i = 0; i < config.numDirs; i++) totalQuota += quota[i];
+            for (int fi = 0; fi < fastDirCount; fi++) totalQuota += quota[fi];
             pipelineCfg.totalWeight = 0;
-            for (int i = 0; i < config.numDirs; i++) {
+            for (int fi = 0; fi < fastDirCount; fi++) {
                 int w = (totalQuota > 0.0)
-                      ? (int)(quota[i] / totalQuota * 100.0 + 0.5)
+                      ? (int)(quota[fi] / totalQuota * 100.0 + 0.5)
                       : 1;
                 if (w < 1) w = 1;
-                pipelineCfg.dirWeights[i] = w;
+                pipelineCfg.dirWeights[fi] = w;
                 pipelineCfg.totalWeight   += w;
             }
         }
@@ -1122,18 +1177,128 @@ int main(int argc, char* argv[])
 
         OLEFileRegistry  solveReg = {};
         OLEPipelineStats stats    = {};
-        if (!PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool))
-        {
+        RunFileRegistry  runReg   = {};   // accumulates run files from NVMe flushes this level
+
+        // ---- Flush monitor: runs alongside PipelineRun ----
+        // Checks each Fast dir every 5 s; flushes to the best Moderate dir when
+        // file count or free space threshold is hit.
+        std::thread flushThreads[OLE_MAX_SOLVE_DIRS];
+        std::atomic<bool> monitorDone{false};
+        static constexpr uint64_t kFastFreeThresh     = 250ULL * 1024 * 1024 * 1024;  // 250 GB
+        static constexpr uint64_t kModerateFreeThresh = 250ULL * 1024 * 1024 * 1024;  // 250 GB
+        std::atomic<int> nasInterimSeq{0};
+
+        std::thread monitorThread([&]() {
+            while (!monitorDone.load() && !g_shutdown.load()) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                if (monitorDone.load() || g_shutdown.load()) break;
+
+                for (int fi = 0; fi < fastDirCount; fi++) {
+                    if (!dirEnabled[fi].load()) continue;  // already flushing
+
+                    // Count solver files for this Fast dir.
+                    int fileCount = 0;
+                    {
+                        std::lock_guard<std::mutex> lk(solveReg.mu);
+                        for (const auto& fd : solveReg.files)
+                            if (fd.drive == fi) fileCount++;
+                    }
+
+                    uint64_t fastFree = GetDirFreeBytes(fastDirPaths[fi]);
+                    if (fileCount < safeFileLimit && fastFree >= kFastFreeThresh) continue;
+
+                    // Pick Moderate dir with most free space.
+                    const char* bestModDir = nullptr;
+                    uint64_t    bestModFree = 0;
+                    for (int mi = 0; mi < moderateDirCount; mi++) {
+                        uint64_t mf = GetDirFreeBytes(moderateDirPaths[mi]);
+                        if (mf > bestModFree) { bestModFree = mf; bestModDir = moderateDirPaths[mi]; }
+                    }
+
+                    // If Moderate is also nearly full, flush run files → NAS first.
+                    if (bestModDir && bestModFree < kModerateFreeThresh) {
+                        char nasInt[MAX_PATH];
+                        snprintf(nasInt, sizeof(nasInt), "%snvme_interim_L%02d_%06d.sf",
+                                 config.nasRunDir, level, nasInterimSeq.fetch_add(1));
+                        LogPrintf("  [FlushMon] Moderate near full — flushing %d run files to NAS: %s\n",
+                                  runReg.Size(), nasInt);
+                        if (!FlushRunFilesToNas(&runReg, nasInt, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
+                                                config.mergeBufBytesPerThread, safeFileLimit,
+                                                &g_shutdown))
+                            LogPrintf("  [FlushMon] WARNING: FlushRunFilesToNas failed.\n");
+                        // Re-query best Moderate dir after freeing space.
+                        bestModFree = 0; bestModDir = nullptr;
+                        for (int mi = 0; mi < moderateDirCount; mi++) {
+                            uint64_t mf = GetDirFreeBytes(moderateDirPaths[mi]);
+                            if (mf > bestModFree) { bestModFree = mf; bestModDir = moderateDirPaths[mi]; }
+                        }
+                    }
+
+                    if (!bestModDir) {
+                        LogPrintf("  [FlushMon] WARNING: no Moderate dir available for Fast dir %d.\n", fi);
+                        continue;
+                    }
+
+                    // Disable this dir in the pipeline and launch flush thread.
+                    dirEnabled[fi].store(false);
+                    LogPrintf("  [FlushMon] Flushing Fast dir %d (%s, files=%d, free=%.0f GB) → %s\n",
+                              fi, fastDirPaths[fi], fileCount,
+                              (double)fastFree / (1024.0*1024*1024), bestModDir);
+
+                    if (flushThreads[fi].joinable()) flushThreads[fi].join();
+                    const char* capturedModDir = bestModDir;
+                    flushThreads[fi] = std::thread([fi, capturedModDir, level, &solveReg, &runReg,
+                                                    &dirEnabled, &config, safeFileLimit, &g_shutdown]() {
+                        bool ok = FlushNvmeDir(fi, &solveReg, &runReg, capturedModDir, level,
+                                               config.mergeBufBytesPerThread, safeFileLimit,
+                                               &g_shutdown);
+                        if (!ok)
+                            printf("  [FlushMon] ERROR: FlushNvmeDir failed for Fast dir %d.\n", fi);
+                        dirEnabled[fi].store(true);
+                    });
+                }
+            }
+        });
+
+        bool pipelineOk = PipelineRun(&currentReg, &solveReg, &pipelineCfg, gpuInfo, &stats, &mergePool);
+
+        // Stop monitor and wait for all in-flight flush threads.
+        monitorDone.store(true);
+        monitorThread.join();
+        for (int fi = 0; fi < fastDirCount; fi++)
+            if (flushThreads[fi].joinable()) flushThreads[fi].join();
+        // Re-enable all dirs for the next level.
+        for (int fi = 0; fi < fastDirCount; fi++) dirEnabled[fi].store(true);
+
+        if (!pipelineOk) {
             LogPrintf("  ERROR: PipelineRun failed at level %d\n", level);
             break;
         }
 
         long long solveNs = ClockNanosSinceStart(&lvStart);
 
+        // Final flush: merge remaining solver files on each Fast dir → run files.
+        for (int fi = 0; fi < fastDirCount; fi++) {
+            int fileCount = 0;
+            {
+                std::lock_guard<std::mutex> lk(solveReg.mu);
+                for (const auto& fd : solveReg.files)
+                    if (fd.drive == fi) fileCount++;
+            }
+            if (fileCount == 0) continue;
+            const char* modDir = (moderateDirCount > 0) ? moderateDirPaths[0] : nullptr;
+            if (!modDir) { LogPrintf("  WARNING: no Moderate dir for final flush of Fast dir %d.\n", fi); continue; }
+            LogPrintf("  [FinalFlush] Flushing Fast dir %d (%d files) → %s\n", fi, fileCount, modDir);
+            FlushNvmeDir(fi, &solveReg, &runReg, modDir, level,
+                         config.mergeBufBytesPerThread, safeFileLimit, &g_shutdown);
+        }
+
         // Accumulate per-dir solve stats from the output registry.
+        // fd.drive is a Fast-dir index (0..fastDirCount-1); map to config.dirs via fastDirConfigIdx.
         for (const OLEFileDesc& fd : solveReg.files) {
-            int di = fd.drive;
-            if (di >= 0 && di < config.numDirs) {
+            int fi = fd.drive;
+            if (fi >= 0 && fi < fastDirCount) {
+                int di = fastDirConfigIdx[fi];
                 config.dirs[di].lvSlvFiles++;
                 config.dirs[di].lvSlvBytes += fd.recordCount * sizeof(BOARD_KEY);
             }
@@ -1164,23 +1329,43 @@ int main(int argc, char* argv[])
 
         uint64_t solveUniqueBoards = stats.uniqueBoards;
 
-        // Merge phase: consolidate solveReg → mergedReg (fully deduped, one file per drive).
+        // Merge phase: merge run files (on Moderate drives) → NAS final output.
+        // Fast drives are empty after the flush phase and serve as temp workspace.
         if (g_status) {
             g_status->phase        = OLE_PHASE_MERGE;
             g_status->phaseStartMs = GetTickCount64();
         }
         long long merge1Ns = 0, merge2Ns = 0;
-        FRClear(&mergedReg);
-        if (!MergePhaseRun(&solveReg, &mergedReg,
-                           dirPaths, config.numDirs,
-                           level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
-                           config.mergeBufBytesPerThread, &mergePool, g_status,
-                           config.nasRunDir, &merge1Ns, &merge2Ns, &g_shutdown))
+
+        // Convert RunFileRegistry → OLEFileRegistry for MergeRunFilesToNAS.
+        OLEFileRegistry runOleReg;
         {
-            LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
-            // Print partial row so solve stats (NewBoards, SlvFls, SlvGB) are preserved in the log.
-            // MrgDups and MrgGB are 0 because the merge did not complete.
-            long long partialNs  = ClockNanosSinceStart(&lvStart);
+            auto snap = runReg.Snapshot();
+            for (const auto& rfd : snap) {
+                OLEFileDesc fd = {};
+                strncpy_s(fd.path, rfd.path, sizeof(fd.path) - 1);
+                fd.drive = 0;
+                fd.recordCount = rfd.recordCount;
+                memcpy(fd.minKey, rfd.minKey, 24);
+                memcpy(fd.maxKey, rfd.maxKey, 24);
+                FRRegister(&runOleReg, fd);
+            }
+        }
+
+        auto tMergeStart = std::chrono::steady_clock::now();
+        FRClear(&mergedReg);
+        if (!MergeRunFilesToNAS(&runOleReg, config.nasRunDir,
+                                fastDirPaths, fastDirCount,
+                                level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
+                                config.mergeBufBytesPerThread,
+                                /*deleteRunFiles=*/true,
+                                &mergedReg, g_status, &g_shutdown))
+        {
+            LogPrintf("  ERROR: MergeRunFilesToNAS failed at level %d\n", level);
+            long long partialNs = ClockNanosSinceStart(&lvStart);
+            auto tMergeEnd = std::chrono::steady_clock::now();
+            merge2Ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           tMergeEnd - tMergeStart).count();
             LevelRecord partial  = {};
             partial.level        = level;
             partial.boardsIn     = stats.boardsIn + stats.passBoards;
@@ -1204,18 +1389,18 @@ int main(int argc, char* argv[])
             LogPrintf("\n");
             break;
         }
+        {
+            auto tMergeEnd = std::chrono::steady_clock::now();
+            merge2Ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           tMergeEnd - tMergeStart).count();
+        }
 
         // Checkpoint: persist merged registry.
         FRSave(&mergedReg, mergeMeta);
 
-        // Accumulate per-dir merge stats (partition index == dir index).
-        for (const OLEFileDesc& fd : mergedReg.files) {
-            int di = fd.drive;
-            if (di >= 0 && di < config.numDirs)
-                config.dirs[di].lvMrgBytes += fd.recordCount * sizeof(BOARD_KEY);
-        }
-
-        // Delete intermediate solve files — merge files are now the canonical set.
+        // Run files were deleted by MergeRunFilesToNAS (deleteRunFiles=true).
+        // Any remaining solver files in solveReg were already deleted by FlushNvmeDir.
+        // Clean up any stragglers (harmless remove() on non-existent files).
         for (const OLEFileDesc& fd : solveReg.files)
             remove(fd.path);
 
@@ -1259,7 +1444,7 @@ int main(int argc, char* argv[])
                 strncpy_s(rcd.dirPaths[ci], sizeof(rcd.dirPaths[ci]),
                           config.dirs[ci].path, _TRUNCATE);
                 rcd.dirDriveLetters[ci] = config.dirs[ci].driveLetter;
-                rcd.dirIsNvme[ci]       = config.dirs[ci].isNvme;
+                rcd.dirDriveClass[ci]   = (int)config.dirs[ci].driveClass;
                 rcd.dirWriteMBs[ci]     = config.dirs[ci].writeMBs;
                 rcd.dirReadMBs[ci]      = config.dirs[ci].readMBs;
                 rcd.dirUsableBytes[ci]  = config.dirs[ci].usableBytes;

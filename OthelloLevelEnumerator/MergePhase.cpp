@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <thread>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -57,13 +58,26 @@ static void ComputePivots(
     std::vector<std::vector<uint8_t>> samples;
     std::vector<uint8_t> rec(recordSize);
 
+    // Count non-empty files and total records so samples can be
+    // distributed proportionally (equal sampling biases pivots toward
+    // small intermediates which are overrepresented relative to their data).
+    int      numIntermFiles = 0;
+    uint64_t totalRecords   = 0;
+    for (const auto& fd : srcReg->files)
+        if (fd.recordCount > 0) { numIntermFiles++; totalRecords += fd.recordCount; }
+    if (totalRecords == 0 || numIntermFiles == 0) return;
+
     for (const auto& fd : srcReg->files) {
         if (fd.recordCount == 0) continue;
         FILE* f = nullptr;
         if (fopen_s(&f, fd.path, "rb") != 0 || !f) continue;
 
         uint64_t count = fd.recordCount;
-        int n = (int)std::min((uint64_t)SAMPLES_PER_FILE, count);
+        // Proportional sample count: each file's share of the total budget.
+        // max(1) ensures even tiny files contribute at least one boundary sample.
+        int n = (int)std::max(1ULL,
+                    (uint64_t)SAMPLES_PER_FILE * numIntermFiles * count / totalRecords);
+        n = (int)std::min((uint64_t)n, count);
 
         for (int j = 0; j < n; j++) {
             uint64_t pos    = (uint64_t)j * count / n;
@@ -823,6 +837,340 @@ bool MergePhaseRun(
         auto tPhase2End = std::chrono::steady_clock::now();
         *phase2NsOut = std::chrono::duration_cast<std::chrono::nanoseconds>(tPhase2End - tPhase2Start).count();
     }
+
+    if (statusBlock) statusBlock->mergePartsDone = numParts;
+    return allOk;
+}
+
+// ---------------------------------------------------------------------------
+// MergeFilesOnePass — internal
+//
+// Single-pass k-way heap merge of srcPaths into outputPath.
+// Caller guarantees srcPaths.size() <= safeFileLimit (handle budget).
+// ---------------------------------------------------------------------------
+static bool MergeFilesOnePass(
+    const std::vector<std::string>& srcPaths,
+    const char*                     outputPath,
+    uint32_t                        recordSize,
+    uint32_t                        keySize,
+    size_t                          bufBytes,
+    bool                            deleteSrcsOnSuccess,
+    OLEFileDesc*                    outDesc,
+    const std::atomic<bool>*        shutdown)
+{
+    memset(outDesc, 0, sizeof(*outDesc));
+    strncpy_s(outDesc->path, outputPath, sizeof(outDesc->path) - 1);
+
+    if (srcPaths.empty()) return true;
+
+    size_t outBufBytes = std::max(bufBytes / 5, (size_t)(4ULL * 1024 * 1024));
+    size_t inBufEach   = std::max((bufBytes - outBufBytes) / srcPaths.size(),
+                                   (size_t)(256ULL * 1024));
+
+    std::vector<PreMergeSrc> srcs(srcPaths.size());
+    bool openOk = true;
+    for (int i = 0; i < (int)srcPaths.size() && openOk; i++) {
+        srcs[i].curRec.resize(recordSize);
+        srcs[i].dsIdx  = -1;
+        srcs[i].reader = SFReaderOpen(srcPaths[i].c_str(), inBufEach);
+        if (!srcs[i].reader) {
+            int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+            Error(FATAL_FILE_OPEN, "MergeFilesToOne: SFReaderOpen failed: %s (errno=%d: %s)",
+                  srcPaths[i].c_str(), e, eb);
+            ErrorPrint(stderr);
+            for (int j = 0; j < i; j++) if (srcs[j].reader) SFReaderClose(&srcs[j].reader);
+            openOk = false;
+        }
+    }
+    if (!openOk) return false;
+
+    std::vector<int> heap;
+    heap.reserve(srcs.size());
+    for (int i = 0; i < (int)srcs.size(); i++) {
+        if (SFReaderNext(srcs[i].reader, srcs[i].curRec.data(), 1) == 1)
+            PMHeapPush(heap, srcs, keySize, i);
+        else
+            SFReaderClose(&srcs[i].reader);
+    }
+
+    FILE* outFile = nullptr;
+    if (fopen_s(&outFile, outputPath, "wb") != 0 || !outFile) {
+        int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
+        for (auto& s : srcs) if (s.reader) SFReaderClose(&s.reader);
+        Error(FATAL_FILE_OPEN, "MergeFilesToOne: cannot open output: %s (errno=%d: %s)",
+              outputPath, e, eb);
+        ErrorPrint(stderr);
+        return false;
+    }
+
+    SortedFileHeader hdr = {};
+    hdr.recordSize = recordSize;
+    hdr.keySize    = keySize;
+    fwrite(&hdr, sizeof(hdr), 1, outFile);
+
+    std::vector<uint8_t> outBuf(outBufBytes);
+    std::vector<uint8_t> lastKey(keySize, 0x00);
+    size_t   outPos       = 0;
+    uint64_t written      = 0;
+    bool     hasLast      = false;
+    bool     ok           = true;
+    bool     wasShutdown  = false;
+    uint64_t loopCount    = 0;
+    uint8_t  minKey24[24] = {}, maxKey24[24] = {};
+    size_t   cpyLen       = (keySize < 24) ? (size_t)keySize : 24;
+
+    auto flushOut = [&]() -> bool {
+        if (outPos == 0) return true;
+        bool r = fwrite(outBuf.data(), 1, outPos, outFile) == outPos;
+        outPos = 0;
+        return r;
+    };
+
+    while (ok && !heap.empty()) {
+        if ((++loopCount & 0xFFFFF) == 0 && shutdown && shutdown->load()) {
+            ok = false; wasShutdown = true; break;
+        }
+        int minIdx = heap[0];
+        PMHeapPop(heap, srcs, keySize);
+
+        const uint8_t* rec = srcs[minIdx].curRec.data();
+        if (!hasLast || memcmp(rec, lastKey.data(), keySize) != 0) {
+            memcpy(lastKey.data(), rec, keySize);
+            hasLast = true;
+            if (outPos + recordSize > outBufBytes) ok = flushOut();
+            if (ok) {
+                memcpy(outBuf.data() + outPos, rec, recordSize);
+                outPos += recordSize;
+                if (written == 0) memcpy(minKey24, rec, cpyLen);
+                memcpy(maxKey24, rec, cpyLen);
+                written++;
+            }
+        }
+        if (SFReaderNext(srcs[minIdx].reader, srcs[minIdx].curRec.data(), 1) == 1)
+            PMHeapPush(heap, srcs, keySize, minIdx);
+        else
+            SFReaderClose(&srcs[minIdx].reader);
+    }
+
+    for (auto& s : srcs) if (s.reader) SFReaderClose(&s.reader);
+    if (ok) ok = flushOut();
+
+    // Rewrite header with final counts.
+    if (ok) {
+        hdr.recordCount = written;
+        memcpy(hdr.minKey, minKey24, 24);
+        memcpy(hdr.maxKey, maxKey24, 24);
+        _fseeki64(outFile, 0, SEEK_SET);
+        ok = fwrite(&hdr, sizeof(hdr), 1, outFile) == 1;
+    }
+    fclose(outFile);
+
+    if (!ok || wasShutdown) { remove(outputPath); return false; }
+
+    if (deleteSrcsOnSuccess)
+        for (const auto& p : srcPaths) remove(p.c_str());
+
+    outDesc->recordCount = written;
+    memcpy(outDesc->minKey, minKey24, 24);
+    memcpy(outDesc->maxKey, maxKey24, 24);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// MergeFilesToOne — exported
+// ---------------------------------------------------------------------------
+static std::atomic<int> s_mergeFilesSeq{0};
+
+bool MergeFilesToOne(
+    const std::vector<std::string>& srcPaths,
+    const char*                     outputPath,
+    const char*                     tempDir,
+    uint32_t                        recordSize,
+    uint32_t                        keySize,
+    size_t                          bufBytes,
+    int                             safeFileLimit,
+    bool                            deleteSrcsOnSuccess,
+    OLEFileDesc*                    outDesc,
+    const std::atomic<bool>*        shutdown)
+{
+    memset(outDesc, 0, sizeof(*outDesc));
+    strncpy_s(outDesc->path, outputPath, sizeof(outDesc->path) - 1);
+
+    if (srcPaths.empty()) return true;
+
+    if ((int)srcPaths.size() <= safeFileLimit)
+        return MergeFilesOnePass(srcPaths, outputPath, recordSize, keySize,
+                                 bufBytes, deleteSrcsOnSuccess, outDesc, shutdown);
+
+    // Multi-pass: merge batches → temp files in tempDir, then merge temps → output.
+    int batchSize = std::max(1, safeFileLimit - 1);
+    std::vector<std::string> tempPaths;
+
+    for (int i = 0; i < (int)srcPaths.size(); i += batchSize) {
+        int end = std::min(i + batchSize, (int)srcPaths.size());
+        std::vector<std::string> batch(srcPaths.begin() + i, srcPaths.begin() + end);
+
+        char tempPath[512];
+        snprintf(tempPath, sizeof(tempPath), "%smerge_tmp_%06d.sf",
+                 tempDir, s_mergeFilesSeq.fetch_add(1));
+
+        OLEFileDesc tmpDesc = {};
+        if (!MergeFilesOnePass(batch, tempPath, recordSize, keySize,
+                               bufBytes, deleteSrcsOnSuccess, &tmpDesc, shutdown)) {
+            for (const auto& tp : tempPaths) remove(tp.c_str());
+            return false;
+        }
+        if (tmpDesc.recordCount > 0)
+            tempPaths.push_back(tempPath);
+        else
+            remove(tempPath);
+    }
+
+    if (tempPaths.empty()) return true;  // all inputs were empty
+
+    // Final merge of temp files → outputPath (temps deleted after).
+    bool ok = MergeFilesOnePass(tempPaths, outputPath, recordSize, keySize,
+                                 bufBytes, true, outDesc, shutdown);
+    if (!ok)
+        for (const auto& tp : tempPaths) remove(tp.c_str());
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// CopyFileRaw — copy src → dst using a streaming buffer (no headers skipped).
+// ---------------------------------------------------------------------------
+static bool CopyFileRaw(const char* srcPath, const char* dstPath, size_t bufBytes)
+{
+    bufBytes = std::max(bufBytes, (size_t)(4ULL * 1024 * 1024));
+    FILE* src = nullptr;
+    FILE* dst = nullptr;
+    if (fopen_s(&src, srcPath, "rb") != 0 || !src) return false;
+    if (fopen_s(&dst, dstPath, "wb") != 0 || !dst) { fclose(src); return false; }
+    std::vector<uint8_t> buf(bufBytes);
+    bool ok = true;
+    size_t n;
+    while ((n = fread(buf.data(), 1, bufBytes, src)) > 0) {
+        if (fwrite(buf.data(), 1, n, dst) != n) { ok = false; break; }
+    }
+    fclose(src);
+    fclose(dst);
+    if (!ok) remove(dstPath);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// MergeRunFilesToNAS
+// ---------------------------------------------------------------------------
+bool MergeRunFilesToNAS(
+    const OLEFileRegistry*   runReg,
+    const char*              nasOutputDir,
+    const char* const*       fastTempDirs,
+    int                      numFastTempDirs,
+    int                      level,
+    uint32_t                 recordSize,
+    uint32_t                 keySize,
+    size_t                   bufBytes,
+    bool                     deleteRunFiles,
+    OLEFileRegistry*         dstReg,
+    OLEStatusBlock*          statusBlock,
+    const std::atomic<bool>* shutdown)
+{
+    if (!runReg || runReg->files.empty()) return true;
+    if (numFastTempDirs < 1 || !fastTempDirs) return false;
+
+    // Build flat source list from run registry.
+    std::vector<const OLEFileDesc*> srcFiles;
+    srcFiles.reserve(runReg->files.size());
+    for (const auto& fd : runReg->files)
+        if (fd.recordCount > 0) srcFiles.push_back(&fd);
+    if (srcFiles.empty()) return true;
+
+    // Compute pivot ranges — one output partition per Fast temp dir.
+    int numParts = numFastTempDirs;
+    std::vector<std::vector<uint8_t>> pivots;
+    ComputePivots(runReg, numParts, keySize, recordSize, pivots);
+
+    // Delete state: nullptr = don't delete run files during partition merges;
+    // we delete them explicitly after all partitions complete (if requested).
+    MergeDeleteState ds;
+    ds.counts   = std::unique_ptr<std::atomic<int>[]>(new std::atomic<int>[(int)srcFiles.size()]());
+    ds.numParts = deleteRunFiles ? numParts : 0;
+    ds.numFiles = (int)srcFiles.size();
+    ds.srcFiles = &srcFiles;
+    ds.status   = statusBlock;
+
+    size_t p2BufBytes = std::max(bufBytes, (size_t)(4ULL * 1024 * 1024));
+    size_t copyBuf    = std::max(bufBytes / 2, (size_t)(256ULL * 1024 * 1024));
+
+    bool allOk = true;
+
+    // Pipelined: merge partition k to Fast temp, launch NAS copy in background,
+    // merge partition k+1 while NAS copy for k runs, join copy before next copy.
+    std::thread nasCopyThread;
+    std::string pendingTempPath;
+    bool        copyOk = true;
+
+    auto joinPendingCopy = [&]() {
+        if (nasCopyThread.joinable()) {
+            nasCopyThread.join();
+            if (!pendingTempPath.empty()) {
+                remove(pendingTempPath.c_str());
+                pendingTempPath.clear();
+            }
+        }
+    };
+
+    for (int k = 0; k < numParts && allOk; k++) {
+        if (shutdown && shutdown->load()) { allOk = false; break; }
+
+        const char* tempDir = fastTempDirs[k % numFastTempDirs];
+        char tempPath[512];
+        snprintf(tempPath, sizeof(tempPath), "%sole_ph2tmp_L%02d_D%d.sf", tempDir, level, k);
+        char nasPath[512];
+        snprintf(nasPath,  sizeof(nasPath),  "%sole_merge_L%02d_D%d.sf",  nasOutputDir, level, k);
+
+        // Merge this pivot range → Fast temp file.
+        OLEFileRegistry tmpDstReg;
+        allOk = RunMergePartition(k, srcFiles, pivots[k], pivots[k + 1],
+                                  tempDir, level, recordSize, keySize,
+                                  p2BufBytes, &tmpDstReg,
+                                  deleteRunFiles ? &ds : nullptr,
+                                  shutdown);
+        if (!allOk) break;
+
+        // Read temp file metadata before handing it to the copy thread.
+        OLEFileDesc nasDesc = {};
+        strncpy_s(nasDesc.path, nasPath, sizeof(nasDesc.path) - 1);
+        {
+            SortedFileReader* r = SFReaderOpen(tempPath, 256ULL * 1024);
+            if (r) {
+                const SortedFileHeader* h = SFReaderHeader(r);
+                nasDesc.recordCount = h->recordCount;
+                memcpy(nasDesc.minKey, h->minKey, 24);
+                memcpy(nasDesc.maxKey, h->maxKey, 24);
+                SFReaderClose(&r);
+            }
+        }
+
+        // Wait for the previous NAS copy to finish (single NAS stream at a time).
+        joinPendingCopy();
+        if (!copyOk) { allOk = false; remove(tempPath); break; }
+
+        // Register the NAS output file (data lands there once copy completes).
+        if (nasDesc.recordCount > 0)
+            FRRegister(dstReg, nasDesc);
+
+        // Launch NAS copy in background; next partition merge overlaps with it.
+        std::string tp = tempPath;
+        std::string np = nasPath;
+        pendingTempPath = tp;
+        nasCopyThread   = std::thread([tp, np, copyBuf, &copyOk]() {
+            if (!CopyFileRaw(tp.c_str(), np.c_str(), copyBuf)) copyOk = false;
+        });
+    }
+
+    joinPendingCopy();
+    if (!copyOk) allOk = false;
 
     if (statusBlock) statusBlock->mergePartsDone = numParts;
     return allOk;

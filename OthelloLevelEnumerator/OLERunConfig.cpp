@@ -27,11 +27,11 @@ bool OLERunConfigWrite(const char* path, const OLERunConfigData& d)
     fprintf(f, "  \"dirs\": [\n");
     for (int i = 0; i < d.numDirs; i++) {
         fprintf(f, "    { \"path\": \"%s\", \"drive\": \"%c\","
-                   " \"nvme\": %s, \"writeMBs\": %.1f,"
+                   " \"driveClass\": %d, \"writeMBs\": %.1f,"
                    " \"readMBs\": %.1f, \"usableBytes\": %llu }%s\n",
                 d.dirPaths[i],
                 d.dirDriveLetters[i],
-                d.dirIsNvme[i] ? "true" : "false",
+                d.dirDriveClass[i],
                 d.dirWriteMBs[i],
                 d.dirReadMBs[i],
                 (unsigned long long)d.dirUsableBytes[i],
@@ -138,7 +138,12 @@ bool OLERunConfigRead(const char* path, OLERunConfigData& d)
                 char driveTmp[4] = {};
                 ParseString(line, "\"drive\"",      driveTmp,              sizeof(driveTmp));
                 d.dirDriveLetters[dirIdx] = driveTmp[0];
-                ParseBool(line,   "\"nvme\"",       d.dirIsNvme[dirIdx]);
+                ParseInt(line,    "\"driveClass\"", d.dirDriveClass[dirIdx]);
+                // Backward compat: old configs have "nvme": true/false instead of driveClass.
+                // If driveClass key absent (stays 0=Fast), check for nvme bool and convert.
+                bool legacyNvme = false;
+                if (ParseBool(line, "\"nvme\"", legacyNvme) && !strstr(line, "\"driveClass\""))
+                    d.dirDriveClass[dirIdx] = legacyNvme ? 0 : 1; // Fast or Moderate
                 ParseDouble(line, "\"writeMBs\"",   d.dirWriteMBs[dirIdx]);
                 ParseDouble(line, "\"readMBs\"",    d.dirReadMBs[dirIdx]);
                 ParseInt64(line,  "\"usableBytes\"",d.dirUsableBytes[dirIdx]);

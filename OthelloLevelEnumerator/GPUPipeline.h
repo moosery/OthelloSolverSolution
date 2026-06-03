@@ -21,6 +21,11 @@ struct OLEPipelineConfig {
     int         numOutputDirs;
     int         dirWeights[32];      // capacity-proportional routing weights per dir
     int         totalWeight;         // sum of dirWeights; 0 = equal round-robin
+    // Per-dir routing enable flags.  Set to false while a dir is being flushed;
+    // PipelineRun will skip that dir in routing and spin-wait if all are disabled.
+    // Must point to an array of at least numOutputDirs atomics (caller owns storage).
+    // nullptr = all dirs always enabled.
+    std::atomic<bool>* dirEnabled;
     OLEStatusBlock* statusBlock;     // optional live status (nullptr = disabled)
     const std::atomic<bool>* shutdown; // optional graceful-stop flag (nullptr = disabled);
                                        // PipelineRun checks after each batch and exits early

@@ -73,17 +73,31 @@ static std::unique_ptr<WriteJob> StartFlushBuffer(
     stats->uniqueBoards += got;
 
     // Determine output path: weighted round-robin if weights set, else equal.
+    // Skip dirs that are currently disabled (being flushed); spin-wait if all disabled.
     int drive;
-    if (cfg->totalWeight > 0) {
-        int slot = driveIdx % cfg->totalWeight;
-        drive = 0;
-        int cum = 0;
-        for (int i = 0; i < cfg->numOutputDirs; i++) {
-            cum += cfg->dirWeights[i];
-            if (slot < cum) { drive = i; break; }
+    for (;;) {
+        if (cfg->totalWeight > 0) {
+            int slot = driveIdx % cfg->totalWeight;
+            drive = 0;
+            int cum = 0;
+            for (int i = 0; i < cfg->numOutputDirs; i++) {
+                cum += cfg->dirWeights[i];
+                if (slot < cum) { drive = i; break; }
+            }
+        } else {
+            drive = driveIdx % cfg->numOutputDirs;
         }
-    } else {
-        drive = driveIdx % cfg->numOutputDirs;
+        // If dirEnabled is set and this dir is disabled, advance and retry.
+        if (!cfg->dirEnabled || cfg->dirEnabled[drive].load()) break;
+        // Check if any dir is enabled before spinning.
+        bool anyEnabled = false;
+        for (int i = 0; i < cfg->numOutputDirs; i++)
+            if (cfg->dirEnabled[i].load()) { anyEnabled = true; break; }
+        if (!anyEnabled) {
+            // All dirs disabled — spin-wait briefly then retry the whole selection.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        driveIdx++;
     }
     char pathBuf[512];
     MakeOutputPath(pathBuf, sizeof(pathBuf), cfg->outputDirs[drive], cfg->level,

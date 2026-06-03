@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <atomic>
+#include <vector>
+#include <string>
 
 class ThreadPool;
 struct OLEStatusBlock;   // defined in OLEStatus.h
@@ -16,6 +18,58 @@ struct OLEStatusBlock;   // defined in OLEStatus.h
 //             partitioned output files written directly to nasRunDir (if non-null/
 //             non-empty) or to outputDirs[i] otherwise.
 // statusBlock is optional (nullptr = disabled); updated live during the merge.
+// ---------------------------------------------------------------------------
+// MergeFilesToOne
+//
+// Merges srcPaths (each a individually sorted+deduped .sf file) into a single
+// sorted+deduped output file at outputPath.
+// Multi-pass: if srcPaths.size() > safeFileLimit, merges in batches writing
+// temp files to tempDir, then does a final merge of the temps.
+// Deletes all srcPaths from disk on success if deleteSrcsOnSuccess is true.
+// outDesc is filled with the resulting file's metadata on success.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// MergeRunFilesToNAS
+//
+// New Ph2: k-way merges all run files in runReg (on Moderate drives / NAS)
+// into final sorted output on the NAS.  Writes each pivot-range partition to
+// a Fast-dir temp file first (NVMe speed), then pipelines the NAS copy with
+// the next partition's merge — keeping the NAS write off the critical path.
+//
+// runReg       : sorted run files produced by FlushNvmeDir (Ph0/Ph1 flushes)
+// nasOutputDir : destination directory for final .sf output files (trailing \)
+// fastTempDirs : Fast dirs used as temp workspace for partition files
+// numFastTempDirs : number of Fast dirs available for temp files
+// level        : BFS level (used for file naming)
+// dstReg       : receives final NAS output file descriptors (for next BFS level)
+// deleteRunFiles : if true, delete run files from Moderate drives after merge
+// ---------------------------------------------------------------------------
+bool MergeRunFilesToNAS(
+    const OLEFileRegistry*   runReg,
+    const char*              nasOutputDir,
+    const char* const*       fastTempDirs,
+    int                      numFastTempDirs,
+    int                      level,
+    uint32_t                 recordSize,
+    uint32_t                 keySize,
+    size_t                   bufBytes,
+    bool                     deleteRunFiles,
+    OLEFileRegistry*         dstReg,
+    OLEStatusBlock*          statusBlock,
+    const std::atomic<bool>* shutdown        = nullptr);
+
+bool MergeFilesToOne(
+    const std::vector<std::string>&  srcPaths,
+    const char*                      outputPath,
+    const char*                      tempDir,
+    uint32_t                         recordSize,
+    uint32_t                         keySize,
+    size_t                           bufBytes,
+    int                              safeFileLimit,
+    bool                             deleteSrcsOnSuccess,
+    OLEFileDesc*                     outDesc,
+    const std::atomic<bool>*         shutdown = nullptr);
+
 bool MergePhaseRun(
     const OLEFileRegistry* srcReg,
     OLEFileRegistry*       dstReg,

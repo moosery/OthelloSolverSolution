@@ -159,6 +159,7 @@
     <ClCompile Include="FileRegistry.cpp" />
     <ClCompile Include="GPUPipeline.cpp" />
     <ClCompile Include="MergePhase.cpp" />
+    <ClCompile Include="NVMeFlush.cpp" />
     <ClCompile Include="OLEBenchmark.cpp" />
     <ClCompile Include="OLECache.cpp" />
     <ClCompile Include="OLEDriveDetect.cpp" />
@@ -174,6 +175,7 @@
     <ClInclude Include="FileRegistry.h" />
     <ClInclude Include="GPUPipeline.h" />
     <ClInclude Include="MergePhase.h" />
+    <ClInclude Include="NVMeFlush.h" />
     <ClInclude Include="OLEBenchmark.h" />
     <ClInclude Include="OLECache.h" />
     <ClInclude Include="OLEDriveDetect.h" />
