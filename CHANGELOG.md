@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.3.5] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — NAS drive was re-benchmarked on every run because the NAS benchmark call was outside the cache-check loop that covered local drives; NAS is now cached in `benchmark_cache.json` using drive letter + empty serial (network drives have no serial number); subsequent runs show `[cached]` and skip the 5-pass NAS benchmark entirely; `--force-benchmark` clears it along with all other entries
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.5
+
 ## [OLE v0.3.4] - 2026-06-03
 
 ### Fixed

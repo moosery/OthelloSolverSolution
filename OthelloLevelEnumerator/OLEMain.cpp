@@ -33,7 +33,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.3.4"
+#define APP_VERSION "0.3.5"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -637,8 +637,29 @@ int main(int argc, char* argv[])
             }
         }
         if (config.nasDrive != '\0') {
-            printf("    Benchmarking NAS (%c:)...\n", config.nasDrive);
-            OLEBenchmarkDrive(config.nasDrive, 256ULL*1024*1024, 5, 0.15, 1, true);
+            // NAS has no serial (network drive) — key by letter + empty serial.
+            const OLEBenchCacheEntry* nasCached = nullptr;
+            if (!config.forceBenchmark)
+                nasCached = OLEBenchCacheLookup(benchCache, numBenchCache, config.nasDrive, "");
+            if (nasCached) {
+                printf("    %c:  [cached %s]  Write=%.0f MB/s  Read=%.0f MB/s\n",
+                       config.nasDrive, nasCached->timestamp,
+                       nasCached->writeMBs, nasCached->readMBs);
+            } else {
+                printf("    Benchmarking NAS (%c:)...\n", config.nasDrive);
+                OLEDriveBenchResult nasRes = OLEBenchmarkDrive(
+                    config.nasDrive, 256ULL*1024*1024, 5, 0.10, 1, true);
+                if (nasRes.success && numBenchCache < 64) {
+                    int j = numBenchCache++;
+                    benchCache[j].driveLetter = config.nasDrive;
+                    benchCache[j].serial[0]   = '\0';
+                    benchCache[j].optimalDirs  = nasRes.optimalDirs;
+                    benchCache[j].writeMBs     = nasRes.writeMBs;
+                    benchCache[j].readMBs      = nasRes.readMBs;
+                    GetTimestampStr(benchCache[j].timestamp, sizeof(benchCache[j].timestamp));
+                    benchCacheUpdated = true;
+                }
+            }
         }
         if (benchCacheUpdated)
             OLEBenchCacheWrite(config.cacheDir, benchCache, numBenchCache);
