@@ -33,7 +33,7 @@
 #include "MergePhase.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.3.1"
+#define APP_VERSION "0.3.2"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -417,10 +417,10 @@ static void PrintLevelRow(const LevelRecord& r)
 
 static void PrintDirSubRows(const OLEDirDesc* dirs, int numDirs, bool showMrg)
 {
-    double totalSlvGB = 0.0;
+    uint64_t totalSlvFiles = 0;
     for (int i = 0; i < numDirs; i++)
-        totalSlvGB += (double)dirs[i].lvSlvBytes / (1024.0 * 1024 * 1024);
-    if (totalSlvGB < 0.10) return;
+        totalSlvFiles += dirs[i].lvSlvFiles;
+    if (totalSlvFiles == 0) return;
 
     for (int i = 0; i < numDirs; i++) {
         double slvGB = (double)dirs[i].lvSlvBytes / (1024.0 * 1024 * 1024);
@@ -1077,6 +1077,7 @@ int main(int argc, char* argv[])
             PrintLevelHeader();
             PrintLevelRow(partial);
             PrintDirSubRows(config.dirs, config.numDirs, false);
+            LogPrintf("\n");
             break;
         }
 
@@ -1093,7 +1094,7 @@ int main(int argc, char* argv[])
                            dirPaths, config.numDirs,
                            level, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
                            config.mergeBufBytesPerThread, &mergePool, g_status,
-                           config.nasRunDir, &merge1Ns, &merge2Ns))
+                           config.nasRunDir, &merge1Ns, &merge2Ns, &g_shutdown))
         {
             LogPrintf("  ERROR: MergePhaseRun failed at level %d -- check stderr for details\n", level);
             // Print partial row so solve stats (NewBoards, SlvFls, SlvGB) are preserved in the log.
@@ -1119,6 +1120,7 @@ int main(int argc, char* argv[])
             PrintLevelHeader();
             PrintLevelRow(partial);
             PrintDirSubRows(config.dirs, config.numDirs, false);
+            LogPrintf("\n");
             break;
         }
 
@@ -1199,6 +1201,7 @@ int main(int argc, char* argv[])
                                                 totalSlvGB, totalMrgGB);
             OLELevelStatsWrite(config.cacheDir, levelStats, numLevelStats);
         }
+        LogPrintf("\n");
 
         if (g_status) {
             g_status->lastLevel        = level;

@@ -2,6 +2,7 @@
 #include "FileRegistry.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <atomic>
 
 class ThreadPool;
 struct OLEStatusBlock;   // defined in OLEStatus.h
@@ -25,7 +26,8 @@ bool MergePhaseRun(
     uint32_t               keySize,
     size_t                 mergeBufBytesPerThread,
     ThreadPool*            pool,
-    OLEStatusBlock*        statusBlock = nullptr,
-    const char*            nasRunDir   = nullptr,
-    int64_t*               phase1NsOut = nullptr,
-    int64_t*               phase2NsOut = nullptr);
+    OLEStatusBlock*          statusBlock = nullptr,
+    const char*              nasRunDir   = nullptr,
+    int64_t*                 phase1NsOut = nullptr,
+    int64_t*                 phase2NsOut = nullptr,
+    const std::atomic<bool>* shutdown    = nullptr);

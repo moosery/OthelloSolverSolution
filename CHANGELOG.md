@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.3.2] - 2026-06-03
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — Ctrl+C during the merge phase was silently ignored; the graceful-shutdown flag was only checked by `PipelineRun` (solve phase), so pressing Ctrl+C while Ph1 or Ph2 was running would leave the process grinding for minutes (Ph2 at level 13 took ~338 s); `MergePhaseRun`, `RunPreMergeDir`, and `RunMergePartition` now accept a `const std::atomic<bool>* shutdown` parameter and check it every ~1 million loop iterations (~24 MB of records); on detection the merge loop breaks, the partial output file is deleted, and the function returns false — flowing into the existing partial-row / abort path in `OLEMain`; worst-case response time is ~1 s on NVMe and ~1 s on NAS; a between-phase check after Ph1 completes also catches shutdown before Ph2 starts; error logging is suppressed on clean shutdown so the only output is the existing partial-level row
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.3.2
+
 ## [OLE v0.3.1] - 2026-06-03
 
 ### Fixed

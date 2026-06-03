@@ -144,7 +144,8 @@ static bool RunMergePartition(
     uint32_t                               keySize,
     size_t                                 bufBytes,
     OLEFileRegistry*                       dstReg,
-    MergeDeleteState*                      ds)
+    MergeDeleteState*                      ds,
+    const std::atomic<bool>*               shutdown)
 {
     // --- Open readers and locate each file's slice ---
     std::vector<SourceState> sources;
@@ -222,10 +223,16 @@ static bool RunMergePartition(
     };
     uint8_t minKey24[24] = {}, maxKey24[24] = {};
     size_t  cpyLen  = (keySize < 24) ? (size_t)keySize : 24;
-    bool    ok      = true;
-    int     nActive = (int)sources.size();
+    bool     ok           = true;
+    bool     wasShutdown  = false;
+    int      nActive      = (int)sources.size();
+    uint64_t loopCount    = 0;
 
     while (ok && nActive > 0) {
+        // Check for graceful shutdown every ~1M iterations (~24 MB of records).
+        if ((++loopCount & 0xFFFFF) == 0 && shutdown && shutdown->load()) {
+            ok = false; wasShutdown = true; break;
+        }
         // Linear-scan minimum — O(M) per record; Phase 2 has ≤5 sources so cost is trivial.
         int minIdx = -1;
         for (int i = 0; i < (int)sources.size(); i++) {
@@ -288,7 +295,15 @@ static bool RunMergePartition(
     int lastErrno = ok ? 0 : errno;
     fclose(outFile);
 
-    if (!ok) { char eb[64]; strerror_s(eb, sizeof(eb), lastErrno); Error(FATAL_FILE_OPEN, "MergePhase P2: write failed: %s (errno=%d: %s)", outPath, lastErrno, eb); ErrorPrint(stderr); return false; }
+    if (!ok) {
+        remove(outPath);
+        if (!wasShutdown) {
+            char eb[64]; strerror_s(eb, sizeof(eb), lastErrno);
+            Error(FATAL_FILE_OPEN, "MergePhase P2: write failed: %s (errno=%d: %s)", outPath, lastErrno, eb);
+            ErrorPrint(stderr);
+        }
+        return false;
+    }
 
     if (statusBlk && partIdx < OLE_STATUS_MAX_PARTS) {
         statusBlk->mergeRecordsWritten[partIdx] = written;
@@ -414,7 +429,8 @@ static bool RunPreMergeDir(
     FileSemaphore&                   sem,
     MergeDeleteState*                ds,
     OLEFileDesc*                     outDesc,
-    OLEStatusBlock*                  statusBlock)
+    OLEStatusBlock*                  statusBlock,
+    const std::atomic<bool>*         shutdown)
 {
     memset(outDesc, 0, sizeof(*outDesc));
     outDesc->drive = dirIdx;
@@ -514,8 +530,9 @@ static bool RunPreMergeDir(
         char outPath[512];
         snprintf(outPath, sizeof(outPath), "%sole_pre_L%02d_D%d_P%d.sf",
                  outputDir, level, dirIdx, passNum++);
-        FILE* outFile = nullptr;
-        bool  ok      = true;
+        FILE* outFile    = nullptr;
+        bool  ok         = true;
+        bool  wasShutdown = false;
         if (fopen_s(&outFile, outPath, "wb") != 0 || !outFile) {
             int e = errno; char eb[64]; strerror_s(eb, sizeof(eb), e);
             Error(FATAL_FILE_OPEN, "MergePhase P1: cannot open output: %s (errno=%d: %s)",
@@ -549,7 +566,12 @@ static bool RunPreMergeDir(
         };
 
         // --- Heap-merge loop ---
+        uint64_t p1LoopCount = 0;
         while (ok && !heap.empty()) {
+            // Check for graceful shutdown every ~1M iterations.
+            if ((++p1LoopCount & 0xFFFFF) == 0 && shutdown && shutdown->load()) {
+                ok = false; wasShutdown = true; break;
+            }
             int minIdx = heap[0];
             PMHeapPop(heap, srcs, keySize);
 
@@ -599,10 +621,12 @@ static bool RunPreMergeDir(
 
         if (!ok) {
             remove(outPath);
-            char eb[64]; strerror_s(eb, sizeof(eb), lastErrno);
-            Error(FATAL_FILE_OPEN, "MergePhase P1: write failed: %s (errno=%d: %s)",
-                  outPath, lastErrno, eb);
-            ErrorPrint(stderr);
+            if (!wasShutdown) {
+                char eb[64]; strerror_s(eb, sizeof(eb), lastErrno);
+                Error(FATAL_FILE_OPEN, "MergePhase P1: write failed: %s (errno=%d: %s)",
+                      outPath, lastErrno, eb);
+                ErrorPrint(stderr);
+            }
             return false;
         }
 
@@ -632,19 +656,20 @@ static bool RunPreMergeDir(
 // MergePhaseRun — two-phase orchestration
 // ---------------------------------------------------------------------------
 bool MergePhaseRun(
-    const OLEFileRegistry* srcReg,
-    OLEFileRegistry*       dstReg,
-    const char* const*     outputDirs,
-    int                    numOutputDirs,
-    int                    level,
-    uint32_t               recordSize,
-    uint32_t               keySize,
-    size_t                 mergeBufBytesPerThread,
-    ThreadPool*            pool,
-    OLEStatusBlock*        statusBlock,
-    const char*            nasRunDir,
-    int64_t*               phase1NsOut,
-    int64_t*               phase2NsOut)
+    const OLEFileRegistry*   srcReg,
+    OLEFileRegistry*         dstReg,
+    const char* const*       outputDirs,
+    int                      numOutputDirs,
+    int                      level,
+    uint32_t                 recordSize,
+    uint32_t                 keySize,
+    size_t                   mergeBufBytesPerThread,
+    ThreadPool*              pool,
+    OLEStatusBlock*          statusBlock,
+    const char*              nasRunDir,
+    int64_t*                 phase1NsOut,
+    int64_t*                 phase2NsOut,
+    const std::atomic<bool>* shutdown)
 {
     if (srcReg->files.empty()) return true;
     if (numOutputDirs < 1)     return false;
@@ -717,10 +742,10 @@ bool MergePhaseRun(
         OLEFileDesc*                   odesc   = &intermediates[ii];
 
         auto task = [prom, ii, dFiles, dIdx, dir, level, recordSize, keySize,
-                     budgetPerDir, &sem, &ds1, odesc, statusBlock]() mutable {
+                     budgetPerDir, &sem, &ds1, odesc, statusBlock, shutdown]() mutable {
             bool ok = RunPreMergeDir(ii, std::move(dFiles), std::move(dIdx),
                                      dir, level, recordSize, keySize,
-                                     budgetPerDir, sem, &ds1, odesc, statusBlock);
+                                     budgetPerDir, sem, &ds1, odesc, statusBlock, shutdown);
             prom->set_value(ok);
         };
 
@@ -736,6 +761,7 @@ bool MergePhaseRun(
         *phase1NsOut = std::chrono::duration_cast<std::chrono::nanoseconds>(tPhase2Start - tPhase1Start).count();
 
     if (!allOk) return false;
+    if (shutdown && shutdown->load()) return false;
 
     // -----------------------------------------------------------------------
     // Phase 2: N-way merge of per-directory intermediates → final output.
@@ -780,9 +806,10 @@ bool MergePhaseRun(
         const char*          dir = useNas ? nasRunDir : outputDirs[i];
 
         auto task = [prom, i, lo, hi, dir, level, recordSize, keySize, p2BufBytes,
-                     &intermFiles, dstReg, &ds2]() {
+                     &intermFiles, dstReg, &ds2, shutdown]() {
             bool ok = RunMergePartition(i, intermFiles, lo, hi, dir, level,
-                                        recordSize, keySize, p2BufBytes, dstReg, &ds2);
+                                        recordSize, keySize, p2BufBytes, dstReg, &ds2,
+                                        shutdown);
             prom->set_value(ok);
         };
 
