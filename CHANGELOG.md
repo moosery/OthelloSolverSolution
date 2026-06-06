@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.7] - 2026-06-06
+
+### Added
+- **`OthelloLevelEnumerator` / `OLEMain`** — resume-from-interrupted-solve: on `--restart`, before running `PipelineRun` for a level, OLE now scans the Fast dirs for existing `ole_solve_L{N}_*.sf` files; if found, the solve phase is skipped entirely and the existing files are loaded into `solveReg`; they are then flushed sequentially to the Moderate tier (one Fast dir at a time using `FlushNvmeDir`) and the merge runs as normal; this recovers a completed-but-unmerged solve without re-running the GPU phase (saving ~45 hours at level 17); the g_shutdown check after solve is bypassed when `pipelineSkipped` so the merge still runs even if Ctrl+C was pressed after the solve completed
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.7
+
 ## [OLE v0.4.6] - 2026-06-06
 
 ### Fixed
