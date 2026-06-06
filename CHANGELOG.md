@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.6] - 2026-06-06
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — flush monitor launched all Fast dirs simultaneously when they all hit the free-space threshold in the same 5-second wakeup (dirs 0+1 share D:'s volume free space; dirs 2+3 share E:'s); 4 concurrent flush threads each attempted to open ~570 files = 2280 total handles against a 2048 CRT limit causing every flush to fail with `errno=24: Too many open files`; the failed flushes were immediately retried on the next wakeup creating an infinite failure loop while E: continued to fill; fix: (1) skip the entire wakeup if any dir is already flushing, (2) `break` after launching one flush per wakeup — flushes now serialize, one dir at a time, well within the 2048 handle budget
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.6
+
 ## [OLE v0.4.5] - 2026-06-03
 
 ### Fixed

@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.5"
+#define APP_VERSION "0.4.6"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1199,6 +1199,13 @@ int main(int argc, char* argv[])
                 }
                 if (monitorDone.load() || g_shutdown.load()) break;
 
+                // Only launch one flush at a time — concurrent flushes exhaust
+                // the CRT file handle pool (4 × 570 files > _setmaxstdio(2048)).
+                bool anyFlushing = false;
+                for (int fi = 0; fi < fastDirCount; fi++)
+                    if (!dirEnabled[fi].load()) { anyFlushing = true; break; }
+                if (anyFlushing) continue;
+
                 for (int fi = 0; fi < fastDirCount; fi++) {
                     if (!dirEnabled[fi].load()) continue;  // already flushing
 
@@ -1262,6 +1269,7 @@ int main(int argc, char* argv[])
                             printf("  [FlushMon] ERROR: FlushNvmeDir failed for Fast dir %d.\n", fi);
                         dirEnabled[fi].store(true);
                     });
+                    break;  // one flush per wakeup; next wakeup picks next dir if still needed
                 }
             }
         });
