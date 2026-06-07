@@ -1,5 +1,44 @@
 # Changelog
 
+## [OLE v0.4.11] - 2026-06-07
+
+### Added
+- **`OthelloLevelEnumerator` / `OLEStatus`** — five new fields in `OLEStatusBlock` for ResumeFlush progress: `resumeFlushOutputDir` (actual output path for current dir flush), `resumeFlushBytesWritten`/`resumeFlushBytesTotal` (bytes written across all merge passes), `resumeFlushPassCurrent`/`resumeFlushPassTotal` (which merge pass is active); `OLE_STATUS_VERSION` bumped 8→9
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeFilesOnePass` now accepts an optional `OLEStatusBlock*`; on every output buffer flush it atomically increments `resumeFlushBytesWritten` by the bytes just written, providing live write-progress to the status tool without added polling overhead
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeFilesToOne` accepts an optional `OLEStatusBlock*`; sets `resumeFlushPassTotal` (1 for single-pass, 2 for multi-pass) and advances `resumeFlushPassCurrent` from 1→2 when the final merge of temp files begins
+- **`OthelloLevelEnumerator` / `NVMeFlush`** — `FlushNvmeDir` accepts an optional `OLEStatusBlock*`; before calling `MergeFilesToOne` it sets `resumeFlushBytesTotal` (input records × recordSize × numPasses) and zeros `resumeFlushBytesWritten` so the progress counter starts clean for each dir flush
+- **`OthelloLevelEnumerator` / `OLEMain`** — ResumeFlush now writes `resumeFlushOutputDir` to the status block when it selects the output dir (so the status tool shows the actual path, not a hardcoded drive letter); passes `g_status` to `FlushNvmeDir`
+- **`OthelloLevelEnumeratorStatus` / `OLEStatusQuery`** — ResumeFlush display now shows the actual output path ("-> D:\OLEData\dir.0000000001\") instead of hardcoded "Moderate drive (F:)"; adds a "Writing: X GB / ~Y GB (Z%) -- pass N of M -- ~ETA remaining" line driven by the new status fields; removes hardcoded "(D:, E:)" / "(F:)" drive letters from prose
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.11
+
+## [OLE v0.4.10] - 2026-06-07
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeRunFilesToNAS` wrote K partition temp files to the Fast dirs (D: and E:) then copied them to NAS via `CopyFileRaw`; at level 17 the Fast dirs lacked sufficient free space: with source run files also residing on the Fast dirs, the simultaneous peak requirement (source file + two partition temps per drive) exceeded available space, causing `MergeToPartitions` to fail mid-pass with a disk-full write error after ~9–10 hours; the two-step approach was also slower overall (doubles the I/O: Fast write + NAS copy) because the merge is bounded by HDD read speed (~100 MB/s), which matches NAS write bandwidth; fix: pass `nasOutputDir` directly to `MergeToPartitions` so partition files are written to their final NAS paths in one pass, eliminating the `CopyFileRaw` step entirely; NAS has ample free space and the per-stream write rate equals the HDD read rate, so no performance penalty
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.10
+
+## [OLE v0.4.9] - 2026-06-07
+
+### Added
+- **`OthelloLevelEnumerator` / `OLEMain`** — `--restart` ResumeFlush now picks the output dir with most free space across all eligible dirs (Moderate dirs + already-flushed Fast dirs `di < fi`) instead of always writing to Moderate; allows Dir 3's run file to overflow to D: (~3.4 TB free) when F: (1.1 TB free) cannot fit it
+- **`OthelloLevelEnumerator` / `OLEMain`** — run file scan during restart detection extended to all dirs (Fast + Moderate); catches run files that landed on Fast dirs from a prior interrupted restart
+- **`OthelloLevelEnumerator` / `OLEMain`** — flush monitor now picks best output dir across all local drives (Moderate first; switches to a Fast dir only if it has >2× Moderate free space); NAS fallback condition changed from "Moderate near full" to "all local drives near full"
+- **`OthelloLevelEnumerator` / `OLEMain`** — background run-file migration: flush monitor checks every 5 s for run files stranded on Fast dirs with <800 GiB free; if Moderate has `fileSize + 100 GiB` headroom, launches a `migrationThread` calling `MigrateRunFile` to copy Fast→Moderate and update `RunFileRegistry`; one migration at a time; cancellable on shutdown (partial dest deleted, source intact)
+- **`OthelloLevelEnumerator` / `NVMeFlush`** — `RunFileRegistry::UpdatePath(oldPath, newPath)`: atomic path swap under mutex for run file migration
+- **`OthelloLevelEnumerator` / `NVMeFlush`** — `MigrateRunFile(src, destDir, runReg, shutdown)`: `CopyFileExA` with shutdown-aware progress callback, then `UpdatePath` in registry, then `DeleteFileA` source
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.9
+
+## [OLE v0.4.8] - 2026-06-07
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.8 (status tool build alignment)
+
 ## [OLE v0.4.7] - 2026-06-06
 
 ### Added

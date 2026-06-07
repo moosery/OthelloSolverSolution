@@ -856,7 +856,8 @@ static bool MergeFilesOnePass(
     size_t                          bufBytes,
     bool                            deleteSrcsOnSuccess,
     OLEFileDesc*                    outDesc,
-    const std::atomic<bool>*        shutdown)
+    const std::atomic<bool>*        shutdown,
+    OLEStatusBlock*                 statusBlock = nullptr)
 {
     memset(outDesc, 0, sizeof(*outDesc));
     strncpy_s(outDesc->path, outputPath, sizeof(outDesc->path) - 1);
@@ -921,8 +922,11 @@ static bool MergeFilesOnePass(
 
     auto flushOut = [&]() -> bool {
         if (outPos == 0) return true;
-        bool r = fwrite(outBuf.data(), 1, outPos, outFile) == outPos;
+        size_t toWrite = outPos;
+        bool r = fwrite(outBuf.data(), 1, toWrite, outFile) == toWrite;
         outPos = 0;
+        if (statusBlock && r)
+            statusBlock->resumeFlushBytesWritten += (uint64_t)toWrite;
         return r;
     };
 
@@ -991,16 +995,23 @@ bool MergeFilesToOne(
     int                             safeFileLimit,
     bool                            deleteSrcsOnSuccess,
     OLEFileDesc*                    outDesc,
-    const std::atomic<bool>*        shutdown)
+    const std::atomic<bool>*        shutdown,
+    OLEStatusBlock*                 statusBlock)
 {
     memset(outDesc, 0, sizeof(*outDesc));
     strncpy_s(outDesc->path, outputPath, sizeof(outDesc->path) - 1);
 
     if (srcPaths.empty()) return true;
 
-    if ((int)srcPaths.size() <= safeFileLimit)
+    bool multiPass = (int)srcPaths.size() > safeFileLimit;
+    if (statusBlock) {
+        statusBlock->resumeFlushPassCurrent = 1;
+        statusBlock->resumeFlushPassTotal   = multiPass ? 2 : 1;
+    }
+
+    if (!multiPass)
         return MergeFilesOnePass(srcPaths, outputPath, recordSize, keySize,
-                                 bufBytes, deleteSrcsOnSuccess, outDesc, shutdown);
+                                 bufBytes, deleteSrcsOnSuccess, outDesc, shutdown, statusBlock);
 
     // Multi-pass: merge batches → temp files in tempDir, then merge temps → output.
     int batchSize = std::max(1, safeFileLimit - 1);
@@ -1016,7 +1027,7 @@ bool MergeFilesToOne(
 
         OLEFileDesc tmpDesc = {};
         if (!MergeFilesOnePass(batch, tempPath, recordSize, keySize,
-                               bufBytes, deleteSrcsOnSuccess, &tmpDesc, shutdown)) {
+                               bufBytes, deleteSrcsOnSuccess, &tmpDesc, shutdown, statusBlock)) {
             for (const auto& tp : tempPaths) remove(tp.c_str());
             return false;
         }
@@ -1029,8 +1040,9 @@ bool MergeFilesToOne(
     if (tempPaths.empty()) return true;  // all inputs were empty
 
     // Final merge of temp files → outputPath (temps deleted after).
+    if (statusBlock) statusBlock->resumeFlushPassCurrent = 2;
     bool ok = MergeFilesOnePass(tempPaths, outputPath, recordSize, keySize,
-                                 bufBytes, true, outDesc, shutdown);
+                                 bufBytes, true, outDesc, shutdown, statusBlock);
     if (!ok)
         for (const auto& tp : tempPaths) remove(tp.c_str());
     return ok;
@@ -1258,7 +1270,7 @@ bool MergeRunFilesToNAS(
     const std::atomic<bool>* shutdown)
 {
     if (!runReg || runReg->files.empty()) return true;
-    if (numFastTempDirs < 1 || !fastTempDirs) return false;
+    if (numFastTempDirs < 1) return false;
 
     // Build flat source list.
     std::vector<const OLEFileDesc*> srcFiles;
@@ -1271,65 +1283,27 @@ bool MergeRunFilesToNAS(
     std::vector<std::vector<uint8_t>> pivots;
     ComputePivots(runReg, numParts, keySize, recordSize, pivots);
 
-    // Single-pass merge: one heap pass writes all K partition temp files
-    // simultaneously (one record read per record, routed by key range).
-    // This replaces K separate RunMergePartition calls that each re-read
-    // the full source data, reducing source reads from K×N to 1×N.
-    std::vector<OLEFileDesc> tempDescs(numParts);
+    // Write partition files directly to NAS in a single pass.
+    // Previously used fast dirs as temp space then CopyFileRaw to NAS, but fast
+    // dirs lack space when source run files also reside there.  The merge is
+    // bounded by HDD read speed (~100 MB/s), which matches NAS write bandwidth,
+    // so writing directly to NAS costs nothing and eliminates the copy step.
+    std::vector<OLEFileDesc> nasDescs(numParts);
     if (!MergeToPartitions(srcFiles, numParts, pivots,
-                           fastTempDirs, numFastTempDirs,
+                           &nasOutputDir, 1,
                            level, recordSize, keySize, bufBytes,
-                           deleteRunFiles, tempDescs.data(),
+                           deleteRunFiles, nasDescs.data(),
                            statusBlock, shutdown))
         return false;
 
-    if (shutdown && shutdown->load()) {
-        for (int k = 0; k < numParts; k++) remove(tempDescs[k].path);
-        return false;
-    }
+    // MergeToPartitions already cleaned up on shutdown; nothing more to do.
+    if (shutdown && shutdown->load()) return false;
 
-    // Launch concurrent NAS copies for non-empty partitions (mirrors old Ph2
-    // concurrent write behaviour; the NAS handles parallel streams efficiently).
-    size_t copyBuf = std::max(bufBytes / (size_t)numParts,
-                               (size_t)(256ULL * 1024 * 1024));
-    struct NasJob { std::string src; std::string dst; bool ok; };
-    std::vector<NasJob>   jobs;
-    std::vector<std::thread> copyThreads;
-
-    for (int k = 0; k < numParts; k++) {
-        if (tempDescs[k].recordCount == 0) { remove(tempDescs[k].path); continue; }
-        char nasPath[512];
-        snprintf(nasPath, sizeof(nasPath), "%sole_merge_L%02d_D%d.sf", nasOutputDir, level, k);
-        jobs.push_back({tempDescs[k].path, nasPath, true});
-    }
-
-    copyThreads.reserve(jobs.size());
-    for (auto& j : jobs) {
-        copyThreads.emplace_back([&j, copyBuf]() {
-            j.ok = CopyFileRaw(j.src.c_str(), j.dst.c_str(), copyBuf);
-        });
-    }
-    for (auto& t : copyThreads) t.join();
-
-    // Delete temp files and register NAS outputs.
-    bool allOk = true;
-    for (auto& j : jobs) {
-        remove(j.src.c_str());
-        if (!j.ok) { allOk = false; remove(j.dst.c_str()); continue; }
-        OLEFileDesc d = {};
-        strncpy_s(d.path, j.dst.c_str(), sizeof(d.path) - 1);
-        // Find matching tempDesc to copy recordCount/minKey/maxKey.
-        for (int k = 0; k < numParts; k++) {
-            if (j.src == tempDescs[k].path) {
-                d.recordCount = tempDescs[k].recordCount;
-                memcpy(d.minKey, tempDescs[k].minKey, 24);
-                memcpy(d.maxKey, tempDescs[k].maxKey, 24);
-                break;
-            }
-        }
-        FRRegister(dstReg, d);
-    }
+    // Partition files are already at their final NAS paths — register them.
+    for (int k = 0; k < numParts; k++)
+        if (nasDescs[k].recordCount > 0)
+            FRRegister(dstReg, nasDescs[k]);
 
     if (statusBlock) statusBlock->mergePartsDone = numParts;
-    return allOk;
+    return true;
 }

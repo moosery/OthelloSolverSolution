@@ -1,5 +1,6 @@
 #include "NVMeFlush.h"
 #include "MergePhase.h"
+#include "OLEStatus.h"
 #include "SortedFile.h"
 #define NOMINMAX
 #include <Utility.h>
@@ -39,6 +40,18 @@ int RunFileRegistry::Size() const
     return (int)files.size();
 }
 
+bool RunFileRegistry::UpdatePath(const char* oldPath, const char* newPath)
+{
+    std::lock_guard<std::mutex> lk(mu);
+    for (auto& rfd : files) {
+        if (strcmp(rfd.path, oldPath) == 0) {
+            strncpy_s(rfd.path, newPath, sizeof(rfd.path) - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // GetDirFreeBytes
 // ---------------------------------------------------------------------------
@@ -50,9 +63,51 @@ uint64_t GetDirFreeBytes(const char* path)
 }
 
 // ---------------------------------------------------------------------------
+// MigrateRunFile
+// ---------------------------------------------------------------------------
+struct MigrateProgressCtx { const std::atomic<bool>* shutdown; };
+
+static DWORD WINAPI MigrateProgressRoutine(
+    LARGE_INTEGER, LARGE_INTEGER, LARGE_INTEGER, LARGE_INTEGER,
+    DWORD, DWORD, HANDLE, HANDLE, LPVOID lpData)
+{
+    return reinterpret_cast<MigrateProgressCtx*>(lpData)->shutdown->load()
+           ? PROGRESS_CANCEL : PROGRESS_CONTINUE;
+}
+
+bool MigrateRunFile(const char* srcPath, const char* destDir,
+                    RunFileRegistry* runReg, const std::atomic<bool>* shutdown)
+{
+    const char* fname = strrchr(srcPath, '\\');
+    if (!fname) return false;
+    fname++;  // skip the backslash
+
+    char destPath[512];
+    snprintf(destPath, sizeof(destPath), "%s%s", destDir, fname);
+
+    MigrateProgressCtx ctx{ shutdown };
+    BOOL cancelled = FALSE;
+    if (!CopyFileExA(srcPath, destPath, MigrateProgressRoutine, &ctx, &cancelled, 0)) {
+        DeleteFileA(destPath);  // remove partial copy
+        return false;
+    }
+
+    runReg->UpdatePath(srcPath, destPath);
+    DeleteFileA(srcPath);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // FlushNvmeDir
 // ---------------------------------------------------------------------------
 static std::atomic<int> s_flushSeq{0};
+
+void SetFlushSeqMin(int minSeq)
+{
+    int cur = s_flushSeq.load();
+    while (cur < minSeq)
+        if (s_flushSeq.compare_exchange_weak(cur, minSeq)) break;
+}
 
 bool FlushNvmeDir(
     int                      dirIdx,
@@ -62,7 +117,8 @@ bool FlushNvmeDir(
     int                      level,
     size_t                   bufBytes,
     int                      safeFileLimit,
-    const std::atomic<bool>* shutdown)
+    const std::atomic<bool>* shutdown,
+    OLEStatusBlock*          statusBlock)
 {
     // --- Snapshot solver files belonging to this dir ---
     std::vector<OLEFileDesc> snapshot;
@@ -96,13 +152,24 @@ bool FlushNvmeDir(
     snprintf(runPath, sizeof(runPath), "%srun_L%02d_%06d.sf",
              outputDir, level, s_flushSeq.fetch_add(1));
 
+    // --- Set bytes-progress in status block before the merge ---
+    if (statusBlock) {
+        uint64_t totalInputRecords = 0;
+        for (const auto& fd : snapshot) totalInputRecords += fd.recordCount;
+        int numPasses = ((int)srcPaths.size() <= safeFileLimit) ? 1 : 2;
+        statusBlock->resumeFlushBytesWritten = 0;
+        statusBlock->resumeFlushBytesTotal   = totalInputRecords * recordSize * (uint64_t)numPasses;
+        statusBlock->resumeFlushPassCurrent  = 1;
+        statusBlock->resumeFlushPassTotal    = numPasses;
+    }
+
     // --- Merge all solver files → one run file on outputDir ---
     // MergeFilesToOne uses outputDir as the tempDir for multi-pass intermediates.
     OLEFileDesc outDesc = {};
     if (!MergeFilesToOne(srcPaths, runPath, outputDir,
                          recordSize, keySize, bufBytes,
                          safeFileLimit, /*deleteSrcs=*/true,
-                         &outDesc, shutdown))
+                         &outDesc, shutdown, statusBlock))
         return false;
 
     // --- Remove flushed solver files from solverReg ---

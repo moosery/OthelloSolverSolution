@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.7"
+#define APP_VERSION "0.4.11"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -856,6 +856,19 @@ int main(int argc, char* argv[])
         g_status->phase        = config.restart ? OLE_PHASE_IDLE : OLE_PHASE_BENCHMARK;
         g_status->phaseStartMs = GetTickCount64();
         g_status->lastLevel    = -1;
+        g_status->flushMonActive = 0;
+        g_status->flushMonDir    = -1;
+        // Drive layout — used by status tool for live drive inspection.
+        strncpy_s((char*)g_status->nasRunDir, sizeof(g_status->nasRunDir),
+                  config.nasRunDir, _TRUNCATE);
+        g_status->numFastDirs = fastDirCount;
+        g_status->numModDirs  = moderateDirCount;
+        for (int i = 0; i < fastDirCount && i < OLE_STATUS_MAX_DIRS; i++)
+            strncpy_s((char*)g_status->fastDirPaths[i], sizeof(g_status->fastDirPaths[i]),
+                      fastDirPaths[i], _TRUNCATE);
+        for (int i = 0; i < moderateDirCount && i < OLE_STATUS_MAX_DIRS; i++)
+            strncpy_s((char*)g_status->modDirPaths[i], sizeof(g_status->modDirPaths[i]),
+                      moderateDirPaths[i], _TRUNCATE);
     }
 
     // ---- Print startup banner ----
@@ -1179,11 +1192,12 @@ int main(int argc, char* argv[])
         OLEPipelineStats stats    = {};
         RunFileRegistry  runReg   = {};   // accumulates run files from NVMe flushes this level
 
-        // ---- Resume detection: on --restart, check for solver files from an interrupted run ----
+        // ---- Resume detection: on --restart, check for solver/run files from an interrupted run ----
         // A fresh start always cleans up dirs, so existing files must be from the current run.
-        // If found, skip PipelineRun and flush directly to Moderate tier before merging.
+        // If found, skip PipelineRun and flush/merge directly.
         bool pipelineSkipped = false;
         if (config.restart) {
+            // Scan Fast dirs for solver files from an interrupted solve.
             for (int fi = 0; fi < fastDirCount; fi++) {
                 char pat[512];
                 snprintf(pat, sizeof(pat), "%sole_solve_L%02d_*.sf", fastDirPaths[fi], level);
@@ -1211,12 +1225,60 @@ int main(int argc, char* argv[])
                 } while (FindNextFileA(hFind, &wfd));
                 FindClose(hFind);
             }
-            if (!solveReg.files.empty()) {
+
+            // Scan all dirs (Moderate + Fast) for run files from a partially completed restart
+            // flush.  Fast dirs may hold overflow run files when Moderate storage was full.
+            int maxRunSeq = -1;
+            auto scanDirForRunFiles = [&](const char* dirPath) {
+                char pat[512];
+                snprintf(pat, sizeof(pat), "%srun_L%02d_*.sf", dirPath, level);
+                WIN32_FIND_DATAA wfd;
+                HANDLE hFind = FindFirstFileA(pat, &wfd);
+                if (hFind == INVALID_HANDLE_VALUE) return;
+                do {
+                    if (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    char fullPath[512];
+                    snprintf(fullPath, sizeof(fullPath), "%s%s", dirPath, wfd.cFileName);
+                    FILE* fh = nullptr;
+                    if (fopen_s(&fh, fullPath, "rb") == 0 && fh) {
+                        SortedFileHeader hdr = {};
+                        if (fread(&hdr, sizeof(hdr), 1, fh) == 1 && hdr.recordCount > 0) {
+                            RunFileDesc rfd = {};
+                            strncpy_s(rfd.path, fullPath, sizeof(rfd.path) - 1);
+                            rfd.recordCount = hdr.recordCount;
+                            memcpy(rfd.minKey, hdr.minKey, 24);
+                            memcpy(rfd.maxKey, hdr.maxKey, 24);
+                            runReg.Add(rfd);
+                            stats.uniqueBoards += hdr.recordCount;
+                            int parsedSeq = -1;
+                            if (sscanf_s(wfd.cFileName, "run_L%*d_%d", &parsedSeq) == 1)
+                                if (parsedSeq > maxRunSeq) maxRunSeq = parsedSeq;
+                        }
+                        fclose(fh);
+                    }
+                } while (FindNextFileA(hFind, &wfd));
+                FindClose(hFind);
+            };
+            for (int mi = 0; mi < moderateDirCount; mi++) scanDirForRunFiles(moderateDirPaths[mi]);
+            for (int fi = 0; fi < fastDirCount; fi++)     scanDirForRunFiles(fastDirPaths[fi]);
+
+            if (!solveReg.files.empty() || runReg.Size() > 0) {
                 pipelineSkipped = true;
                 stats.filesWritten = (uint64_t)solveReg.files.size();
                 for (const auto& fd : solveReg.files) stats.uniqueBoards += fd.recordCount;
-                LogPrintf("  Level %d: found %llu solver files from interrupted run — skipping solve, flushing to Moderate tier.\n",
-                          level, stats.filesWritten);
+                // Advance the flush sequence counter past any recovered run files so
+                // FlushNvmeDir does not overwrite them when naming new run files.
+                SetFlushSeqMin(maxRunSeq + 1);
+                int runCount = runReg.Size();
+                if (runCount > 0 && !solveReg.files.empty())
+                    LogPrintf("  Level %d: found %llu solver files + %d run files from interrupted restart -> resuming flush.\n",
+                              level, stats.filesWritten, runCount);
+                else if (runCount > 0)
+                    LogPrintf("  Level %d: found %d run files from interrupted restart -> skipping flush, merging directly.\n",
+                              level, runCount);
+                else
+                    LogPrintf("  Level %d: found %llu solver files from interrupted run -> skipping solve, flushing to Moderate tier.\n",
+                              level, stats.filesWritten);
             }
         }
 
@@ -1232,6 +1294,8 @@ int main(int argc, char* argv[])
         static constexpr uint64_t kFastFreeThresh     = 250ULL * 1024 * 1024 * 1024;  // 250 GB
         static constexpr uint64_t kModerateFreeThresh = 250ULL * 1024 * 1024 * 1024;  // 250 GB
         std::atomic<int> nasInterimSeq{0};
+        std::thread migrationThread;
+        std::atomic<bool> migrationActive{false};
 
         std::thread monitorThread([&]() {
             while (!monitorDone.load() && !g_shutdown.load()) {
@@ -1242,14 +1306,56 @@ int main(int argc, char* argv[])
                 }
                 if (monitorDone.load() || g_shutdown.load()) break;
 
-                // Only launch one flush at a time — concurrent flushes exhaust
-                // the CRT file handle pool (4 × 570 files > _setmaxstdio(2048)).
                 bool anyFlushing = false;
                 for (int fi = 0; fi < fastDirCount; fi++)
                     if (!dirEnabled[fi].load()) { anyFlushing = true; break; }
-                if (anyFlushing) continue;
 
-                for (int fi = 0; fi < fastDirCount; fi++) {
+                // --- Run file migration: move run files off Fast dirs to keep NVMe clear ---
+                // Triggered when a Fast dir hosts a run file AND its free space drops
+                // below kMigrateThresh, and a Moderate dir can receive the file.
+                // Runs concurrently with solver output; one migration at a time.
+                if (!migrationActive.load()) {
+                    static constexpr uint64_t kMigrateThresh   = 800ULL * 1024 * 1024 * 1024;
+                    static constexpr uint64_t kMigrateHeadroom = 100ULL * 1024 * 1024 * 1024;
+                    for (const auto& rfd : runReg.Snapshot()) {
+                        int strandedDi = -1;
+                        for (int di = 0; di < fastDirCount; di++) {
+                            if (strncmp(rfd.path, fastDirPaths[di], strlen(fastDirPaths[di])) == 0)
+                                { strandedDi = di; break; }
+                        }
+                        if (strandedDi < 0) continue;
+                        uint64_t fastFree = GetDirFreeBytes(fastDirPaths[strandedDi]);
+                        if (fastFree >= kMigrateThresh) continue;
+                        WIN32_FILE_ATTRIBUTE_DATA fa = {};
+                        uint64_t fileSize = GetFileAttributesExA(rfd.path, GetFileExInfoStandard, &fa)
+                                            ? (((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) : 0;
+                        const char* migDest = nullptr; uint64_t migDestFree = 0;
+                        for (int mi = 0; mi < moderateDirCount; mi++) {
+                            uint64_t mf = GetDirFreeBytes(moderateDirPaths[mi]);
+                            if (mf > migDestFree) { migDestFree = mf; migDest = moderateDirPaths[mi]; }
+                        }
+                        if (!migDest || migDestFree < fileSize + kMigrateHeadroom) continue;
+                        migrationActive.store(true);
+                        if (migrationThread.joinable()) migrationThread.join();
+                        std::string captSrc(rfd.path);
+                        const char* captDest = migDest;
+                        LogPrintf("  [FlushMon] Migrating run file Fast->Moderate"
+                                  " (fast dir %d, %.0f GB free): %s -> %s\n",
+                                  strandedDi, (double)fastFree / (1024.0*1024*1024),
+                                  captSrc.c_str(), captDest);
+                        migrationThread = std::thread([captSrc, captDest, &runReg, &migrationActive]() {
+                            bool ok = MigrateRunFile(captSrc.c_str(), captDest, &runReg, &g_shutdown);
+                            LogPrintf(ok ? "  [FlushMon] Migration complete: %s\n"
+                                        : "  [FlushMon] WARNING: migration failed: %s\n",
+                                      captSrc.c_str());
+                            migrationActive.store(false);
+                        });
+                        break;
+                    }
+                }
+
+                // --- Solver flush: only one at a time (file handle limit) ---
+                if (!anyFlushing) for (int fi = 0; fi < fastDirCount; fi++) {
                     if (!dirEnabled[fi].load()) continue;  // already flushing
 
                     // Count solver files for this Fast dir.
@@ -1263,53 +1369,64 @@ int main(int argc, char* argv[])
                     uint64_t fastFree = GetDirFreeBytes(fastDirPaths[fi]);
                     if (fileCount < safeFileLimit && fastFree >= kFastFreeThresh) continue;
 
-                    // Pick Moderate dir with most free space.
-                    const char* bestModDir = nullptr;
-                    uint64_t    bestModFree = 0;
-                    for (int mi = 0; mi < moderateDirCount; mi++) {
-                        uint64_t mf = GetDirFreeBytes(moderateDirPaths[mi]);
-                        if (mf > bestModFree) { bestModFree = mf; bestModDir = moderateDirPaths[mi]; }
-                    }
+                    // Pick best local output dir: Moderate preferred; also consider other Fast
+                    // dirs (di != fi) — they empty after each flush and can absorb run files
+                    // before we need to go to NAS.  Only switch to a Fast dir if it has at
+                    // least twice the free space of the best Moderate, to avoid flip-flopping.
+                    auto pickBestLocalDir = [&]() -> std::pair<const char*, uint64_t> {
+                        const char* best = nullptr; uint64_t bestFree = 0; bool bestIsMod = false;
+                        for (int mi = 0; mi < moderateDirCount; mi++) {
+                            uint64_t f = GetDirFreeBytes(moderateDirPaths[mi]);
+                            if (f > bestFree) { bestFree = f; best = moderateDirPaths[mi]; bestIsMod = true; }
+                        }
+                        for (int di = 0; di < fastDirCount; di++) {
+                            if (di == fi) continue;
+                            uint64_t f = GetDirFreeBytes(fastDirPaths[di]);
+                            if ((!bestIsMod && f > bestFree) || (bestIsMod && f > bestFree * 2))
+                                { bestFree = f; best = fastDirPaths[di]; bestIsMod = false; }
+                        }
+                        return { best, bestFree };
+                    };
 
-                    // If Moderate is also nearly full, flush run files → NAS first.
-                    if (bestModDir && bestModFree < kModerateFreeThresh) {
+                    auto [bestOutputDir, bestOutputFree] = pickBestLocalDir();
+
+                    // If all local storage is nearly full, flush run files → NAS first.
+                    if (!bestOutputDir || bestOutputFree < kModerateFreeThresh) {
                         char nasInt[MAX_PATH];
                         snprintf(nasInt, sizeof(nasInt), "%snvme_interim_L%02d_%06d.sf",
                                  config.nasRunDir, level, nasInterimSeq.fetch_add(1));
-                        LogPrintf("  [FlushMon] Moderate near full — flushing %d run files to NAS: %s\n",
+                        LogPrintf("  [FlushMon] All local drives near full — flushing %d run files to NAS: %s\n",
                                   runReg.Size(), nasInt);
                         if (!FlushRunFilesToNas(&runReg, nasInt, sizeof(BOARD_KEY), sizeof(BOARD_KEY),
                                                 config.mergeBufBytesPerThread, safeFileLimit,
                                                 &g_shutdown))
                             LogPrintf("  [FlushMon] WARNING: FlushRunFilesToNas failed.\n");
-                        // Re-query best Moderate dir after freeing space.
-                        bestModFree = 0; bestModDir = nullptr;
-                        for (int mi = 0; mi < moderateDirCount; mi++) {
-                            uint64_t mf = GetDirFreeBytes(moderateDirPaths[mi]);
-                            if (mf > bestModFree) { bestModFree = mf; bestModDir = moderateDirPaths[mi]; }
-                        }
+                        auto [d2, f2] = pickBestLocalDir();
+                        bestOutputDir = d2; bestOutputFree = f2;
                     }
 
-                    if (!bestModDir) {
-                        LogPrintf("  [FlushMon] WARNING: no Moderate dir available for Fast dir %d.\n", fi);
+                    if (!bestOutputDir) {
+                        LogPrintf("  [FlushMon] WARNING: no output dir available for Fast dir %d.\n", fi);
                         continue;
                     }
 
                     // Disable this dir in the pipeline and launch flush thread.
                     dirEnabled[fi].store(false);
+                    if (g_status) { g_status->flushMonActive = 1; g_status->flushMonDir = fi; }
                     LogPrintf("  [FlushMon] Flushing Fast dir %d (%s, files=%d, free=%.0f GB) -> %s\n",
                               fi, fastDirPaths[fi], fileCount,
-                              (double)fastFree / (1024.0*1024*1024), bestModDir);
+                              (double)fastFree / (1024.0*1024*1024), bestOutputDir);
 
                     if (flushThreads[fi].joinable()) flushThreads[fi].join();
-                    const char* capturedModDir = bestModDir;
-                    flushThreads[fi] = std::thread([fi, capturedModDir, level, &solveReg, &runReg,
+                    const char* capturedOutputDir = bestOutputDir;
+                    flushThreads[fi] = std::thread([fi, capturedOutputDir, level, &solveReg, &runReg,
                                                     &dirEnabled, &config, safeFileLimit]() {
-                        bool ok = FlushNvmeDir(fi, &solveReg, &runReg, capturedModDir, level,
+                        bool ok = FlushNvmeDir(fi, &solveReg, &runReg, capturedOutputDir, level,
                                                config.mergeBufBytesPerThread, safeFileLimit,
                                                &g_shutdown);
                         if (!ok)
                             printf("  [FlushMon] ERROR: FlushNvmeDir failed for Fast dir %d.\n", fi);
+                        if (g_status) { g_status->flushMonActive = 0; g_status->flushMonDir = -1; }
                         dirEnabled[fi].store(true);
                     });
                     break;  // one flush per wakeup; next wakeup picks next dir if still needed
@@ -1325,6 +1442,7 @@ int main(int argc, char* argv[])
         monitorThread.join();
         for (int fi = 0; fi < fastDirCount; fi++)
             if (flushThreads[fi].joinable()) flushThreads[fi].join();
+        if (migrationThread.joinable()) migrationThread.join();
         // Re-enable all dirs for the next level.
         for (int fi = 0; fi < fastDirCount; fi++) dirEnabled[fi].store(true);
 
@@ -1340,27 +1458,67 @@ int main(int argc, char* argv[])
         // ---- Resume flush: solver files are on nearly-full Fast drives.
         // Flush each Fast dir sequentially to Moderate tier before running merge.
         if (pipelineSkipped && !g_shutdown.load()) {
+            // Pre-count files per dir so we can report totals in the status block.
+            int resumeFilesByDir[OLE_MAX_SOLVE_DIRS] = {};
+            {
+                std::lock_guard<std::mutex> lk(solveReg.mu);
+                for (const auto& fd : solveReg.files)
+                    if (fd.drive >= 0 && fd.drive < fastDirCount)
+                        resumeFilesByDir[fd.drive]++;
+            }
+            uint64_t resumeFilesTotal = 0;
+            int resumeDirsWithFiles = 0;
+            for (int fi = 0; fi < fastDirCount; fi++) {
+                resumeFilesTotal += resumeFilesByDir[fi];
+                if (resumeFilesByDir[fi] > 0) resumeDirsWithFiles++;
+            }
+            if (g_status) {
+                g_status->phase                   = OLE_PHASE_RESUME_FLUSH;
+                g_status->phaseStartMs            = GetTickCount64();
+                g_status->resumeFlushDirsTotal    = resumeDirsWithFiles;
+                g_status->resumeFlushDirsDone     = 0;
+                g_status->resumeFlushDirCurrent   = -1;
+                g_status->resumeFlushFilesTotal   = resumeFilesTotal;
+                g_status->resumeFlushFilesDone    = 0;
+                g_status->resumeFlushFilesCurrent = 0;
+            }
+
             for (int fi = 0; fi < fastDirCount && !g_shutdown.load(); fi++) {
-                int fileCount = 0;
-                {
-                    std::lock_guard<std::mutex> lk(solveReg.mu);
-                    for (const auto& fd : solveReg.files)
-                        if (fd.drive == fi) fileCount++;
-                }
+                int fileCount = resumeFilesByDir[fi];
                 if (fileCount == 0) continue;
-                // Pick best Moderate dir (most free space).
-                const char* modDir = nullptr;
-                uint64_t    modFree = 0;
+                // Pick output dir: best Moderate dir first; also consider already-flushed Fast
+                // dirs (di < fi) whose solver files have been deleted and space is reclaimed.
+                const char* outputDir = nullptr;
+                uint64_t    bestFree  = 0;
                 for (int mi = 0; mi < moderateDirCount; mi++) {
                     uint64_t mf = GetDirFreeBytes(moderateDirPaths[mi]);
-                    if (mf > modFree) { modFree = mf; modDir = moderateDirPaths[mi]; }
+                    if (mf > bestFree) { bestFree = mf; outputDir = moderateDirPaths[mi]; }
                 }
-                if (!modDir) { LogPrintf("  [ResumeFlush] WARNING: no Moderate dir for Fast dir %d\n", fi); continue; }
-                LogPrintf("  [ResumeFlush] Flushing Fast dir %d (%d files, %.0f GB free on Mod) -> %s\n",
-                          fi, fileCount, (double)modFree / (1024.0*1024*1024), modDir);
-                if (!FlushNvmeDir(fi, &solveReg, &runReg, modDir, level,
-                                  config.mergeBufBytesPerThread, safeFileLimit, &g_shutdown))
+                for (int di = 0; di < fi; di++) {
+                    uint64_t df = GetDirFreeBytes(fastDirPaths[di]);
+                    if (df > bestFree) { bestFree = df; outputDir = fastDirPaths[di]; }
+                }
+                if (!outputDir) { LogPrintf("  [ResumeFlush] WARNING: no dir found for Fast dir %d\n", fi); continue; }
+                if (g_status) {
+                    g_status->resumeFlushDirCurrent   = fi;
+                    g_status->resumeFlushFilesCurrent = (uint64_t)fileCount;
+                    strncpy_s((char*)g_status->resumeFlushOutputDir,
+                              sizeof(g_status->resumeFlushOutputDir),
+                              outputDir, _TRUNCATE);
+                    g_status->resumeFlushBytesWritten = 0;
+                    g_status->resumeFlushBytesTotal   = 0;
+                    g_status->resumeFlushPassCurrent  = 0;
+                    g_status->resumeFlushPassTotal    = 0;
+                }
+                LogPrintf("  [ResumeFlush] Flushing Fast dir %d (%d files, %.0f GB free) -> %s\n",
+                          fi, fileCount, (double)bestFree / (1024.0*1024*1024), outputDir);
+                if (!FlushNvmeDir(fi, &solveReg, &runReg, outputDir, level,
+                                  config.mergeBufBytesPerThread, safeFileLimit, &g_shutdown, g_status))
                     LogPrintf("  [ResumeFlush] WARNING: FlushNvmeDir failed for dir %d.\n", fi);
+                if (g_status) {
+                    g_status->resumeFlushDirsDone++;
+                    g_status->resumeFlushFilesDone += (uint64_t)fileCount;
+                }
             }
         }
 

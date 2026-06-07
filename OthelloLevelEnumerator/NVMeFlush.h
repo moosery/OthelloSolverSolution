@@ -5,6 +5,8 @@
 #include <vector>
 #include <mutex>
 
+struct OLEStatusBlock;   // defined in OLEStatus.h
+
 // ---------------------------------------------------------------------------
 // RunFileDesc / RunFileRegistry
 //
@@ -27,6 +29,7 @@ struct RunFileRegistry {
     std::vector<RunFileDesc> Snapshot() const;
     void                     Clear();
     int                      Size() const;
+    bool                     UpdatePath(const char* oldPath, const char* newPath);
 };
 
 // ---------------------------------------------------------------------------
@@ -59,7 +62,31 @@ bool FlushNvmeDir(
     int                      level,
     size_t                   bufBytes,
     int                      safeFileLimit,
-    const std::atomic<bool>* shutdown);
+    const std::atomic<bool>* shutdown,
+    OLEStatusBlock*          statusBlock = nullptr);
+
+// ---------------------------------------------------------------------------
+// SetFlushSeqMin
+//
+// Advances the global flush sequence counter to at least minSeq.
+// Call after recovering existing run files on restart so that FlushNvmeDir
+// does not overwrite them (it names new files using this counter).
+// ---------------------------------------------------------------------------
+void SetFlushSeqMin(int minSeq);
+
+// ---------------------------------------------------------------------------
+// MigrateRunFile
+//
+// Copies a single run file from srcPath to destDir (cross-drive), updates its
+// path in *runReg, then deletes the source.  The copy is cancellable via
+// *shutdown.  Call from a background thread; does not modify solverReg.
+//
+// Returns true on success.  On failure or cancellation the source is left
+// intact and the partial destination is deleted.
+// ---------------------------------------------------------------------------
+bool MigrateRunFile(const char* srcPath, const char* destDir,
+                    RunFileRegistry* runReg,
+                    const std::atomic<bool>* shutdown);
 
 // ---------------------------------------------------------------------------
 // FlushRunFilesToNas

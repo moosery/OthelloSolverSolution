@@ -14,17 +14,19 @@
 // slightly stale values between updates — acceptable for a status display.
 // ---------------------------------------------------------------------------
 
-#define OLE_STATUS_VERSION   6
+#define OLE_STATUS_VERSION   9
 #define OLE_STATUS_MAGIC     0x4F4C4553u   // 'OLES'
 #define OLE_STATUS_SHM_NAME  L"Local\\OthelloLevelEnumeratorStatus"
 #define OLE_STATUS_MAX_PARTS 5
+#define OLE_STATUS_MAX_DIRS  8
 
 enum OLEPhase : uint32_t {
-    OLE_PHASE_IDLE      = 0,
-    OLE_PHASE_BENCHMARK = 1,
-    OLE_PHASE_SOLVE     = 2,
-    OLE_PHASE_MERGE     = 3,
-    OLE_PHASE_DONE      = 4,
+    OLE_PHASE_IDLE         = 0,
+    OLE_PHASE_BENCHMARK    = 1,
+    OLE_PHASE_SOLVE        = 2,
+    OLE_PHASE_MERGE        = 3,
+    OLE_PHASE_DONE         = 4,
+    OLE_PHASE_RESUME_FLUSH = 5,  // recovering interrupted solve: flushing Fast dirs -> Moderate
 };
 
 struct OLEStatusBlock {
@@ -57,6 +59,30 @@ struct OLEStatusBlock {
     volatile uint64_t mergeRecordsWritten[OLE_STATUS_MAX_PARTS];    // Phase 2: per-partition record count
     volatile uint64_t mergePreDirTotal[OLE_STATUS_MAX_PARTS];       // Phase 1: source files per dir
     volatile uint64_t mergePreDirConsumed[OLE_STATUS_MAX_PARTS];    // Phase 1: files consumed per dir
+
+    // --- Resume flush phase (OLE_PHASE_RESUME_FLUSH) ---
+    volatile int32_t  resumeFlushDirsTotal;    // Fast dirs with solver files to flush
+    volatile int32_t  resumeFlushDirsDone;     // dirs fully flushed so far
+    volatile int32_t  resumeFlushDirCurrent;   // Fast dir index currently flushing (-1 = none)
+    volatile uint64_t resumeFlushFilesTotal;   // total solver files across all dirs
+    volatile uint64_t resumeFlushFilesDone;    // files from completed dirs
+    volatile uint64_t resumeFlushFilesCurrent; // file count in dir currently being flushed
+    volatile char     resumeFlushOutputDir[256];  // actual output path for current flush
+    volatile uint64_t resumeFlushBytesWritten;    // bytes written to run file so far (all passes)
+    volatile uint64_t resumeFlushBytesTotal;      // total bytes expected across all passes
+    volatile int32_t  resumeFlushPassCurrent;     // current merge pass (1-based)
+    volatile int32_t  resumeFlushPassTotal;       // total merge passes (1 or 2)
+
+    // --- Drive layout (written once at startup) ---
+    volatile char     nasRunDir[256];                              // NAS archive path
+    volatile int32_t  numFastDirs;                                 // count of Fast (NVMe) dirs
+    volatile int32_t  numModDirs;                                  // count of Moderate (HDD) dirs
+    volatile char     fastDirPaths[OLE_STATUS_MAX_DIRS][256];     // Fast dir full paths
+    volatile char     modDirPaths[OLE_STATUS_MAX_DIRS][256];      // Moderate dir full paths
+
+    // --- Flush monitor state (live during solve phase) ---
+    volatile int32_t  flushMonActive;  // non-zero while a flush thread is running
+    volatile int32_t  flushMonDir;     // fast dir index being flushed (-1 = none)
 
     // --- Last completed level (written after each level finishes) ---
     volatile int32_t  lastLevel;

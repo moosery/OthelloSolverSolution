@@ -68,7 +68,8 @@ bool MergeFilesToOne(
     int                              safeFileLimit,
     bool                             deleteSrcsOnSuccess,
     OLEFileDesc*                     outDesc,
-    const std::atomic<bool>*         shutdown = nullptr);
+    const std::atomic<bool>*         shutdown    = nullptr,
+    OLEStatusBlock*                  statusBlock = nullptr);
 
 bool MergePhaseRun(
     const OLEFileRegistry* srcReg,
