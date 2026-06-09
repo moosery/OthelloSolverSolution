@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.14] - 2026-06-09
+
+### Fixed
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — if any board generated more children than `maxMovesPerBoard` allows, the excess results were silently dropped without any error; this bug existed since OLE v0.1 and was never ported from the equivalent overflow detection in `OthelloSolverCommandLine`; fixed by adding a `Fatal` call after each batch if `batchStats.maxMoves >= maxMovesPerBoard`, printing the actual count and the configured limit so the limit can be raised before boards are lost
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.14
+
 ## [OLE v0.4.13] - 2026-06-09
 
 ### Fixed
