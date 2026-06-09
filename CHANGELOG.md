@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.17] - 2026-06-09
+
+### Fixed
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — overflow check used `>=` instead of `>`; a board generating exactly `maxMovesPerBoard` children fills all slots correctly (no boards dropped) but the fatal fired anyway; corrected to `>` so the fatal only triggers when a child is actually lost
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.17
+
 ## [OLE v0.4.16] - 2026-06-09
 
 ### Changed

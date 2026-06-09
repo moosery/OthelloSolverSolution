@@ -252,7 +252,7 @@ bool PipelineRun(
             stats->endBoards         += batchStats.endBoards;
             if (batchStats.maxMoves > stats->maxMovesAnyBoard)
                 stats->maxMovesAnyBoard = batchStats.maxMoves;
-            if (batchStats.maxMoves >= (uint32_t)maxMovesPerBoard)
+            if (batchStats.maxMoves > (uint32_t)maxMovesPerBoard)
                 Fatal(FATAL_MAX_MOVES_EXCEEDED, "Board generated %u children but maxMovesPerBoard=%d -- "
                       "increase the limit for board size %d or boards will be silently dropped.",
                       batchStats.maxMoves, maxMovesPerBoard, cfg->boardSize);
