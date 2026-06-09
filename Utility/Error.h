@@ -44,6 +44,8 @@ constexpr auto FATAL_SEEK_FAILED = RC_FATAL_BASE + 26;
 constexpr auto FATAL_READ_FAILED = RC_FATAL_BASE + 27;
 constexpr auto FATAL_FI_FLUSH_FAILED = RC_FATAL_BASE + 28;
 constexpr auto FATAL_TS_UNBALANCED_TREE = RC_FATAL_BASE + 29;
+constexpr auto FATAL_MAX_MOVES_EXCEEDED = RC_FATAL_BASE + 30;
+constexpr auto FATAL_INTERNAL           = RC_FATAL_BASE + 30;
 
 /* Utility Implementation errors */
 constexpr auto  UTIL_RC_Success = RC_SUCCESS;
