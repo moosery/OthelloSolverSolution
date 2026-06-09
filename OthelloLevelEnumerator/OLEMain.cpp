@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.11"
+#define APP_VERSION "0.4.12"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -708,6 +708,137 @@ int main(int argc, char* argv[])
             config.dirs[i].readMBs     = rcd.dirReadMBs[i];
             config.dirs[i].usableBytes = rcd.dirUsableBytes[i];
         }
+
+        // ---- Verify all drives from saved config are still accessible ----
+        {
+            char checked[OLE_MAX_SOLVE_DRIVES] = {};
+            int  numChecked = 0;
+            bool anyMissing = false;
+            for (int i = 0; i < config.numDirs; i++) {
+                char dl = config.dirs[i].driveLetter;
+                bool already = false;
+                for (int j = 0; j < numChecked; j++)
+                    if (checked[j] == dl) { already = true; break; }
+                if (already) continue;
+                checked[numChecked++] = dl;
+                char root[4] = { dl, ':', '\\', '\0' };
+                ULARGE_INTEGER fa = {}, tot = {}, tf = {};
+                if (!GetDiskFreeSpaceExA(root, &fa, &tot, &tf) || tot.QuadPart == 0) {
+                    fprintf(stderr, "  ERROR: saved config drive %c: is not accessible.\n", dl);
+                    anyMissing = true;
+                }
+            }
+            if (anyMissing) {
+                fprintf(stderr, "  Cannot restart with missing drives."
+                                " Reconnect them or delete the config to start fresh.\n");
+                return 1;
+            }
+            printf("  All saved config drives accessible.\n");
+        }
+
+        // ---- Append new drives from --drives not in the saved layout ----
+        {
+            bool covered[OLE_MAX_SOLVE_DRIVES] = {};
+            for (int i = 0; i < config.numDrives; i++)
+                for (int j = 0; j < config.numDirs; j++)
+                    if (config.dirs[j].driveLetter == config.drives[i])
+                        { covered[i] = true; break; }
+
+            int numNew = 0;
+            for (int i = 0; i < config.numDrives; i++)
+                if (!covered[i]) numNew++;
+
+            if (numNew > 0) {
+                printf("  New drives in --drives (not in saved layout):");
+                for (int i = 0; i < config.numDrives; i++)
+                    if (!covered[i]) printf(" %c:", config.drives[i]);
+                printf("\n  Querying and benchmarking new drives...\n");
+
+                // Find the highest dir number already in use.
+                int nextDirNum = config.numDirs + 1;
+                for (int i = 0; i < config.numDirs; i++) {
+                    const char* p = strstr(config.dirs[i].path, "\\dir.");
+                    if (p) { int n = atoi(p + 5); if (n >= nextDirNum) nextDirNum = n + 1; }
+                }
+
+                OLEBenchCacheEntry benchCache[64] = {};
+                int numBenchCache = OLEBenchCacheRead(config.cacheDir, benchCache, 64);
+                bool benchCacheUpdated = false;
+
+                for (int i = 0; i < config.numDrives; i++) {
+                    if (covered[i]) continue;
+
+                    OLEDriveQueryResult di = OLEQueryDrive(config.drives[i]);
+                    if (!di.success) {
+                        fprintf(stderr, "  WARNING: new drive %c: not accessible — skipping.\n",
+                                config.drives[i]);
+                        continue;
+                    }
+                    OLEPrintDriveQueryResult(di);
+
+                    OLEDriveBenchResult br = {};
+                    const OLEBenchCacheEntry* cached = OLEBenchCacheLookup(
+                        benchCache, numBenchCache, config.drives[i], di.serial);
+                    if (cached) {
+                        br.success     = true;
+                        br.optimalDirs = cached->optimalDirs;
+                        br.writeMBs    = cached->writeMBs;
+                        br.readMBs     = cached->readMBs;
+                        printf("    %c:  [cached %s]  optimalDirs=%d  Write=%.0f MB/s  Read=%.0f MB/s\n",
+                               config.drives[i], cached->timestamp,
+                               cached->optimalDirs, cached->writeMBs, cached->readMBs);
+                    } else {
+                        br = OLEBenchmarkDrive(config.drives[i]);
+                        if (!br.success) {
+                            fprintf(stderr, "  WARNING: benchmark failed for %c: — skipping.\n",
+                                    config.drives[i]);
+                            continue;
+                        }
+                        bool found = false;
+                        for (int j = 0; j < numBenchCache; j++) {
+                            if (benchCache[j].driveLetter == config.drives[i] &&
+                                strcmp(benchCache[j].serial, di.serial) == 0) {
+                                benchCache[j].optimalDirs = br.optimalDirs;
+                                benchCache[j].writeMBs    = br.writeMBs;
+                                benchCache[j].readMBs     = br.readMBs;
+                                GetTimestampStr(benchCache[j].timestamp, sizeof(benchCache[j].timestamp));
+                                found = true; break;
+                            }
+                        }
+                        if (!found && numBenchCache < 64) {
+                            int j = numBenchCache++;
+                            benchCache[j].driveLetter = config.drives[i];
+                            strncpy_s(benchCache[j].serial, di.serial, _TRUNCATE);
+                            benchCache[j].optimalDirs = br.optimalDirs;
+                            benchCache[j].writeMBs    = br.writeMBs;
+                            benchCache[j].readMBs     = br.readMBs;
+                            GetTimestampStr(benchCache[j].timestamp, sizeof(benchCache[j].timestamp));
+                        }
+                        benchCacheUpdated = true;
+                    }
+
+                    OLEDriveClass dc = OLEDriveClassFromWriteMBs(br.writeMBs);
+                    int nd = br.optimalDirs;
+                    uint64_t perDirUsable = (di.usableBytes > 0 && nd > 0) ? di.usableBytes / nd : 0;
+                    for (int d = 0; d < nd && config.numDirs < OLE_MAX_SOLVE_DIRS; d++) {
+                        OLEDirDesc& dir = config.dirs[config.numDirs];
+                        snprintf(dir.path, MAX_PATH, "%c:\\%s\\dir.%010d\\",
+                                 config.drives[i], config.baseName, nextDirNum++);
+                        dir.driveLetter = config.drives[i];
+                        dir.driveClass  = dc;
+                        dir.writeMBs    = br.writeMBs;
+                        dir.readMBs     = br.readMBs;
+                        dir.usableBytes = perDirUsable;
+                        config.numDirs++;
+                    }
+                    printf("  Added %d dir(s) for %c: (%.0f MB/s -> %s)\n",
+                           nd, config.drives[i], br.writeMBs, OLEDriveClassName(dc));
+                }
+                if (benchCacheUpdated)
+                    OLEBenchCacheWrite(config.cacheDir, benchCache, numBenchCache);
+            }
+        }
+
         printf("  Resuming from level %d (last completed: %d)\n",
                config.lastCompletedLevel + 1, config.lastCompletedLevel);
     }
@@ -992,9 +1123,9 @@ int main(int argc, char* argv[])
                   config.numDirs > 0 ? config.dirs[0].path : "",
                   config.lastCompletedLevel);
         if (!FRLoad(&currentReg, mergeMeta) || currentReg.files.empty()) {
-            LogPrintf("  ERROR: restart requested but merge meta not found: %s\n", mergeMeta);
-            LogPrintf("  Cannot resume — starting fresh from level 0.\n\n");
-            config.lastCompletedLevel = -1;
+            fprintf(stderr, "  ERROR: restart requested but merge meta not found: %s\n", mergeMeta);
+            fprintf(stderr, "  Delete %s to start a fresh run.\n", config.configFilePath);
+            return 1;
         } else {
             LogPrintf("  Resuming from level %d (seed from level %d merge output).\n\n",
                       config.lastCompletedLevel + 1, config.lastCompletedLevel);

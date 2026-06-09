@@ -1,5 +1,15 @@
 # Changelog
 
+## [OLE v0.4.12] - 2026-06-09
+
+### Fixed
+- **`OthelloLevelEnumerator` / `OLEMain`** — `--restart` with a missing merge meta file silently reset `lastCompletedLevel` to -1 and fell through to a full level-0 restart, discarding all progress; fixed to exit immediately with a clear error message pointing at the config file to delete if a fresh start is truly intended
+- **`OthelloLevelEnumerator` / `OLEMain`** — `--restart` ignored any drives listed in `--drives` that were not in the saved config; new drives are now queried, benchmarked (or read from benchmark cache), and appended to the dir layout with correct drive class and dir numbering continuing from the highest existing dir number; allows adding Y: (NAS) or any other new drive to a restart without discarding the saved layout
+- **`OthelloLevelEnumerator` / `OLEMain`** — `--restart` now verifies every drive letter referenced in the saved config is accessible before proceeding; if any saved drive is missing, all missing drives are listed and OLE exits with an error rather than starting a run that will crash mid-level when it tries to access unreachable data
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.12
+
 ## [OLE v0.4.11] - 2026-06-07
 
 ### Added
