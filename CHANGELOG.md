@@ -1,5 +1,11 @@
 # Changelog
 
+## [OLE v0.4.16] - 2026-06-09
+
+### Changed
+- **`OthelloLevelEnumerator` / `GPUPipeline`** — `maxMovesPerBoard` for 6×6 lowered from 20 to 19; empirical data from a full 0–17 level run confirms the true maximum is 19 (occurring at levels 11–13 where game-tree branching peaks); from level 14 onward the limit is the number of empty squares (32 − level) which falls below 19 and keeps declining; the new overflow Fatal (v0.4.14) will catch any regression immediately
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.16
+
 ## [OLE v0.4.15] - 2026-06-09
 
 ### Changed

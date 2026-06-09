@@ -159,7 +159,7 @@ bool PipelineRun(
     if (inputReg->files.empty()) return true;
 
     int maxMovesPerBoard = (cfg->boardSize == 4) ? 6
-                        : (cfg->boardSize == 6) ? 20 : 28;
+                        : (cfg->boardSize == 6) ? 19 : 28;
 
     DevBoardConsts consts = OBCuda_GetBoardConsts();
 
