@@ -51,11 +51,15 @@ const OLEBenchCacheEntry* OLEBenchCacheLookup(const OLEBenchCacheEntry* entries,
 // ---------------------------------------------------------------------------
 
 struct OLELevelStatEntry {
-    int    boardSize;
-    int    numRotations;
-    int    level;
-    double slvGB;   // solve temp GB observed (max across runs for this level)
-    double mrgGB;   // merge output GB (canonical; converges to constant)
+    int      boardSize;
+    int      numRotations;
+    int      level;
+    double   slvGB;        // solve temp GB observed (max across runs for this level)
+    double   mrgGB;        // merge output GB (canonical; converges to constant)
+    uint64_t uniqueBoards; // unique boards produced by this level (deduped merge output)
+    uint64_t passBoards;   // boards where current player had no moves (pass-folded inline)
+    uint64_t endBoards;    // terminal boards (both players had no moves)
+    uint32_t maxMovesAny;  // max children generated for any single board this level
 };
 
 // Read all entries from level_stats.json in cacheDir.
@@ -79,7 +83,9 @@ const OLELevelStatEntry* OLELevelStatsLookup(const OLELevelStatEntry* entries,
 // Returns new numEntries.
 int OLELevelStatsUpsert(OLELevelStatEntry* entries, int numEntries, int maxEntries,
                         int boardSize, int numRotations, int level,
-                        double slvGB, double mrgGB);
+                        double slvGB, double mrgGB,
+                        uint64_t uniqueBoards, uint64_t passBoards,
+                        uint64_t endBoards, uint32_t maxMovesAny);
 
 // ---------------------------------------------------------------------------
 // Cache directory helpers

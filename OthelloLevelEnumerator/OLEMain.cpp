@@ -34,7 +34,7 @@
 #include "NVMeFlush.h"
 #include "OLEStatus.h"
 
-#define APP_VERSION "0.4.14"
+#define APP_VERSION "0.4.15"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1831,7 +1831,9 @@ int main(int argc, char* argv[])
             double totalMrgGB = (double)(rec.newBoardsNet * 24ULL) / (1024.0 * 1024 * 1024);
             numLevelStats = OLELevelStatsUpsert(levelStats, numLevelStats, 128,
                                                 config.boardSize, config.numRotations, level,
-                                                totalSlvGB, totalMrgGB);
+                                                totalSlvGB, totalMrgGB,
+                                                rec.newBoards, rec.passBoards,
+                                                rec.endBoards, rec.maxMovesAny);
             OLELevelStatsWrite(config.cacheDir, levelStats, numLevelStats);
         }
         LogPrintf("\n");

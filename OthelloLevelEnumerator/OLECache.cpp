@@ -178,6 +178,10 @@ int OLELevelStatsRead(const char* cacheDir,
         ParseInt(line, "\"level\"",        e.level);
         ParseDbl(line, "\"slvGB\"",        e.slvGB);
         ParseDbl(line, "\"mrgGB\"",        e.mrgGB);
+        ParseU64(line, "\"uniqueBoards\"", e.uniqueBoards);
+        ParseU64(line, "\"passBoards\"",   e.passBoards);
+        ParseU64(line, "\"endBoards\"",    e.endBoards);
+        { uint64_t tmp = 0; ParseU64(line, "\"maxMovesAny\"", tmp); e.maxMovesAny = (uint32_t)tmp; }
     }
 
     fclose(f);
@@ -197,9 +201,13 @@ bool OLELevelStatsWrite(const char* cacheDir,
     for (int i = 0; i < numEntries; i++) {
         const OLELevelStatEntry& e = entries[i];
         fprintf(f, "  { \"boardSize\": %d, \"numRotations\": %d, \"level\": %d,"
-                   " \"slvGB\": %.3f, \"mrgGB\": %.3f }%s\n",
+                   " \"slvGB\": %.3f, \"mrgGB\": %.3f,"
+                   " \"uniqueBoards\": %llu, \"passBoards\": %llu,"
+                   " \"endBoards\": %llu, \"maxMovesAny\": %u }%s\n",
                 e.boardSize, e.numRotations, e.level,
                 e.slvGB, e.mrgGB,
+                (unsigned long long)e.uniqueBoards, (unsigned long long)e.passBoards,
+                (unsigned long long)e.endBoards, e.maxMovesAny,
                 (i < numEntries - 1) ? "," : "");
     }
     fprintf(f, "]\n");
@@ -222,7 +230,9 @@ const OLELevelStatEntry* OLELevelStatsLookup(const OLELevelStatEntry* entries,
 
 int OLELevelStatsUpsert(OLELevelStatEntry* entries, int numEntries, int maxEntries,
                         int boardSize, int numRotations, int level,
-                        double slvGB, double mrgGB)
+                        double slvGB, double mrgGB,
+                        uint64_t uniqueBoards, uint64_t passBoards,
+                        uint64_t endBoards, uint32_t maxMovesAny)
 {
     // Find existing entry.
     for (int i = 0; i < numEntries; i++) {
@@ -230,9 +240,13 @@ int OLELevelStatsUpsert(OLELevelStatEntry* entries, int numEntries, int maxEntri
             entries[i].numRotations == numRotations &&
             entries[i].level        == level)
         {
-            // Keep max slvGB (worst-case planning), latest mrgGB (it's a constant).
+            // Keep max slvGB (worst-case planning); all others are canonical constants.
             if (slvGB > entries[i].slvGB) entries[i].slvGB = slvGB;
-            entries[i].mrgGB = mrgGB;
+            entries[i].mrgGB         = mrgGB;
+            entries[i].uniqueBoards  = uniqueBoards;
+            entries[i].passBoards    = passBoards;
+            entries[i].endBoards     = endBoards;
+            entries[i].maxMovesAny   = maxMovesAny;
             return numEntries;
         }
     }
@@ -245,6 +259,10 @@ int OLELevelStatsUpsert(OLELevelStatEntry* entries, int numEntries, int maxEntri
     e.level        = level;
     e.slvGB        = slvGB;
     e.mrgGB        = mrgGB;
+    e.uniqueBoards = uniqueBoards;
+    e.passBoards   = passBoards;
+    e.endBoards    = endBoards;
+    e.maxMovesAny  = maxMovesAny;
     return numEntries + 1;
 }
 
