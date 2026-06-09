@@ -1283,6 +1283,18 @@ bool MergeRunFilesToNAS(
     std::vector<std::vector<uint8_t>> pivots;
     ComputePivots(runReg, numParts, keySize, recordSize, pivots);
 
+    if (statusBlock) {
+        statusBlock->mergePartsTotal       = numParts;
+        statusBlock->mergePartsDone        = 0;
+        statusBlock->mergeSrcFilesTotal    = (uint64_t)srcFiles.size();
+        statusBlock->mergeSrcFilesConsumed = 0;
+        for (int i = 0; i < OLE_STATUS_MAX_PARTS; i++) {
+            statusBlock->mergeRecordsWritten[i] = 0;
+            statusBlock->mergePreDirTotal[i]    = 0;
+            statusBlock->mergePreDirConsumed[i] = 0;
+        }
+    }
+
     // Write partition files directly to NAS in a single pass.
     // Previously used fast dirs as temp space then CopyFileRaw to NAS, but fast
     // dirs lack space when source run files also reside there.  The merge is

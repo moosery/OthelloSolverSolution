@@ -1,5 +1,13 @@
 # Changelog
 
+## [OLE v0.4.13] - 2026-06-09
+
+### Fixed
+- **`OthelloLevelEnumerator` / `MergePhase`** — `MergeRunFilesToNAS` called `MergeToPartitions` (which increments `mergePartsDone` per partition) without first initializing `mergePartsTotal`, `mergePartsDone`, or `mergeRecordsWritten` in the status block; the status tool displayed "N / 0 partitions written" with 0.00 GB because `mergePartsTotal` was never set and `mergeRecordsWritten` was stale from a previous level; fixed by initializing all merge status fields in `MergeRunFilesToNAS` before calling `MergeToPartitions`, matching the pattern already used in `MergePhaseRun`
+
+### Changed
+- **`OthelloLevelEnumerator` / `OLEMain`** — version bumped to 0.4.13
+
 ## [OLE v0.4.12] - 2026-06-09
 
 ### Fixed
